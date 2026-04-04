@@ -1,0 +1,19 @@
+[gd_scene format=3 uid="uid://buosed2mdefkg"]
+
+[ext_resource type="Script" uid="uid://d2j1d1ki6eje0" path="res://src/core/Main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://duxwwefdv56ri" path="res://src/core/FloatingOrigin.gd" id="2_origin"]
+[ext_resource type="PackedScene" uid="uid://c6xk4y8y4un1" path="res://src/combat/Player.tscn" id="3_player"]
+[ext_resource type="Script" uid="uid://bpajd5fye2u2j" path="res://src/core/GravityComponent.gd" id="4_gravity"]
+
+[node name="Node3D" type="Node3D" unique_id=1729097473]
+script = ExtResource("1_main")
+
+[node name="FloatingOrigin" type="Node" parent="." unique_id=175951537 node_paths=PackedStringArray("player_node")]
+script = ExtResource("2_origin")
+player_node = NodePath("../Player")
+
+[node name="Player" parent="." unique_id=1244927095 instance=ExtResource("3_player")]
+
+[node name="GravityComponent" type="Node" parent="Player" unique_id=873492144 node_paths=PackedStringArray("parent_body")]
+script = ExtResource("4_gravity")
+parent_body = NodePath("..")

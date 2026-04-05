@@ -49,9 +49,18 @@ var thruster_trails: Array = []
 var heat_soak: float = 0.0      # Engine thermal saturation
 var shard_timer: float = 0.0    # Plasma debris ejection interval
 
+var ship_marker: MeshInstance3D = null
+
 func _ready() -> void:
 	self.add_to_group("Player")
 	lock_mouse()
+	
+	# COMPASS HARDENING: 3D arrow pointing back to ship
+	ship_marker = MeshInstance3D.new()
+	var pm = PrismMesh.new(); pm.size = Vector3(2.5, 5.0, 1.0); ship_marker.mesh = pm
+	var m_c = StandardMaterial3D.new(); m_c.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED; m_c.albedo_color = Color.RED; ship_marker.material_override = m_c
+	add_child(ship_marker); ship_marker.hide()
+	ship_marker.position = Vector3(0, 22.0, -10.0) # Floating ahead of player
 	
 	# 0. PRELOAD WEAPONS SCRIPT
 	# Load once at startup, not every fire event
@@ -85,7 +94,7 @@ func _setup_ace_camera() -> void:
 	cam_pivot.add_child(cam_spring)
 	cam_spring.spring_length = 250.0
 	cam_spring.position.y = 10.0 # Vertical lift for better ship profile
-	cam_spring.collision_mask = 1 # ACE COCKPIT HARDENING: Ignores ship hull (Layer 2)
+	cam_spring.collision_mask = 1 # Hits World Terrain (1), Ignores Ship Hull (2) and Decorative Grass (8)
 	cam_spring.margin = 3.5 # Huge buffer against external terrain
 	
 	camera = Camera3D.new()
@@ -249,10 +258,19 @@ func _process_on_foot(delta: float) -> void:
 		cam_pivot.rotation.y = lerp_angle(cam_pivot.rotation.y, cam_orbit.x, 25.0 * delta)
 		cam_pivot.rotation.x = lerp_angle(cam_pivot.rotation.x, cam_orbit.y, 25.0 * delta)
 	
-	# Close-Up 3rd Person follow (5m) vs Space-Epic (250m)
-	cam_spring.spring_length = lerp(cam_spring.spring_length, 5.0, 5.0 * delta)
-	# 1.85m human eye-level height while walking planet-side
-	cam_spring.position.y = lerp(cam_spring.position.y, 1.85, 5.0 * delta)
+	# COMPASS SYNC: Point Red Arrow back toward Starhawk
+	if ship_marker and parked_ship:
+		ship_marker.show()
+		var dir_to_ship = (parked_ship.global_position - global_position).normalized()
+		var t_xf = global_transform.looking_at(parked_ship.global_position, -grav_dir)
+		ship_marker.global_transform.basis = t_xf.basis
+		ship_marker.rotate_object_local(Vector3.RIGHT, -PI/2.0) # Align prism tip to forward
+		# Local Bobbing
+		ship_marker.position.y = 22.0 + sin(Time.get_ticks_msec() * 0.005) * 2.5
+	
+	# ACE SPRINT ENGINE: Right Trigger (R2) or Shift provides a 3.0x Titanic Burst
+	var sprint_mapped = max(Input.get_joy_axis(0, JOY_AXIS_TRIGGER_RIGHT), 1.0 if Input.is_key_pressed(KEY_SHIFT) else 0.0)
+	var speed_mult = 1.0 + (sprint_mapped * 2.0)
 	
 	# Move WASD/Gamepad — apply deadzone before use!
 	# Raw joystick axes report tiny non-zero values even at rest (stick drift).
@@ -288,9 +306,9 @@ func _process_on_foot(delta: float) -> void:
 	var walk_dir = (cam_right * move_x) + (cam_forward * move_z)
 	var tangent_dir = walk_dir.slide(grav_dir).normalized()
 	
-	# Scale speed by actual input length
+	# Scale speed by actual input length (Titanic Speed Base: 450.0)
 	var input_mag = clamp(Vector2(move_x, move_z).length(), 0.0, 1.0)
-	var sideway_vel = (tangent_dir if input_mag > 0.01 else Vector3.ZERO) * input_mag * 110.0
+	var sideway_vel = (tangent_dir if input_mag > 0.01 else Vector3.ZERO) * input_mag * 450.0 * speed_mult
 	
 	var vertical_vel = velocity.project(grav_dir)
 	
@@ -775,24 +793,41 @@ func _disembark() -> void:
 	cam_orbit.x = 0; cam_orbit.y = 0
 	if ship_model: ship_model.hide()
 	
-	# Manifest an empty decoy hull exactly where we step out!
+	# Manifest an empty decoy hull SNAPPED to the surface
 	var path = "res://assets/models/player/ship/Meshy_AI_Starhawk_01_0331051011_texture.glb"
-	if FileAccess.file_exists(path):
+	if FileAccess.file_exists(path) and target_planet:
 		var scene = load(path)
 		if scene:
 			parked_ship = scene.instantiate()
 			get_parent().add_child(parked_ship)
-			parked_ship.global_transform = global_transform
+			# LANDING SYNC: Align to surface normal + Snapping!
+			var g_up = (global_position - target_planet.global_position).normalized()
+			var h = target_planet.get_terrain_elevation(g_up)
+			var ground_pos = target_planet.global_position + (g_up * (target_planet.planet_radius + h))
+			
+			var t_bas = Basis(); t_bas.y = g_up; t_bas.x = g_up.cross(global_transform.basis.z).normalized()
+			if t_bas.x.length() < 0.1: t_bas.x = g_up.cross(Vector3.FORWARD).normalized()
+			t_bas.z = t_bas.x.cross(t_bas.y).normalized()
+			
+			parked_ship.global_transform.basis = t_bas
+			parked_ship.global_position = ground_pos + (g_up * 10.0) # Prince-scale landing height
 			parked_ship.scale = Vector3(25.0, 25.0, 25.0)
-			parked_ship.rotation_degrees.y -= 90.0
+			parked_ship.rotate_object_local(Vector3.UP, deg_to_rad(-90.0))
 			
 	if coll_node: coll_node.shape.radius = 8.0
+	if ship_marker: ship_marker.show()
+	if cam_pivot: cam_pivot.position.y = 8.5 # 'Prince' Scale Eye-Level
+	if cam_spring: 
+		cam_spring.position.y = 0.0 
+		cam_spring.spring_length = 35.0 # Titanic Overview Standoff
 
 func _embark() -> void:
 	in_ship = true
 	cam_orbit.x = 0; cam_orbit.y = 0
 	velocity = Vector3.ZERO
 	if ship_model: ship_model.show()
+	if ship_marker: ship_marker.hide()
+	if cam_pivot: cam_pivot.position.y = 0.0 # Reset to ship hull origin
 	if parked_ship: 
 		# We must restore POSITION and ROTATION, but absolutely strip the SCALE! 
 		# If the 25x scale leaks to the parent body, movement vectors become 25x faster!
@@ -802,6 +837,10 @@ func _embark() -> void:
 		global_transform.basis = st_tf.basis.orthonormalized() # Strip the scale matrix!
 		parked_ship.queue_free(); parked_ship = null
 	if coll_node: coll_node.shape.radius = 16.0
+	if cam_spring: 
+		cam_spring.position.y = 10.0 # Restore Ship-clearance vertical lift
+		cam_spring.spring_length = 250.0 # Restore Space Standoff
+		cam_spring.spring_length = 250.0 # Restore Space Standoff
 
 func lock_mouse() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED

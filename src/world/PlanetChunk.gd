@@ -5,8 +5,8 @@ extends MeshInstance3D
 # Managed by THE PROCEDURALIST.
 
 var noise: FastNoiseLite
-var radius: float = 300000.0 
-var terrain_strength: float = 6000.0 
+var radius: float = 18000.0 
+var terrain_strength: float = 1200.0 
 var resolution: int = 48 
 var face_normal: Vector3 
 var x_axis: Vector3 
@@ -20,12 +20,13 @@ var scatter_grass: bool = false  # Only true when player is on foot
 var pal_forest_h: float = 0.3
 var pal_forest_col: Color = Color("#33AA33")
 var pal_grass_col: Color = Color("#44BB44")
+var pal_grass_secondary: Color = Color("#228822") # High-contrast variant
 var pal_beach_col: Color = Color("#C2B280")
 var pal_mount_col: Color = Color("#888888")
 var pal_water_base: Color = Color(0.0, 0.35, 0.95)
 var pal_water_light: Color = Color(0.0, 0.65, 1.0)
 var pal_water_shore: Color = Color(0.3, 0.85, 1.0)
-var SEA_LEVEL = -400.0
+var SEA_LEVEL = -120.0
 
 func start_generation() -> void:
 	_generate_planetary_palette()
@@ -41,9 +42,11 @@ func _generate_planetary_palette() -> void:
 	var grass_hue_offset = 0.5 + rng.randf_range(-0.15, 0.15)
 	var grass_hue = fposmod(pal_forest_h + grass_hue_offset, 1.0)
 	pal_grass_col = Color.from_hsv(grass_hue, rng.randf_range(0.55, 0.85), rng.randf_range(0.65, 0.90))
+	pal_grass_secondary = Color.from_hsv(grass_hue, rng.randf_range(0.7, 0.95), rng.randf_range(0.3, 0.55)) # Darker contrast
 	
-	var beach_hue = fposmod(pal_forest_h + 0.1, 1.0) if rng.randf() > 0.5 else fposmod(pal_forest_h - 0.1, 1.0)
-	pal_beach_col = Color.from_hsv(beach_hue, rng.randf_range(0.3, 0.6), rng.randf_range(0.8, 0.95))
+	# BEACH HARDENING: Fixed Gold/Tan hue prevents 'pink sand' leaks
+	var beach_hue = 0.13 + rng.randf_range(-0.02, 0.02)
+	pal_beach_col = Color.from_hsv(beach_hue, rng.randf_range(0.3, 0.5), rng.randf_range(0.85, 0.95))
 	
 	var mount_hue = rng.randf_range(0.0, 0.15)
 	pal_mount_col = Color.from_hsv(mount_hue, rng.randf_range(0.1, 0.6), rng.randf_range(0.3, 0.65))
@@ -192,17 +195,21 @@ void light() {
 	final_col = mix(final_col, ALBEDO, t1);
 	DIFFUSE_LIGHT += final_col * LIGHT_COLOR * ATTENUATION;
 }
-""" % [radius, _v3s(pal_beach_col), _v3s(pal_grass_col), _v3s(pal_mount_col), SEA_LEVEL]
+""" % [radius, _v3s(pal_beach_col), _v3s(pal_forest_col), _v3s(pal_mount_col), SEA_LEVEL]
 	var m_land = ShaderMaterial.new()
 	m_land.shader = shader_land
 	var g_tex = load("res://assets/textures/ground_texture.png")
 	if g_tex: m_land.set_shader_parameter("ground_tex", g_tex)
-	var outline = ShaderMaterial.new()
-	outline.shader = load("res://src/shaders/outline.gdshader")
-	outline.set_shader_parameter("outline_width", 1.5)
-	outline.set_shader_parameter("outline_color", Color.BLACK)
-	m_land.next_pass = outline
+	
+	# DISTANCE-PHASE HARDENING: Only enable Outlines for detailed surface chunks
+	if scale_factor < 0.013:
+		var outline = ShaderMaterial.new()
+		outline.shader = load("res://src/shaders/outline.gdshader")
+		outline.set_shader_parameter("outline_width", 1.5)
+		outline.set_shader_parameter("outline_color", Color.BLACK)
+		m_land.next_pass = outline
 	self.set_surface_override_material(0, m_land)
+	
 	if has_water:
 		var shader = Shader.new()
 		shader.code = """shader_type spatial;
@@ -276,42 +283,50 @@ void light() {
 		var m_water = ShaderMaterial.new()
 		m_water.shader = shader
 		self.set_surface_override_material(1, m_water)
-	if scale_factor < 0.04:
+	# ONLY CAST SHADOWS for the immediate high-detail terrain
+	if scale_factor <= 0.005:
 		create_trimesh_collision()
 		self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	else:
 		self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 func _scatter_deterministic_stellar_layers() -> void:
-	# ACE SPAWN-GATE HARDENING: Unified vegetation window across all Horizon LODs (0 to 0.06)
-	if scale_factor > 0.06: return 
+	# CPU HARDENING: Only populate vegetation for chunks visible during atmospheric approach (<= 20km)
+	if scale_factor > 0.02: return 
 	var radius_ratio: float = clamp(radius / 1000000.0, 0.3, 1.5)
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []
 	var g_pts: Array[Transform3D] = []
 	
-	# UNIVERSAL VEGETATION INJECTION
 	var t_cell: float = 0.00025 / radius_ratio
 	var ts_x = int(floor((offset.x - scale_factor) / t_cell)); var te_x = int(ceil((offset.x + scale_factor) / t_cell))
 	var ts_y = int(floor((offset.y - scale_factor) / t_cell)); var te_y = int(ceil((offset.y + scale_factor) / t_cell))
-	# Increased perf window to ensure vegetation generates far on the horizon
-	# Wide performance window ensures large-scale chunks correctly populate their vegetation
-	# Range of 512 covers the full 0.06 cinematic spawn window
-	if (te_x - ts_x) <= 512:
+	# Stable 256 performance window ensures zero-latency CPU processing
+	if (te_x - ts_x) <= 256:
 		for y_idx in range(ts_y, te_y):
 			for x_idx in range(ts_x, te_x):
-				var h_v = hash(Vector3(float(x_idx), float(y_idx), face_normal.z * 1337.0))
+				# ACE BOTANICAL DETERMINISM: Unique seed for every planet face
+				var h_v = hash(Vector3(float(x_idx), float(y_idx), float(planet_seed) + face_normal.x*13.0 + face_normal.y*17.0 + face_normal.z*19.0))
 				var t_val = h_v % 1000
-				if t_val < 800:
-					var cp = _get_sn(x_idx, y_idx)
-					var m_d = noise.get_noise_3dv(cp * 1500.0) 
-					var is_forest = (m_d > 0.05)
-					var f_density = int(250 * radius_ratio)
-					var g_density = int(55 * radius_ratio)
-					var rock_threshold = int(5 * radius_ratio)
-					var spawn_tree = (is_forest and t_val < f_density) or (not is_forest and t_val < g_density)
-					if spawn_tree or (not is_forest and t_val < rock_threshold):
+				if t_val < 950:
+					# DETERMINISTIC JITTER: Breaches the pattern grid (±45% organic variance)
+					var j_x = (float(h_v % 50)/50.0 - 0.5) * 0.9
+					var j_y = (float((h_v >> 4) % 50)/50.0 - 0.5) * 0.9
+					
+					var lu = Vector2((float(x_idx) + j_x) * t_cell, (float(y_idx) + j_y) * t_cell)
+					var cp = (face_normal + x_axis * lu.x + y_axis * lu.y).normalized()
+					
+					var m_d = noise.get_noise_3dv(cp * 65000.0) # HIGH FREQ: Clustered Groves
+					var is_forest = (m_d > 0.08)
+					# CLUSTER SYNC: Density is 8x higher in the center of forest noise blobs
+					var f_mult = clamp((m_d - 0.08) * 15.0, 0.0, 1.0)
+					var f_density = int(950 * f_mult * radius_ratio) 
+					var g_density = int(45 * radius_ratio) # Sparse solo trees
+					var rock_threshold = int(25 * radius_ratio)
+					
+					var spawn_tree = (is_forest and (h_v % 1000) < f_density) or (not is_forest and (h_v % 1000) < g_density)
+					if spawn_tree or (not is_forest and (h_v % 1000) < rock_threshold):
 						var h = get_terrain_elevation(cp)
-						if h > -380.0:
+						if h > -150.0:
 							var pos = cp * (radius + max(h, SEA_LEVEL - 50.0))
 							var b_warp = sin(pos.x * 0.0015) * 300.0 + cos(pos.z * 0.002) * 200.0
 							if spawn_tree:
@@ -320,18 +335,23 @@ func _scatter_deterministic_stellar_layers() -> void:
 							else:
 								if (h + b_warp) <= 1500.0 and t_val < rock_threshold:
 									r_pts.append(_get_rock_xform(pos, cp, noise.get_noise_3dv(cp * 45000.0), 18.0))
-	if scatter_grass and scale_factor <= 0.0005:
-		var g_cell: float = 0.000006 / radius_ratio
+	# GRASS HARDENING: Absolute-Grid jitter ensures lush, non-patterned swaying blades
+	if scale_factor <= 0.00055:
+		var g_cell: float = 0.0000045 / radius_ratio
 		var gs_x = int(floor((offset.x - scale_factor) / g_cell)); var ge_x = int(ceil((offset.x + scale_factor) / g_cell))
 		var gs_y = int(floor((offset.y - scale_factor) / g_cell)); var ge_y = int(ceil((offset.y + scale_factor) / g_cell))
 		if (ge_x - gs_x) <= 300:
 			for y_idx in range(gs_y, ge_y):
 				for x_idx in range(gs_x, ge_x):
-					var h_v = hash(Vector3(float(x_idx), float(y_idx), face_normal.y * 313.0))
-					if h_v % 100 < 90:
-						var cp = _get_sn(x_idx, y_idx)
+					var h_v = hash(Vector3(float(x_idx), float(y_idx), float(planet_seed) + face_normal.x*7.0 + face_normal.z*3.0))
+					if h_v % 100 < 80:
+						# DETERMINISTIC JITTER: Breaches the pattern grid (±60% variance)
+						var j_x = (float(h_v % 50)/50.0 - 0.5) * 0.6
+						var j_y = (float((h_v >> 4) % 50)/50.0 - 0.5) * 0.6
+						var lu = Vector2((float(x_idx) + j_x) * g_cell, (float(y_idx) + j_y) * g_cell)
+						var cp = (face_normal + x_axis * lu.x + y_axis * lu.y).normalized()
 						var m_d = noise.get_noise_3dv(cp * 1500.0)
-						if m_d > 0.0:
+						if m_d > 0.1:
 							var h = get_terrain_elevation(cp)
 							var pos = cp * (radius + max(h, SEA_LEVEL - 50.0))
 							if h > -150.0 and (h + sin(pos.x * 0.0015)*300.0) < 1300.0:
@@ -363,7 +383,9 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 	var mm_m = MultiMesh.new(); mm_m.transform_format = MultiMesh.TRANSFORM_3D; mm_m.use_colors = true; mm_m.mesh = _build_med_tree(); mm_m.instance_count = points.size()
 	var mm_h = MultiMesh.new(); mm_h.transform_format = MultiMesh.TRANSFORM_3D; mm_h.use_colors = true; mm_h.mesh = _build_high_tree(); mm_h.instance_count = points.size()
 	for i in range(points.size()): 
-		var pos = points[i].origin; var t_hue = fposmod(pal_forest_h + fposmod(pos.x*0.015, 0.2)-0.1, 1.0)
+		var pos = points[i].origin
+		# CELESTIAL CONTRAST HARDENING: 0.5 Hue Offset ensures trees contrast with the ground (no more pink on pink!)
+		var t_hue = fposmod(pal_forest_h + 0.5 + fposmod(pos.x*0.012, 0.3) - 0.15, 1.0)
 		var t_col = Color.from_hsv(t_hue, 0.85, 0.8).darkened(fposmod(pos.x*pos.z*0.001, 0.15))
 		mm_l.set_instance_transform(i, points[i]); mm_l.set_instance_color(i, t_col)
 		mm_m.set_instance_transform(i, points[i]); mm_m.set_instance_color(i, t_col)
@@ -373,13 +395,35 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 	var m_h = MultiMeshInstance3D.new(); m_h.multimesh = mm_h; m_h.material_override = mat; m_h.visibility_range_end = 15000.0; add_child(m_h)
 
 func _spawn_grass(points: Array[Transform3D]) -> void:
-	var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.mesh = _build_grass_mesh(); mm.instance_count = points.size()
-	for i in range(points.size()): mm.set_instance_transform(i, points[i])
+	var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.mesh = _build_grass_mesh()
+	mm.use_custom_data = true # ACE DUO-TONE SYNC
+	mm.instance_count = points.size()
+	for i in range(points.size()): 
+		mm.set_instance_transform(i, points[i])
+		var j = fmod(float(hash(points[i].origin)), 10.0)/10.0
+		mm.set_instance_custom_data(i, Color(j, 0, 0, 0))
 	var shader = Shader.new(); shader.code = """shader_type spatial; render_mode diffuse_toon, specular_toon, cull_disabled;
-varying vec3 v_world_pos; void vertex() { v_world_pos = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-if (VERTEX.y > 0.5) { float wt = TIME * 2.5; VERTEX.x += sin(v_world_pos.x * 0.12 + wt) * 0.9 * VERTEX.y; VERTEX.z += cos(v_world_pos.z * 0.10 + wt) * 0.9 * VERTEX.y; }}
-void fragment() { ALBEDO = %s; ROUGHNESS = 1.0; }""" % [_v3s(pal_grass_col)]
-	var mmi = MultiMeshInstance3D.new(); mmi.multimesh = mm; mmi.material_override = ShaderMaterial.new(); mmi.material_override.shader = shader; mmi.visibility_range_end = 8000.0; add_child(mmi)
+varying vec3 v_world_pos;
+varying float v_h_jitter;
+void vertex() {
+	v_world_pos = (MODEL_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+	v_h_jitter = INSTANCE_CUSTOM.x; // Pass hash-jitter for color variation
+	if (VERTEX.y > 0.5) {
+		float wt = TIME * 2.5;
+		VERTEX.x += sin(v_world_pos.x * 0.12 + wt) * 0.9 * VERTEX.z;
+		VERTEX.z += cos(v_world_pos.z * 0.10 + wt) * 0.9 * VERTEX.x;
+	}
+}
+void fragment() {
+	vec3 base = %s; vec3 contrast = %s;
+	ALBEDO = mix(base, contrast, v_h_jitter);
+	ROUGHNESS = 1.0;
+}""" % [_v3s(pal_grass_col), _v3s(pal_grass_secondary)]
+	var mmi = MultiMeshInstance3D.new(); mmi.multimesh = mm; mmi.material_override = ShaderMaterial.new(); mmi.material_override.shader = shader; 
+	mmi.visibility_range_end = 1200.0; # ACE DISCOVERY PERFORMANCE: 1.2km Visibility cutoff
+	mmi.visibility_range_begin = 5.0; # Zero-fighting safety
+	mmi.visibility_range_end_margin = 150.0; # Smooth pop-in
+	add_child(mmi)
 
 func _get_rock_xform(pos: Vector3, up: Vector3, noise_val: float, b_scale: float) -> Transform3D:
 	var t_bas = Basis(); t_bas.y = up; t_bas.x = up.cross(Vector3.RIGHT).normalized()
@@ -410,15 +454,15 @@ func _build_titan_faceted_rock_mesh() -> ArrayMesh:
 
 func _build_pine_tree(tiers: int, sides: int, is_high: bool) -> ArrayMesh:
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES); st.set_color(Color(0.2, 0.14, 0.1))
-	var th = 7.0; var tr_b = 3.0; var tr_t = 0.8
+	var th = 1.25; var tr_b = 0.65; var tr_t = 0.25
 	for i in range(sides):
 		var a1 = i * TAU/sides; var a2 = (i+1) * TAU/sides; var v1 = Vector3(cos(a1)*tr_b, 0, sin(a1)*tr_b); var v2 = Vector3(cos(a2)*tr_b, 0, sin(a2)*tr_b)
 		var v3 = Vector3(cos(a1)*tr_t, th, sin(a1)*tr_t); var v4 = Vector3(cos(a2)*tr_t, th, sin(a2)*tr_t)
 		st.add_vertex(v1); st.add_vertex(v2); st.add_vertex(v4); st.add_vertex(v1); st.add_vertex(v4); st.add_vertex(v3)
 	st.set_color(Color(1, 1, 1)) 
 	for j in range(tiers):
-		var bh = th + (j * 4.5); var ec = bh - 2.5; var th_c = bh + 8.5; var cr = 14.0 * (1.0 - (float(j)/tiers)*0.7); var js = 0.25 if is_high else 0.0
-		var to = Vector3(2.5, 0, 1.0) if (j == tiers - 1 and is_high) else Vector3.ZERO
+		var bh = th + (j * 1.5); var ec = bh - 0.75; var th_c = bh + 2.5; var cr = 3.5 * (1.0 - (float(j)/tiers)*0.7); var js = 0.25 if is_high else 0.0
+		var to = Vector3(0.5, 0, 0.2) if (j == tiers - 1 and is_high) else Vector3.ZERO
 		for i in range(sides):
 			var a1 = i * TAU/sides; var a2 = (i+1) * TAU/sides; var cr1 = cr * (1.0 + (float(i%2)-0.5)*2.0*js); var cr2 = cr * (1.0 + (float((i+1)%2)-0.5)*2.0*js)
 			var e1 = Vector3(cos(a1)*cr1, ec, sin(a1)*cr1); var e2 = Vector3(cos(a2)*cr2, ec, sin(a2)*cr2); var bot = Vector3(0, bh, 0); var top = Vector3(0, th_c, 0) + to
@@ -442,14 +486,14 @@ func _build_high_tree() -> ArrayMesh:
 
 func _build_grass_mesh() -> ArrayMesh:
 	if c_g: return c_g
-	var st = SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	st.add_vertex(Vector3(-1, 0, 0))
-	st.add_vertex(Vector3(1, 0, 0))
-	st.add_vertex(Vector3(0.5, 3.5, 0.3))
-	st.generate_normals(false)
-	c_g = st.commit()
-	return c_g
+	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# SCULPTURAL CLUSTER HARDENING: Prince-Scale blades
+	var blades = 3
+	for i in range(blades):
+		var ang = (float(i) / blades) * TAU; var h = 1.0 + randf()*1.2; var w = 0.35
+		var dir = Vector3(cos(ang), 0.0, sin(ang)) * 0.4; var side = dir.cross(Vector3.UP).normalized() * w
+		st.add_vertex(dir - side); st.add_vertex(dir + side); st.add_vertex(dir + Vector3(0, h, 0))
+	st.generate_normals(false); c_g = st.commit(); return c_g
 
 static var c_r: ArrayMesh
 static var c_t_l: ArrayMesh

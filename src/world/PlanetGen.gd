@@ -138,6 +138,19 @@ func _process(_delta: float) -> void:
 		if is_instance_valid(chunk):
 			chunk._scatter_deterministic_stellar_layers()
 
+func get_terrain_elevation(sn: Vector3) -> float:
+	if not noise: return 0.0
+	# ACE: Master Elevation Formula (Sync with PlanetChunk)
+	var r_mask: float = noise.get_noise_3dv(sn * 600.0)
+	var t_n: float = noise.get_noise_3dv(sn * 150.0)
+	var t_boost: float = pow(abs(t_n - 0.3) * 1.5, 4.0) * 8.0 if t_n > 0.3 else 0.0
+	var h_n: float = noise.get_noise_3dv(sn * 1800.0) * clamp(r_mask + 0.5, 0.2, 1.0)
+	var ridge_n: float = pow(1.0 - abs(noise.get_noise_3dv(sn * 3600.0)), 4.0)
+	var ridges: float = ridge_n * clamp(r_mask * 2.0, 0.0, 1.0) * (1.0 + t_boost)
+	var v_n: float = noise.get_noise_3dv(sn * 3600.0); var valley: float = 0.0
+	if v_n < -0.1: valley = pow(abs(v_n + 0.1) * 1.5, 2.5) * -1.2 * (1.0 if r_mask > 0.0 else 2.5)
+	return (h_n + (ridges * 1.5) + valley) * terrain_strength
+
 func _ensure_impostor_active(active: bool) -> void:
 	if active:
 		if not impostor:

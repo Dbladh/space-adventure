@@ -99,11 +99,15 @@ func _setup_hardened_solar_genesis() -> void:
 	sun.light_energy = 1.2
 	sun.shadow_enabled = true
 	
-	# CEL SHADING OVERRIDES: Razor sharp pixel shadows
-	sun.directional_shadow_blend_splits = false
-	sun.set("shadow_blur", 0.0)
+	# ACE SHADOW HARDENING: PCF13 filtering (Integer 2) definitively purges 'flickering shadow' Moire
+	RenderingServer.directional_soft_shadow_filter_set_quality(2) 
 	
-	sun.directional_shadow_max_distance = 6000.0 
+	sun.directional_shadow_blend_splits = true
+	sun.set("shadow_blur", 0.0) 
+	sun.shadow_bias = 0.05
+	sun.shadow_normal_bias = 3.0 # Definitive purge of shadow Moire/grain
+	
+	sun.directional_shadow_max_distance = 5000.0 
 	sun.add_to_group("World")
 	add_child(sun)
 	main_sun = sun

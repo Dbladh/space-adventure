@@ -33,3 +33,28 @@ void fragment() {
 	ROUGHNESS = 1.0;
 	SPECULAR = 0.0;
 }
+
+float aa_step(float edge, float val) {
+	// ACE ANTI-ALIASING: Surgical softening of planetary cel-bands
+	float delta = fwidth(val) * 1.5; 
+	return smoothstep(edge - delta, edge + delta, val);
+}
+
+void light() {
+	// UNIVERSAL CLEAN-TOON: 3-Tier Cel-Shading for Planet Surface
+	float n_dot_l = dot(NORMAL, LIGHT);
+	float atten = ATTENUATION;
+	float l_level = n_dot_l * atten;
+	
+	// COLOR TIERING: Match asteroid clean-cel aesthetic
+	float t2 = aa_step(0.25, l_level);
+	float t1 = aa_step(0.65, l_level);
+	
+	vec3 shadow_col = ALBEDO * 0.15;
+	vec3 mid_col = ALBEDO * 0.45;
+	
+	vec3 final_col = mix(shadow_col, mid_col, t2);
+	final_col = mix(final_col, ALBEDO, t1);
+	
+	DIFFUSE_LIGHT += final_col * LIGHT_COLOR;
+}

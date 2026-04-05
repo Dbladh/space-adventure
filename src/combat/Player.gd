@@ -65,6 +65,10 @@ func _ready() -> void:
 	shape.radius = 64.0 
 	coll_node.shape = shape
 	add_child(coll_node)
+	self.collision_layer = 2 # THE SHIP
+	self.collision_mask = 1 | 4 # World + Sun/Others
+	coll_node.shape = shape
+	add_child(coll_node)
 	
 	# 1. ACE CAMERA PIPELINE
 	_setup_ace_camera()
@@ -81,13 +85,13 @@ func _setup_ace_camera() -> void:
 	cam_pivot.add_child(cam_spring)
 	cam_spring.spring_length = 250.0
 	cam_spring.position.y = 10.0 # Vertical lift for better ship profile
-	cam_spring.collision_mask = 1 # CITIZEN-PILOT HARDENING: Enabled to prevent ground clipping
-	cam_spring.margin = 0.2
+	cam_spring.collision_mask = 1 # ACE COCKPIT HARDENING: Ignores ship hull (Layer 2)
+	cam_spring.margin = 3.5 # Huge buffer against external terrain
 	
 	camera = Camera3D.new()
 	cam_spring.add_child(camera)
 	camera.position = Vector3.ZERO # Parented to SpringArm, stays at pivot
-	camera.near = 0.5
+	camera.near = 12.0 # ACE COCKPIT HARDENING: Provides clearance for upscaled Starhawk hull
 	camera.far = 3500000.0 # 3,500km Baseline
 	camera.make_current()
 	
@@ -108,24 +112,27 @@ func _setup_ace_camera() -> void:
 		add_child(t)
 		thruster_trails.append({"node": t, "offset": p})
 		
-		# 2. THE NOZZLE ORB (Soft volumetric cores with physical lights)
+		# 2. THE NOZZLE ORB (Ace Volumetric 3D Orb)
 		var glow = MeshInstance3D.new()
-		glow.mesh = SphereMesh.new(); glow.mesh.radius = 3.0; glow.mesh.height = 6.0
+		var sm = SphereMesh.new(); sm.radius = 1.0; sm.height = 2.0
+		# Increase subdivisions to purge the 'Lego-block' cluster noise
+		sm.radial_segments = 32; sm.rings = 16 
+		glow.mesh = sm; glow.name = "EngineGlow"
 		
-		# Material Setup (Unshaded, Additive, Pure Energy)
-		var mat = StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-		mat.albedo_color = Color(8, 0.1, 0.1) # HDR RED: Triggers massive bloom
-		glow.material_override = mat
+		# FRESNEL PLASMA SHADER: Crisp, Illustrated volumetric orb
+		var glow_mat = ShaderMaterial.new()
+		glow_mat.shader = load("res://src/shaders/thruster_nozzle.gdshader")
+		glow.material_override = glow_mat
 		add_child(glow)
 		
 		# 3. THE LIGHT SOURCE (Physical OmniLight)
 		var light = OmniLight3D.new()
+		light.name = "EngineLight"
 		light.light_color = Color.RED
-		light.light_energy = 0.0 # Starts off
-		light.omni_range = 15.0
+		light.light_energy = 0.0 # Dynamics handled in _process
+		light.omni_range = 25.0
+		light.light_specular = 0.0 # ACE CLUSTER PURGE: Prevents blocky specular squares on ground
+		light.omni_attenuation = 2.4 # Steeper falloff hides cluster-grid boundaries
 		add_child(light)
 		
 		t.set_meta("glow_node", glow)
@@ -138,11 +145,9 @@ func _setup_starhawk_hull() -> void:
 		if scene:
 			ship_model = scene.instantiate()
 			add_child(ship_model)
+			_apply_toon_shading(ship_model) # ACE UNIVERSAL SYNC
 			ship_model.scale = Vector3(100.0, 100.0, 100.0) 
 			ship_model.rotation_degrees = Vector3(0, -90, 0)
-			
-			# MATERIAL SNIFFER: Find the ship's skin for heat glow effects
-			_find_heat_mat(ship_model)
 			
 			# REENTRY HUD VFX: Create the screen-space heat vignette
 			var hud = CanvasLayer.new(); hud.layer = 50; add_child(hud)
@@ -153,27 +158,31 @@ func _setup_starhawk_hull() -> void:
 			
 			print("--- PILOT: CELESTIAL SYNC COMPLETE (Hull Ready) ---")
 
-func _find_heat_mat(node: Node) -> void:
+func _apply_toon_shading(node: Node) -> void:
+	# EXCLUSION: Skip engine glows and VFX to prevent black square outlines on plasma
+	if "Glow" in node.name or "VFX" in node.name: return
+	
 	if node is MeshInstance3D:
 		var mat = node.mesh.surface_get_material(0)
 		if mat is StandardMaterial3D:
-			# DYNAMIC TOON SHADING: Wind Waker Aesthetic Upgrade
-			heat_glow_mat = mat.duplicate()
-			heat_glow_mat.diffuse_mode = StandardMaterial3D.DIFFUSE_TOON
-			heat_glow_mat.specular_mode = StandardMaterial3D.SPECULAR_TOON
-			heat_glow_mat.metallic_specular = 0.5
-			heat_glow_mat.roughness = 0.2
+			# ACE UNIVERSAL SYNC: 3-Tier Cel-Shading across all hull surfaces
+			var cel_mat = ShaderMaterial.new()
+			cel_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
 			
-			# SCREEN-SPACE OUTLINE: Constant thickness across distance
+			# Pass through original texture if present
+			if mat.albedo_texture:
+				cel_mat.set_shader_parameter("albedo_tex", mat.albedo_texture)
+				
+			# SCREEN-SPACE OUTLINE: Add outline pass
 			var outline = ShaderMaterial.new()
 			outline.shader = load("res://src/shaders/outline.gdshader")
-			outline.set_shader_parameter("outline_width", 1.5)
+			outline.set_shader_parameter("outline_width", 1.2) # High-Fidelity silhouette
 			outline.set_shader_parameter("outline_color", Color.BLACK)
 			
-			heat_glow_mat.next_pass = outline
-			node.set_surface_override_material(0, heat_glow_mat)
+			cel_mat.next_pass = outline
+			node.set_surface_override_material(0, cel_mat)
 	for child in node.get_children():
-		_find_heat_mat(child)
+		_apply_toon_shading(child)
 
 func _physics_process(delta: float) -> void:
 	# HEARTBEAT: Prints every 120 physics frames (~4s) to confirm script is alive
@@ -211,12 +220,6 @@ func _physics_process(delta: float) -> void:
 		_process_ace_flight(delta)
 	else:
 		_process_on_foot(delta)
-		
-	# ACE CAMERA HYPER-STABILITY: Final Sync
-	# Snapshot the camera pivot position AFTER move_and_slide solver to eliminate jitter
-	# during high-velocity accelerations or frame-rate dips.
-	var cam_base_y = 10.0 if in_ship else 1.85
-	if cam_spring: cam_spring.position = Vector3(0, cam_base_y, 0) + recoil_v + turb_v + reentry_v
 
 func _process_on_foot(delta: float) -> void:
 	if not target_planet: return
@@ -417,11 +420,17 @@ func _process_ace_flight(delta: float) -> void:
 				glow.visible = power > 0.03
 				light.visible = power > 0.03
 				
-				# CINEMATIC IGNITION: 15% plasma flicker + energy scales
+				# CINEMATIC IGNITION: Narrowed-radius isolation purges distant asteroid tinting
 				var flicker = 1.0 + (randf() * 0.15)
-				glow.scale = Vector3.ONE * (power * 1.5 * flicker) 
-				light.light_energy = power * 12.0 * flicker 
+				glow.scale = Vector3.ONE * (power * 7.2 * flicker)
+				light.omni_range = 60.0 # Narrowed to isolate to ship and ground
+				light.omni_attenuation = 2.5 # Steepened to ensure zero-reach to distant debris
+				light.light_energy = power * 2.5 * flicker # Balanced for cinematic radiance
 				light.light_color = heat_c
+				
+				# Update Shader parameter for high-fidelity radial pulse
+				glow.material_override.set_shader_parameter("glow_color", heat_c)
+				glow.material_override.set_shader_parameter("power", power * flicker)
 				
 				# PLASMA SHARD EJECTION: Pop tiny debris during heavy thrust
 				if thrust_mapped > 0.75 and shard_timer <= 0:
@@ -611,6 +620,11 @@ func _process(delta: float) -> void:
 			for side in [-1.0, 1.0]:
 				var jitter = Vector3(randf_range(-0.5, 0.5), randf_range(-0.5, 0.5), randf_range(-0.5, 0.5)) * reentry_intensity
 				_spawn_vortex_trail(global_position + (wing_up * 14.0 * side) + jitter, fire_dir, heat_val, s_length)
+	
+	# CAMERA DYNAMICS: Recoil & Reentry Shake (Ship-only Visual Sync)
+	# Snap the camera pivot in _process to align with visual 'leaning' and 'banking'
+	var cam_base_y = 10.0 if in_ship else 1.85
+	if cam_spring: cam_spring.position = Vector3(0, cam_base_y, 0) + recoil_v + turb_v + reentry_v
 	
 	# BOLT POOL UPDATE: High-Velocity Physics (Direct-Space intersect_ray)
 	const BOLT_SPEED: float = 2500.0

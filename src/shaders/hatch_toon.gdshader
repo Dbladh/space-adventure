@@ -1,49 +1,45 @@
 shader_type spatial;
 render_mode diffuse_toon, specular_toon;
 
-uniform float hatch_density : hint_range(0.0, 4.0) = 1.0;
-uniform float hatch_strength : hint_range(0.0, 1.0) = 0.85;
+uniform sampler2D albedo_tex : source_color;
+uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
 
 varying vec3 v_color;
+varying vec2 v_uv;
 
 void vertex() {
 	v_color = COLOR.rgb;
+	v_uv = UV;
 }
 
 void fragment() {
-	ALBEDO = v_color; 
+	// Sample texture for Starhawk hulls, or use pure color for asteroids
+	vec4 tex_col = texture(albedo_tex, v_uv);
+	ALBEDO = v_color * tex_col.rgb; 
+}
+
+float aa_step(float edge, float val) {
+	// ACE ANTI-ALIASING: Surgical softening of cel-bands
+	float delta = fwidth(val) * 1.5; 
+	return smoothstep(edge - delta, edge + delta, val);
 }
 
 void light() {
-	// ACE ILLUSTRATOR LOGIC: Fine Black-Ink Hatching (Ship-Matching Quality)
-	float n_dot_l = dot(NORMAL, LIGHT);
+	// ACE UNIVERSAL SHADOW HARDENING: Surgical thresholding to purge remaining Moire
 	float atten = ATTENUATION;
-	float l_level = n_dot_l * atten;
+	// Buffer the snap (0.45-0.55) to provide flicker-free anti-aliased shadow borders
+	float sharp_atten = smoothstep(0.45, 0.55, atten); 
+	float l_level = dot(NORMAL, LIGHT) * sharp_atten;
 	
-	// Deterministic Screen-Space Pixel Geometry (Fine 6px Grid)
-	// This matches the dense, granular ink-lines seen on the Starhawk wing textures.
-	vec2 screen_pixel = SCREEN_UV * VIEWPORT_SIZE;
+	// COLOR TIERING: High-fidelity BANDING
+	float t2 = aa_step(0.25, l_level);
+	float t1 = aa_step(0.65, l_level);
 	
-	// Diagonal Patterns (X and Y axis combined for 45-degree hand-drawn feel)
-	float line_a = step(0.75, mod(screen_pixel.x + screen_pixel.y, 6.0 / hatch_density));
-	float line_b = step(0.75, mod(screen_pixel.x - screen_pixel.y, 6.0 / hatch_density));
+	vec3 shadow_col = ALBEDO * 0.18; // Vibrant ambient floor keeps trees from flickering black
+	vec3 mid_col = ALBEDO * 0.55;
 	
-	// COMPOSITE SHADOW STACK (Pure-Black Inversion Fix)
-	vec3 final_col = ALBEDO;
+	vec3 final_col = mix(shadow_col, mid_col, t2);
+	final_col = mix(final_col, ALBEDO, t1);
 	
-	if (l_level > 0.65) {
-		// 1. HIGH LIGHT: Clean Albedo
-		final_col = ALBEDO;
-	} else if (l_level > 0.3) {
-		// 2. LIGHT SHADOW: Fine Parallel Black Ink
-		// We mix toward BLACK (vec3(0.0)) to ensure the line is darker than the shadow.
-		final_col = mix(ALBEDO, vec3(0.0), line_a * hatch_strength);
-	} else {
-		// 3. DEEP SHADOW: Dense Cross-Hatching
-		float pattern = max(line_a, line_b);
-		final_col = mix(ALBEDO * 0.3, vec3(0.0), pattern * hatch_strength);
-	}
-	
-	// Additive Light Accumulation
 	DIFFUSE_LIGHT += final_col * LIGHT_COLOR;
 }

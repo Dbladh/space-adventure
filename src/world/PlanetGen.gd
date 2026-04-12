@@ -39,7 +39,7 @@ var chunk_pool: Array[MeshInstance3D] = []
 # NMS OPTIMIZATION: Throttle chunk streaming to prevent CPU micro-stutters!
 # One split per frame keeps mesh generation within frame budget.
 var split_queue: Array[QuadTreeNode] = []
-const MAX_SPLITS_PER_FRAME: int = 1
+const MAX_SPLITS_PER_FRAME: int = 2
 const PROXIMITY_CUTOFF: float = 5000000.0 # 5,000km - Transition to Impostor mode for astronomical efficiency
 var impostor: Node3D = null
 var faces_hidden: bool = false
@@ -210,6 +210,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 35000.0; c_mesh.height = c_mesh.radius * 2.0; c_mesh.radial_segments = 64; c_mesh.rings = 32
 	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_never, cull_disabled;
 	uniform vec3 sun_dir;
+	uniform vec3 horizon_col;
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
@@ -254,17 +255,22 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		if (cloud_mask > active_threshold) {
 			ALBEDO = mix(day_col, sunset_col, glow_mask);
 			// Lit-side scattering: thicker clouds facing the sun
-			ALPHA = smoothstep(100.0, 3000.0, cam_dist) * 0.95 * mix(0.4, 1.0, terminator);
+			ALPHA = smoothstep(12000.0, 500000.0, cam_dist) * 0.95 * mix(0.4, 1.0, terminator);
 		} else { 
 			// DYNAMIC ATMOSPHERE RING: Show a halo glow even where there are no clouds!
 			ALBEDO = sunset_col;
 			// Rim glow peeking around the edges of the planet
 			ALPHA = fresnel * glow_mask * smoothstep(12000.0, 500000.0, cam_dist) * 0.8;
 		}
+		
+		// CELESTIAL HIBERNATION: Fully transparent if extremely distant
+		if (cam_dist > 4000000.0) ALPHA = 0.0;
 	}"""
 	var c_inst = MeshInstance3D.new(); c_inst.mesh = c_mesh; c_inst.material_override = ShaderMaterial.new(); c_inst.material_override.shader = c_shader
 	var sun_dir = Vector3(0.5, 0.5, 0.707).normalized()
 	c_inst.material_override.set_shader_parameter("sun_dir", sun_dir)
+	# SYNC ATMOSPHERE: Pass the generated horizon color for distant silhouette optimization
+	c_inst.material_override.set_shader_parameter("horizon_col", sky_horizon_color)
 	add_child(c_inst)
 	
 	# 2. PLANETARY RINGS (50% chance per planet - flat, layered Saturn-style disc)
@@ -643,30 +649,41 @@ func _process(_delta: float) -> void:
 
 func get_terrain_elevation(sn: Vector3) -> float:
 	if not noise: return 0.0
-	# ACE: Master Elevation Formula (Sync with PlanetChunk)
-	var r_mask: float = noise.get_noise_3dv(sn * 600.0)
-	var t_n: float = noise.get_noise_3dv(sn * 150.0)
-	var t_boost: float = pow(abs(t_n - 0.3) * 1.5, 4.0) * 8.0 if t_n > 0.3 else 0.0
-	var h_n: float = noise.get_noise_3dv(sn * 1800.0) * clamp(r_mask + 0.5, 0.2, 1.0)
-	var ridge_n: float = pow(1.0 - abs(noise.get_noise_3dv(sn * 3600.0)), 4.0)
-	var ridges: float = ridge_n * clamp(r_mask * 2.0, 0.0, 1.0) * (1.0 + t_boost)
-	var v_n: float = noise.get_noise_3dv(sn * 3600.0); var valley: float = 0.0
-	if v_n < -0.1: valley = pow(abs(v_n + 0.1) * 1.5, 2.5) * -1.2 * (1.0 if r_mask > 0.0 else 2.5)
+	# ACE: Master Elevation Formula (STRICT SYNC with PlanetChunk)
+	var macro_h: float = noise.get_noise_3dv(sn * 600.0)
+	var micro_crag: float = noise.get_noise_3dv(sn * 15000.0) * 0.1
+	var local_geo: float = 0.0
+
+	match archetype:
+		"DESERT":
+			var mesa = smoothstep(-0.1, 0.1, macro_h) * 2.0 - 1.0 
+			local_geo = (mesa * 0.6 + micro_crag) * terrain_strength * 0.7
+		"VOLCANIC", "ABYSS":
+			var jagged = 1.0 - abs(macro_h * 1.5) 
+			local_geo = (jagged * 2.0 - 0.8 + micro_crag * 2.5) * terrain_strength * 1.4
+		"FROZEN":
+			var plains = macro_h * 0.4
+			var spikes = max(0.0, noise.get_noise_3dv(sn * 2500.0) - 0.65) * 6.0
+			local_geo = (plains + spikes + micro_crag * 0.4) * terrain_strength
+		"TOXIC", "RADIATED":
+			var craters = abs(noise.get_noise_3dv(sn * 1200.0))
+			var bubbling = noise.get_noise_3dv(sn * 3000.0) * 0.5
+			local_geo = (macro_h - craters * 1.8 + bubbling + micro_crag) * terrain_strength * 0.6
+		_:
+			local_geo = (macro_h + micro_crag) * terrain_strength
+			var volcanic: float = noise.get_noise_3dv(sn * 25000.0)
+			if volcanic > 0.45: local_geo -= 1000.0
+			var terrace_height = 80.0
+			var h_frac = fposmod(local_geo, terrace_height) / terrace_height
+			var layer_step = floor(local_geo / terrace_height) + smoothstep(0.15, 0.85, h_frac)
+			local_geo = layer_step * terrace_height
 	
-	var local_geo = (h_n + (ridges * 1.5) + valley) * terrain_strength
+	var c_n: float = noise.get_noise_3dv(sn * 2.2)
+	var cont_mask: float = smoothstep(-0.1, 0.1, c_n)
+	var S_LVL: float = -120.0
+	var abyss_depth: float = S_LVL - 400.0
 	
-	# ACE LAYER CAKE MIRROR
-	var terrace_height = 80.0
-	var h_frac = fposmod(local_geo, terrace_height) / terrace_height
-	var layer_step = floor(local_geo / terrace_height) + smoothstep(0.15, 0.85, h_frac)
-	local_geo = layer_step * terrace_height
-	
-	# CONTINENTAL MATH MIRROR
-	var c_n: float = noise.get_noise_3dv(sn * 18.0)
-	var cont_mask: float = smoothstep(0.05, 0.25, c_n)
-	var abyss_depth: float = -120.0 - 400.0 # SEA_LEVEL in PlanetChunk is -120.0
-	
-	return lerp(abyss_depth, local_geo + (-120.0 + 50.0), cont_mask)
+	return lerp(abyss_depth, local_geo + (S_LVL + 50.0), cont_mask)
 
 func _ensure_impostor_active(active: bool) -> void:
 	if active:

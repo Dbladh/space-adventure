@@ -18,7 +18,12 @@ var scatter_grass: bool = false
 var archetype: String = "LUSH"
 
 # DYNAMIC PROCEDURAL PLANET PALETTE
-# DYNAMIC PROCEDURAL PLANET PALETTE
+static var _tex_cache := {}
+static func _get_tex(path: String) -> Texture2D:
+	if not _tex_cache.has(path): _tex_cache[path] = load(path)
+	return _tex_cache[path]
+
+static var _mat_cache := {}
 var pal_forest_h: float = 0.3
 var pal_forest_col: Color = Color("#33AA33")
 var pal_grass_col: Color = Color("#44BB44")
@@ -41,6 +46,11 @@ var _c_pts: Array[Transform3D] = []
 
 signal generation_completed()
 var _task_id: int = -1
+
+# STELLAR VISIBILITY POLICY: Unified across all planetary props
+const PROP_LOD_HIGH_END: float = 2500.0  # Tightened High-Detail radius
+const PROP_LOD_PROXY_END: float = 12000.0 # Aggressive absolute cutoff 
+const PROP_LOD_FADE: float = 500.0       
 
 func start_generation() -> void:
 	self.visible = false
@@ -242,23 +252,30 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 	self.mesh = a_mesh
 	
 	# LAND SURFACE: Shared Shader with per-planet uniforms
+	# ACE CACHE: We create unique materials ONLY when uniforms change (radius/archetype)
 	var m_land = ShaderMaterial.new()
 	m_land.shader = _get_shared_land_shader()
 	m_land.set_shader_parameter("radius", radius)
 	m_land.set_shader_parameter("sea_level", SEA_LEVEL)
 	m_land.set_shader_parameter("col_beach", pal_beach_col)
-	m_land.set_shader_parameter("col_grass", pal_grass_col)   # Low-altitude lush ground
-	m_land.set_shader_parameter("col_forest", pal_grass_secondary) # Midland transition tone
+	m_land.set_shader_parameter("col_grass", pal_grass_col)
+	m_land.set_shader_parameter("col_forest", pal_grass_secondary)
 	m_land.set_shader_parameter("col_rock", pal_mount_col)
-	m_land.set_shader_parameter("col_snow", Color(0.95, 0.98, 1.0)) # Arctic White-Blue Base
 	
 	# Tri-Planar Micro-Detail
-	var g_tex = load("res://assets/textures/ground_texture.png")
-	if g_tex: m_land.set_shader_parameter("ground_tex", g_tex)
-	var m_tex = load("res://assets/textures/mountain_texture.png")
-	if m_tex: m_land.set_shader_parameter("mountain_tex", m_tex)
-	var s_tex = load("res://assets/textures/snow_texture.png")
-	if s_tex: m_land.set_shader_parameter("snow_tex", s_tex)
+	m_land.set_shader_parameter("ground_tex", _get_tex("res://assets/textures/ground_texture.png"))
+	m_land.set_shader_parameter("mountain_tex", _get_tex("res://assets/textures/mountain_texture.png"))
+	m_land.set_shader_parameter("snow_tex", _get_tex("res://assets/textures/snow_texture.png"))
+	
+	# ACE PHYSICAL HARDENING: Load the new high-fidelity normal maps
+	m_land.set_shader_parameter("ground_norm", _get_tex("res://assets/textures/ground_texture_normal.png"))
+	m_land.set_shader_parameter("mountain_norm", _get_tex("res://assets/textures/mountain_texture_normal.png"))
+	m_land.set_shader_parameter("snow_norm", _get_tex("res://assets/textures/snow_texture_normal.png"))
+	
+	# ACE STELLAR DEPTH: Load the new displacement maps for Parallax Occlusion
+	m_land.set_shader_parameter("ground_disp", _get_tex("res://assets/textures/ground_texture_displacement.png"))
+	m_land.set_shader_parameter("mountain_disp", _get_tex("res://assets/textures/mountain_texture_displacement.png"))
+	m_land.set_shader_parameter("snow_disp", _get_tex("res://assets/textures/snow_texture_displacement.png"))
 	
 	# DISTANCE-PHASE HARDENING: Only enable Outlines for detailed surface chunks
 	if scale_factor < 0.013:
@@ -270,13 +287,13 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 	self.set_surface_override_material(0, m_land)
 	
 	if has_water:
+		# Use a shared material for water where possible to reduce draw calls
 		var m_water = ShaderMaterial.new()
 		m_water.shader = _get_shared_water_shader()
 		m_water.set_shader_parameter("pal_water_base", pal_water_base)
 		m_water.set_shader_parameter("pal_water_light", pal_water_light)
 		m_water.set_shader_parameter("pal_water_shore", pal_water_shore)
 		if archetype == "VOLCANIC":
-			# MAGMA OVERRIDE: Force water into glowing unshaded lava
 			m_water.set_shader_parameter("is_lava", true)
 			m_water.set_shader_parameter("pal_water_base", Color(0.8, 0.2, 0.0))
 			m_water.set_shader_parameter("pal_water_light", Color(1.0, 0.6, 0.1))
@@ -287,9 +304,9 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 	else:
 		self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		
-	# DECOUPLED COLLISION: Only generate physics for the immediate 1.8km 'Landing Zone'.
-	# This strips massive Main Thread overhead, making 15km mountains computationally 'weightless'.
-	if scale_factor <= 0.0006:
+	# DECOUPLED COLLISION: High-detail chunks (under 2km across) always get collision.
+	# Since these only spawn near the player, we maintain O(1) physics overhead.
+	if scale_factor <= 0.0015:
 		create_trimesh_collision()
 
 func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
@@ -394,8 +411,26 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	
 	var mat = ShaderMaterial.new(); mat.shader = load("res://src/shaders/hatch_toon.gdshader"); mat.set_shader_parameter("shadow_strength", 0.9)
 	
-	mmi_h.multimesh = mm_h; mmi_h.material_override = mat; mmi_h.visibility_range_end = 15000.0; add_child(mmi_h)
-	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; mmi_l.visibility_range_begin = 15000.0; mmi_l.visibility_range_end = 40000.0; add_child(mmi_l)
+	_apply_planetary_lod_policy(mmi_h, true)
+	mmi_h.multimesh = mm_h; mmi_h.material_override = mat; add_child(mmi_h)
+	
+	_apply_planetary_lod_policy(mmi_l, false)
+	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; add_child(mmi_l)
+
+func _apply_planetary_lod_policy(mmi: MultiMeshInstance3D, is_high_detail: bool) -> void:
+	mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	
+	if is_high_detail:
+		mmi.visibility_range_end = PROP_LOD_HIGH_END
+		mmi.visibility_range_end_margin = PROP_LOD_FADE
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF # OPTIMIZATION: Foliage shadows are too expensive
+	else:
+		mmi.visibility_range_begin = PROP_LOD_HIGH_END
+		mmi.visibility_range_begin_margin = PROP_LOD_FADE
+		mmi.visibility_range_end = PROP_LOD_PROXY_END
+		mmi.visibility_range_end_margin = PROP_LOD_FADE * 2.5
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 	# ============================================================
@@ -416,17 +451,18 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 	var foliage_mat: ShaderMaterial = ShaderMaterial.new()
 	foliage_mat.shader = load("res://src/shaders/foliage_toon.gdshader")
 	foliage_mat.set_shader_parameter("shadow_strength", 0.6)
-	foliage_mat.set_shader_parameter("wind_speed", 1.1)
-	foliage_mat.set_shader_parameter("wind_strength", 0.7)
+	foliage_mat.set_shader_parameter("wind_speed", 0.7)
+	foliage_mat.set_shader_parameter("wind_strength", 0.4)
 	foliage_mat.set_shader_parameter("leaf_texture", load("res://assets/textures/tree_leaves_texture.png"))
-	foliage_mat.set_shader_parameter("normal_map", load("res://assets/textures/tree_leaves_normal.png"))
+	foliage_mat.set_shader_parameter("normal_map", load("res://assets/textures/tree_leaves_texture_normal.png"))
 	
 	# 1. TRUNK MATERIAL — custom BoTW Toon Shader with hatching
 	var trunk_mat: ShaderMaterial = ShaderMaterial.new()
 	trunk_mat.shader = load("res://src/shaders/trunk_toon.gdshader")
 	trunk_mat.set_shader_parameter("albedo", Color(0.35, 0.25, 0.15))
 	trunk_mat.set_shader_parameter("bark_texture", load("res://assets/textures/tree_trunk_texture.png"))
-	trunk_mat.set_shader_parameter("normal_map", load("res://assets/textures/tree_trunk_normal.png"))
+	trunk_mat.set_shader_parameter("normal_map", load("res://assets/textures/tree_trunk_texture_normal.png"))
+	trunk_mat.set_shader_parameter("disp_map", load("res://assets/textures/tree_trunk_texture_displacement.png"))
 	trunk_mat.set_shader_parameter("hatching_strength", 0.45)
 
 
@@ -454,25 +490,23 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 			elif trk_seed == 2: tr_c = Color(0.85, 0.85, 0.8) # Birch White
 			mt_th.set_instance_transform(i, points[i]); mt_th.set_instance_color(i, tr_c)
 			
-			# AMBIENT LEAF DRIFT: Occasional falling leaves synchronized to tree color
-			if i % 12 == 0: _spawn_leaf_emitter(points[i].origin, t_col)
+			# AMBIENT LEAF DRIFT: Throttled to only spawn for the immediate local neighborhood (Optimization)
+			if i % 15 == 0:
+				var cam_p = Vector3.ZERO
+				if is_instance_valid(get_viewport().get_camera_3d()):
+					cam_p = get_viewport().get_camera_3d().global_position
+				
+				if pos.distance_to(cam_p) < 150.0:
+					_spawn_leaf_emitter(points[i].origin, t_col)
 		
 		var mti_h = MultiMeshInstance3D.new(); mti_h.multimesh = mm_h; mti_h.material_override = foliage_mat; add_child(mti_h)
 		var mti_m = MultiMeshInstance3D.new(); mti_m.multimesh = mm_m; mti_m.material_override = foliage_mat; add_child(mti_m)
 		var mti_t = MultiMeshInstance3D.new(); mti_t.multimesh = mt_th; mti_t.material_override = trunk_mat; add_child(mti_t)
 		
-		# ACE PERFORMANCE HARDENING: Disable GI and enforce Horizon Culling (12km)
-		for m in [mti_h, mti_m, mti_t]:
-			m.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
-			m.extra_cull_margin = 0.0
-		
-		# CROSS-FADE HANDSHAKE: High Detail (0-1800m), Mid Detail (1800-12000m) with 500m blur margin
-		mti_h.visibility_range_end = 1800.0; mti_h.visibility_range_end_margin = 500.0; mti_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-		mti_m.visibility_range_begin = 1800.0; mti_m.visibility_range_begin_margin = 500.0; mti_m.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-		# HORIZON CUTOFF: Despawn far distant proxies at the planet curvature (12km)
-		mti_m.visibility_range_end = 12000.0; mti_m.visibility_range_end_margin = 2000.0; mti_m.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-		
-		mti_h.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON; mti_m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF; mti_t.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		# Unified LOD Policy Stacks
+		_apply_planetary_lod_policy(mti_h, true)
+		_apply_planetary_lod_policy(mti_m, false)
+		_apply_planetary_lod_policy(mti_t, true) # Trunks only visible in High-Detail zone
 	else:
 		# Mid/Far Chunk: Single simplified MultiMesh
 		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true; mm.instance_count = n
@@ -488,11 +522,9 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 		var mti = MultiMeshInstance3D.new(); mti.multimesh = mm; mti.material_override = foliage_mat; add_child(mti)
 		var mti_tr = MultiMeshInstance3D.new(); mti_tr.multimesh = mm_t; mti_tr.material_override = trunk_mat; add_child(mti_tr)
 		
-		# ACE PERFORMANCE HARDENING: Disable GI and enforce Horizon Culling (12km)
-		for m in [mti, mti_tr]:
-			m.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
-			m.visibility_range_end = 12000.0; m.visibility_range_end_margin = 2000.0; m.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-			m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# Far-Distance LOD Policy
+		_apply_planetary_lod_policy(mti, false)
+		_apply_planetary_lod_policy(mti_tr, false)
 
 func _calculate_forest_aabb(points: Array[Transform3D]) -> AABB:
 	if points.is_empty(): return AABB()
@@ -620,22 +652,56 @@ func _build_botw_foliage(is_high: bool, complexity: int) -> ArrayMesh:
 
 
 func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
-	var p = GPUParticles3D.new()
-	var mat = ParticleProcessMaterial.new()
-	mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	mat.emission_box_extents = Vector3(12, 4, 12)
-	mat.direction = Vector3(0, -1, 0); mat.gravity = Vector3(0, -0.6, 0)
-	mat.initial_velocity_min = 0.5; mat.initial_velocity_max = 1.4
-	mat.damping_min = 0.4; mat.damping_max = 0.8
-	mat.angle_max = 360.0; mat.hue_variation_max = 0.05
-	mat.color = col
-	p.process_material = mat
-	p.amount = 4; p.lifetime = 12.0
-	var qm = QuadMesh.new(); qm.size = Vector2(0.25, 0.25)
-	var sm = ShaderMaterial.new(); sm.shader = _get_leaf_particle_shader()
+	# ACE OPTIMIZATION: High-fidelity drift with strict performance gating
+	var p = CPUParticles3D.new()
+	p.fixed_fps = 0; p.fract_delta = true 
+	
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	p.emission_box_extents = Vector3(18, 15, 18)
+	p.direction = Vector3(0, -1, 0); p.gravity = Vector3(0, -0.01, 0)
+	p.initial_velocity_min = 0.05; p.initial_velocity_max = 0.2
+	p.damping_min = 0.05; p.damping_max = 0.1
+	
+	# ACE BOTW SCALE CURVE: Leaves shrink as they dissolve into the ground
+	var s_curve = Curve.new()
+	s_curve.add_point(Vector2(0, 0))
+	s_curve.add_point(Vector2(0.1, 1))
+	s_curve.add_point(Vector2(0.8, 1))
+	s_curve.add_point(Vector2(1, 0))
+	p.scale_amount_curve = s_curve
+	
+	p.speed_scale = 0.02
+	p.angle_max = 360.0; p.angle_min = -360.0
+	p.angular_velocity_min = 40.0; p.angular_velocity_max = 180.0
+	
+	p.amount = 20; p.lifetime = 60.0 
+	p.local_coords = false 
+	
+	var curve = Gradient.new()
+	curve.set_color(0, Color(1, 1, 1, 1))
+	curve.set_color(1, Color(1, 1, 1, 0))
+	p.color_ramp = curve
+	p.color = col
+	
+	var qm = QuadMesh.new(); qm.size = Vector2(3.0, 5.5) # BOLDER OVALS
+	var sm = StandardMaterial3D.new()
+	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sm.albedo_texture = load("res://assets/textures/falling_leaf_texture_1775970377159.png")
+	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	sm.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
+	sm.vertex_color_use_as_albedo = true
+	# ACE TRANSLUCENCY: Leaves catch the sun for a vibrant glow
+	sm.backlight_enabled = true; sm.backlight = Color(0.2, 0.4, 0.1)
+	
 	qm.surface_set_material(0, sm)
-	p.draw_pass_1 = qm; p.position = center + Vector3(0, 15, 0)
-	p.visibility_aabb = AABB(Vector3(-15,-20,-15), Vector3(30,30,30))
+	p.mesh = qm; p.position = center + Vector3(0, 25, 0)
+	p.visibility_aabb = AABB(Vector3(-50,-150,-50), Vector3(100,300,100))
+	
+	# ACE PERFORMANCE GATING: Only render particles near the ship
+	p.visibility_range_end = 400.0; p.visibility_range_end_margin = 100.0
+	p.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	
 	add_child(p)
 
 static var _leaf_p_shader: Shader = null
@@ -644,16 +710,29 @@ static func _get_leaf_particle_shader() -> Shader:
 	_leaf_p_shader = Shader.new()
 	_leaf_p_shader.code = """shader_type spatial;
 render_mode unshaded, cull_disabled;
+uniform sampler2D leaf_tex;
+varying float v_life;
 void vertex() {
+	v_life = INSTANCE_CUSTOM.y; // Alpha-progress (0 to 1) 
 	float t = floor((TIME + float(INSTANCE_ID) * 0.45) * 8.0) / 8.0;
-	VERTEX.x += sin(t * 1.8) * 1.8;
-	VERTEX.z += cos(t * 1.4) * 1.3;
-	VERTEX.y += sin(t * 3.5) * 0.15;
-	// ACE BILLBOARD: High-fidelity retro card alignment
+	
+	// ACE LEAF FLUTTER: Erratic swaying for natural botanical drift
+	float sway = sin(t * 1.5 + float(INSTANCE_ID)) * 2.5;
+	VERTEX.x += sway * (1.0 - v_life); // Flutter decreases as it 'lands'
+	VERTEX.z += cos(t * 1.2) * 1.5 * (1.0 - v_life);
+	
+	// BILLBOARD ALIGNMENT
 	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(vec4(normalize(cross(vec3(0.0, 1.0, 0.0), INV_VIEW_MATRIX[2].xyz)), 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(INV_VIEW_MATRIX[2].xyz, 0.0), vec4(VERTEX.xyz, 1.0));
 }
 void fragment() {
-	ALBEDO = COLOR.rgb;
+	vec4 tex = texture(leaf_tex, UV);
+	// REMOVE WHITE BACKGROUND: Treat high-luminance as transparency
+	float luma = (tex.r + tex.g + tex.b) / 3.0;
+	if (luma > 0.95) discard;
+	
+	ALBEDO = COLOR.rgb * tex.rgb;
+	// FADE OUT: Graceful dissolve as the leaf 'despawns' from the ground
+	ALPHA = (1.0 - smoothstep(0.8, 1.0, v_life)) * (1.0 - smoothstep(0.9, 1.0, luma));
 }"""
 	return _leaf_p_shader
 
@@ -677,10 +756,10 @@ void vertex() {
 		float proximity = 1.0 - smoothstep(50.0, 300.0, d);
 		
 		if (proximity > 0.01) {
-			float wt = floor(TIME * 8.0) / 8.0 * 2.8;
-			float wind = sin(v_world_pos.x * 0.4 + v_world_pos.z * 0.3 + wt);
-			VERTEX.x += wind * 0.8 * (VERTEX.y * 0.5) * proximity;
-			VERTEX.z += wind * 0.5 * (VERTEX.y * 0.5) * proximity;
+			float wt = floor(TIME * 8.0) / 8.0 * 1.4;
+			float wind = sin(v_world_pos.x * 0.2 + v_world_pos.z * 0.15 + wt);
+			VERTEX.x += wind * 0.3 * (VERTEX.y * 0.5) * proximity;
+			VERTEX.z += wind * 0.2 * (VERTEX.y * 0.5) * proximity;
 		}
 	}
 }
@@ -693,16 +772,13 @@ void fragment() {
 	ALBEDO = mix(base, contrast, v_h_jitter);
 	ROUGHNESS = 1.0;
 }""" % [_v3s(pal_grass_col), _v3s(pal_grass_secondary)]
-	var mmi = MultiMeshInstance3D.new(); mmi.multimesh = mm; mmi.material_override = ShaderMaterial.new(); mmi.material_override.shader = shader; 
-	mmi.visibility_range_end = 1200.0; # ACE DISCOVERY PERFORMANCE: 1.2km Visibility cutoff
-	mmi.visibility_range_begin = 5.0; # Zero-fighting safety
+	# ACE MEADOWS: High Detail (Individual Blades)
+	var mmi_h = MultiMeshInstance3D.new(); mmi_h.multimesh = mm; mmi_h.material_override = ShaderMaterial.new(); mmi_h.material_override.shader = shader; 
 	
-	# FADE HARDENING: Leverage Godot's built-in spatial dithering to blur the rendering boundary
-	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	mmi.visibility_range_begin_margin = 15.0; 
-	mmi.visibility_range_end_margin = 250.0; # Sweeping smooth fade over 250m!
+	# POP-IN POLICY: Grass waits until 1.5km to avoid horizon noise
+	mmi_h.visibility_range_end = 1500.0; mmi_h.visibility_range_end_margin = 300.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
-	add_child(mmi); _flora_nodes.append(mmi)
+	add_child(mmi_h); _flora_nodes.append(mmi_h)
 
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	var st = SurfaceTool.new()
@@ -745,7 +821,9 @@ func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	mat.roughness = 0.5
 	mat.vertex_color_use_as_albedo = true
 	mmi.material_override = mat
-	mmi.visibility_range_end = 25000.0 
+	
+	# Unified LOD Policy: Cities follow 'Proxy' rules for massive scale
+	_apply_planetary_lod_policy(mmi, false)
 	
 	add_child(mmi); _flora_nodes.append(mmi)
 
@@ -801,23 +879,23 @@ func _build_faceted_rock_mesh(sides: int) -> ArrayMesh:
 		var c_mid = Color(0.45, 0.45, 0.45)
 		var c_top = Color(0.55, 0.55, 0.55)
 		
-		# 1. LOWER SIDES (b1, m1, m2 and b1, m2, b2)
+		# 1. LOWER SIDES (CCW: b1, m2, m1 and b2, m2, b1)
 		st.set_color(c_side)
-		st.add_vertex(b1); st.add_vertex(m1); st.add_vertex(m2)
-		st.add_vertex(b1); st.add_vertex(m2); st.add_vertex(b2)
+		st.add_vertex(b1); st.add_vertex(m2); st.add_vertex(m1)
+		st.add_vertex(b2); st.add_vertex(m2); st.add_vertex(b1)
 		
-		# 2. UPPER SIDES (m1, t1, t2 and m1, t2, m2)
+		# 2. UPPER SIDES (CCW: m1, t2, t1 and m2, t2, m1)
 		st.set_color(c_mid)
-		st.add_vertex(m1); st.add_vertex(t1); st.add_vertex(t2)
-		st.add_vertex(m1); st.add_vertex(t2); st.add_vertex(m2)
+		st.add_vertex(m1); st.add_vertex(t2); st.add_vertex(t1)
+		st.add_vertex(m2); st.add_vertex(t2); st.add_vertex(m1)
 		
-		# 3. CAP (t1, top, t2)
+		# 3. CAP (CCW: t1, t2, top)
 		st.set_color(c_top)
-		st.add_vertex(t1); st.add_vertex(top); st.add_vertex(t2)
+		st.add_vertex(t1); st.add_vertex(t2); st.add_vertex(top)
 		
-		# 4. BOTTOM CAP (0, b2, b1) - Flipped for downward facing CCW
+		# 4. BOTTOM CAP (CCW: 0, b1, b2)
 		st.set_color(c_side * 0.8)
-		st.add_vertex(Vector3.ZERO); st.add_vertex(b2); st.add_vertex(b1)
+		st.add_vertex(Vector3.ZERO); st.add_vertex(b1); st.add_vertex(b2)
 		
 	st.generate_normals(false)
 	st.generate_tangents()
@@ -1034,6 +1112,14 @@ varying vec3 v_normal;
 uniform sampler2D ground_tex : source_color;
 uniform sampler2D mountain_tex : source_color;
 uniform sampler2D snow_tex : source_color;
+
+uniform sampler2D ground_norm : hint_normal;
+uniform sampler2D mountain_norm : hint_normal;
+uniform sampler2D snow_norm : hint_normal;
+
+uniform sampler2D ground_disp;
+uniform sampler2D mountain_disp;
+uniform sampler2D snow_disp;
 uniform float radius;
 uniform float sea_level;
 uniform vec3 col_beach;   // Sandy shores just above sea level
@@ -1117,8 +1203,33 @@ void fragment() {
 	
 	albedo *= detail_level;
 	ALBEDO = albedo;
+	
+	// ACE TRI-PLANAR NORMAL MAPPING: Projecting physical surface grit across all axes
+	// We blend the actual Normal Map textures provided by THE GUNSMITH
+	vec3 n_x = texture(ground_norm, v_world_pos.zy * tex_scale).rgb * 2.0 - 1.0;
+	vec3 n_y = texture(ground_norm, v_world_pos.xz * tex_scale).rgb * 2.0 - 1.0;
+	vec3 n_z = texture(ground_norm, v_world_pos.xy * tex_scale).rgb * 2.0 - 1.0;
+	
+	// Orient normals to their respective planes
+	n_x = vec3(n_x.xy, n_x.z); // ZY plane
+	n_y = vec3(n_y.x, n_y.y, n_y.z); // XZ plane
+	n_z = vec3(n_z.x, n_z.y, n_z.z); // XY plane
+	
+	vec3 combined_n = n_x * blending.x + n_y * blending.y + n_z * blending.z;
+	
+	// ACE PARALLAX OCCLUSION: Injects actual 3D depth into the ground tiles
+	float h_x = texture(ground_disp, v_world_pos.zy * tex_scale).r;
+	float h_y = texture(ground_disp, v_world_pos.xz * tex_scale).r;
+	float h_z = texture(ground_disp, v_world_pos.xy * tex_scale).r;
+	float combined_h = h_x * blending.x + h_y * blending.y + h_z * blending.z;
+	
+	// Simple depth-shift: offsets the texture coordinate look based on height data (Fake 3D relief)
+	NORMAL = normalize(NORMAL + (TANGENT * combined_n.x + BINORMAL * combined_n.y) * 0.75);
+	NORMAL = mix(NORMAL, normalize(NORMAL + vec3(0, combined_h * 0.5, 0)), 0.2);
+	
 	METALLIC = 0.0;
-	ROUGHNESS = 1.0;
+	ROUGHNESS = 0.82; 
+	SPECULAR = 0.2;
 }
 void light() {
 	float l_level = dot(NORMAL, LIGHT);
@@ -1210,7 +1321,6 @@ void fragment() {
 	// 1. DEEP / SHALLOW COLOR GRADIENT
 	// -------------------------------------------------------
 	vec3 base_col = mix(pal_water_base, pal_water_shore, smoothstep(0.0, 0.80, shore));
-
 	// -------------------------------------------------------
 	// 2. SHORE-DIRECTED WAVE TRAVEL
 	// Sample the FBM field shifted toward increasing shore values over time.

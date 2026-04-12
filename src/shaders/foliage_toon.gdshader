@@ -1,8 +1,8 @@
 shader_type spatial;
 render_mode diffuse_toon, specular_toon, cull_disabled, depth_draw_opaque;
 
-uniform sampler2D leaf_texture : source_color;
-uniform sampler2D normal_map : hint_normal;
+uniform sampler2D leaf_texture : source_color, filter_nearest;
+uniform sampler2D normal_map : hint_normal, filter_nearest;
 uniform float normal_strength : hint_range(0.0, 5.0) = 1.2;
 uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
 uniform float wind_speed : hint_range(0.0, 10.0) = 1.2;
@@ -10,6 +10,15 @@ uniform float wind_strength : hint_range(0.0, 5.0) = 0.8;
 
 varying vec3 v_color;
 varying vec2 v_uv;
+varying float v_cam_dist;
+
+// ACE ORDERED DITHER: 4x4 Bayer Matrix for crunchy retro-fading
+const mat4 DITHER_MATRIX = mat4(
+	vec4(0.0625, 0.5625, 0.1875, 0.6875),
+	vec4(0.8125, 0.3125, 0.9375, 0.4375),
+	vec4(0.25,   0.75,   0.125,  0.625),
+	vec4(1.0,    0.5,    0.875,  0.375)
+);
 
 void vertex() {
 	v_color = COLOR.rgb;
@@ -18,25 +27,45 @@ void vertex() {
 	vec3 world_origin = MODEL_MATRIX[3].xyz;
 	float time = floor(TIME * 8.0) / 8.0;
 	
-	// 1. PRIMARY SWAY (Subtle leaning)
-	float sway = sin(time * wind_speed + world_origin.x * 0.15 + world_origin.z * 0.15) * 0.8;
-	sway += sin(time * wind_speed * 0.4 + world_origin.y * 0.2) * 0.2;
+	// ACE WIND HIBERNATION: Fade animation based on proximity to the camera.
+	float cam_dist = length(CAMERA_POSITION_WORLD - world_origin);
+	v_cam_dist = cam_dist;
+	float dist_weight = smoothstep(2500.0, 1200.0, cam_dist);
 	
-	// 2. LEAF FLUTTER (Maintain botanical life)
-	float flutter = sin(time * wind_speed * 3.5 + VERTEX.x * 8.0) * 0.12;
+	// 1. PRIMARY SWAY & LEAF FLUTTER
+	float sway = sin(time * wind_speed + world_origin.x * 0.05 + world_origin.z * 0.05) * 0.3;
+	float flutter = sin(time * wind_speed * 1.8 + VERTEX.x * 2.0) * 0.04;
 	
-	// Apply combined movement, weighted by height
-	float h_weight = clamp(VERTEX.y * 0.1, 0.0, 1.0);
+	// 2. HYPER-PROCEDURAL LUMPINESS (Break the circular silhouette)
+	vec3 noise_pos = world_origin * 0.15 + VERTEX * 0.4;
+	float lump = sin(noise_pos.x * 2.2 + noise_pos.z * 1.8) * cos(noise_pos.y * 1.5);
+	lump += sin(noise_pos.x * 0.5 + noise_pos.z * 0.7) * 0.6;
+	
+	// Apply combined movement, weighted by height AND proximity
+	float h_weight = clamp(VERTEX.y * 0.05, 0.0, 1.0) * dist_weight;
+	VERTEX += NORMAL * lump * 1.3; // Deform the sphere into complex botanical lumps
 	VERTEX.x += (sway * wind_strength + flutter) * h_weight;
-	VERTEX.z += (sway * wind_strength * 0.5 + flutter) * h_weight;
+	VERTEX.z += (sway * wind_strength * 0.4 + flutter) * h_weight;
 }
 
 void fragment() {
-	// ACE LEAF DETAIL: Scale UVs (1.8x) so each card displays individual leaf fragments rather than a whole cluster
-	vec2 leaf_uv = v_uv * 1.5; 
+	// ACE LEAF DETAIL: Scaled up 2x from previous (0.25x multiplier)
+	vec2 leaf_uv = v_uv * 0.25; 
 	vec4 tex_col = texture(leaf_texture, leaf_uv);
+	// ACE OBSIDIAN DEPTH: Aggressively push darks to near-black for maximum physical relief
+	tex_col.rgb = pow(tex_col.rgb, vec3(2.6));
+	
 	// Alpha-clip for clean edges
 	if (tex_col.a < 0.3) discard;
+	
+	// ACE DISTANCE DITHER: Saturn-style dissolve for the far horizon (LOD Replacement)
+	// Gradually dissolves objects into the background between 8km and 12km
+	float fade_start = 8000.0;
+	float fade_end = 12000.0;
+	float transparency = 1.0 - clamp((v_cam_dist - fade_start) / (fade_end - fade_start), 0.0, 1.0);
+	
+	ivec2 d_uv = ivec2(mod(FRAGCOORD.xy, 4.0));
+	if (DITHER_MATRIX[d_uv.x][d_uv.y] > transparency) discard;
 	
 	// NORMAL MAPPING: Inject micro-scale leaf details (Normal Map + Auto-Normal)
 	vec3 tex_normal = texture(normal_map, leaf_uv).xyz * 2.0 - 1.0;
@@ -83,8 +112,16 @@ void light() {
 	float t2 = aa_step(0.20, l_level);
 	float t1 = aa_step(0.60, l_level);
 	
-	vec3 shadow_col = ALBEDO * 0.45; // Lifted shadow floor for 'Light & Airy' feel (Was 0.35)
+	vec3 shadow_col = ALBEDO * 0.45; 
 	vec3 mid_col = ALBEDO * 0.75;
+	
+	// ACE HALFTONE: Add dot-matrix texture to the midtones and shadows
+	// This creates a 'Comic/Sketch' look that is unique to Shadowglass
+	vec2 dot_uv = FRAGCOORD.xy * 0.15;
+	float dots = sin(dot_uv.x) * sin(dot_uv.y);
+	float halftone = smoothstep(0.0, 0.15, dots);
+	shadow_col *= mix(0.7, 1.0, halftone);
+	mid_col *= mix(0.85, 1.0, halftone);
 	
 	vec3 final_col = mix(shadow_col, mid_col, t2);
 	final_col = mix(final_col, ALBEDO, t1);

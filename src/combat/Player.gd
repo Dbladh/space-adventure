@@ -88,9 +88,9 @@ func _ready() -> void:
 	if bolt_script: print("--- GUNSMITH: LaserBolt loaded OK ---")
 	else: print("!!! GUNSMITH ERROR: Cannot find res://src/combat/LaserBolt.gd !!!")
 	
-	# 0. PHYSICAL BOUNDARIES: X-Wing Class Hardening (18m Radius)
+	# 0. PHYSICAL BOUNDARIES: Starhawk-Class (6m Hull Radius)
 	coll_node = CollisionShape3D.new()
-	var shape = SphereShape3D.new(); shape.radius = 18.0 
+	var shape = SphereShape3D.new(); shape.radius = 6.0 
 	coll_node.shape = shape
 	add_child(coll_node)
 	self.collision_layer = 2 # THE SHIP
@@ -115,7 +115,11 @@ func _ready() -> void:
 			hc.set("max_health", 400.0) # ACE DURABILITY: 400 HP
 			hc.name = "HealthComponent"
 			npc.add_child(hc)
-			get_parent().add_child(npc)
+			# WORLD-SPACE SYNC: Parent to WorldRoot for stable Floating Origin shifts
+			var wr = get_tree().get_first_node_in_group("WorldRoot")
+			if wr: wr.add_child(npc)
+			else: get_parent().add_child(npc)
+			
 			npc.global_position = global_position - global_transform.basis.z * 1500.0 # Just ahead
 	)
 
@@ -316,18 +320,19 @@ func _physics_process(delta: float) -> void:
 	var cur_fire = Input.is_key_pressed(KEY_F)
 	var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
 	
-	# Continuously evaluate multi-planetary proximity to lock onto the closest orbit!
-	var planets = get_tree().get_nodes_in_group("Planet")
-	if planets.size() > 0:
-		var closest = planets[0]
-		var shortest = global_position.distance_to(closest.global_position) - closest.get("planet_radius")
-		for i in range(1, planets.size()):
-			var p = planets[i]
-			var dist = global_position.distance_to(p.global_position) - p.get("planet_radius")
-			if dist < shortest:
-				shortest = dist
-				closest = p
-		target_planet = closest
+	# PLANETARY PROXIMITY THROTTLE: Only scan for planets every 15 frames
+	if _hb_tick % 15 == 0:
+		var planets = get_tree().get_nodes_in_group("Planet")
+		if planets.size() > 0:
+			var closest = planets[0]
+			var shortest = global_position.distance_to(closest.global_position) - closest.get("planet_radius")
+			for i in range(1, planets.size()):
+				var p = planets[i]
+				var dist = global_position.distance_to(p.global_position) - p.get("planet_radius")
+				if dist < shortest:
+					shortest = dist
+					closest = p
+			target_planet = closest
 	
 	if in_ship:
 		_process_ace_flight(delta)
@@ -450,43 +455,19 @@ func _process_ace_flight(delta: float) -> void:
 	var is_in_atmo = target_planet and true_altitude < 26000.0
 	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
 	
-	# 1. PITCH: Local-axis rotation remains standard for vertical authority
+	# 1. PITCH: Local-axis rotation
 	rotate(basis.x.normalized(), pitch * rotation_speed * delta)
 	
-	# 2. YAW: Planetary-stabilized rotation
+	# 2. YAW: Banks more naturally if we use local Basis Y instead of World-Up
 	if is_in_atmo:
-		# Rotating around World-Up ensures 'Flat Turns' relative to the planet surface
-		rotate(world_up, yaw * rotation_speed * delta)
+		# ACE HARDENING: Local Y rotation allows for Banked Turns (High-Fidelity)
+		rotate(basis.y.normalized(), yaw * rotation_speed * delta)
 	else:
 		rotate(basis.y.normalized(), yaw * rotation_speed * delta)
 	
-	# 3. ROLL: Leveling with 'No Man's Sky' Surface-Lock Logic
-	if is_in_atmo:
-		# ACE HARDENING: We reconstruct the 'Ideal Horizon Basis' every frame.
-		# This prevents 'Upside-Down' flipping by enforcing a global Upward bias.
-		var current_fwd = -global_transform.basis.z
-		
-		# Define the 'Ideal Right' (Horizon Plane)
-		var horizon_right = current_fwd.cross(world_up).normalized()
-		# Define the 'Ideal Up' (Upright relative to gravity)
-		var horizon_up = horizon_right.cross(current_fwd).normalized()
-		
-		# Construct the target orientation (Flat with horizon, but preserving pitch)
-		var ideal_basis = Basis(horizon_right, horizon_up, -current_fwd)
-		
-		# Proportional Leveling: Slerp the current rotation toward the horizon-locked state
-		# We use a high weight (6.0) to ensure the ship feels 'Heavy' and 'Upright' in atmo.
-		if abs(roll_input) < 0.1:
-			var target_q = ideal_basis.get_rotation_quaternion()
-			var current_q = global_transform.basis.get_rotation_quaternion()
-			var result_q = current_q.slerp(target_q, 6.0 * delta)
-			global_transform.basis = Basis(result_q)
-		else:
-			# If player is manually rolling, we just orthonormalize to prevent drift-flipping
-			rotate(basis.z.normalized(), roll_input * roll_speed * delta)
-	else:
-		# Deep Space: Full manual roll authority
-		rotate(basis.z.normalized(), roll_input * roll_speed * delta)
+	# 3. ROLL: Full Manual Authority (ACE Drift Purge)
+	# Removed the NMS-style auto-leveler to allow for persistent banking
+	rotate(basis.z.normalized(), roll_input * roll_speed * delta)
 	
 	# PHYSICS HARDENING: Orthonormalize basis to prevent floating-point stretching
 	# At massive scales, tiny precision errors in rotation accumulate into a 'Flipped Hull'.
@@ -520,15 +501,21 @@ func _process_ace_flight(delta: float) -> void:
 		reentry_intensity = 4.5
 	last_alt = true_altitude
 	
-	# FLIGHT PHYSICS RATIO: Optimized for reentry braking (10km-26km)
-	var altitude_ratio = smoothstep(10000.0, 26000.0, true_altitude)
+	# FLIGHT PHYSICS RATIO: Optimized for reentry braking (Exosphere Transition)
+	var altitude_ratio = smoothstep(12000.0, 35000.0, true_altitude)
 	
-	# TURBULENCE RATIO: Grass-skimming ONLY (peaks at 150m, clears at 800m)
+	# SURFACE-DETAIL RATIO: Aggressive throttling for low-altitude cinematic stability (0m to 3500m)
+	var surface_ratio = smoothstep(0.0, 3500.0, true_altitude)
 	var turb_altitude_ratio = smoothstep(150.0, 800.0, true_altitude)
 	
-	# ATMOSPHERIC SPEED DECELERATION: 40% reduction in surface-level kinetic energy to ensure cinematic stability
-	var dynamic_max_speed = lerp(480.0, max_space_speed, altitude_ratio)
-	var dynamic_warp_speed = lerp(2100.0, max_warp_speed, altitude_ratio)
+	# ATMOSPHERIC SPEED DECELERATION: Tiered throttling for planetary exploration
+	# Surface: ~180m/s | Exosphere: 480m/s | Space: max_space_speed
+	var surface_max = lerp(180.0, 480.0, surface_ratio)
+	var dynamic_max_speed = lerp(surface_max, max_space_speed, altitude_ratio)
+	
+	# Warp Thresholds: 450m/s (Surface) -> 2100m/s (Atmo) -> max_warp_speed (Space)
+	var surface_warp = lerp(450.0, 2100.0, surface_ratio)
+	var dynamic_warp_speed = lerp(surface_warp, max_warp_speed, altitude_ratio)
 	
 	# THREE-TIER SPEED SELECTION
 	# Normal: R2 analog → dynamic_max_speed
@@ -568,23 +555,23 @@ func _process_ace_flight(delta: float) -> void:
 	
 	self.motion_mode = CharacterBody3D.MOTION_MODE_FLOATING # ACE DRIFT PURGE
 	
-	# DYNAMIC FOV: Scaled carefully for astronomical speeds (Capped at 132°)
+	# DYNAMIC FOV: Calibrated to prevent edge-warping (Capped at 100°)
+	# High FOVs (>110°) cause extreme 'fisheye' distortion at astronomical speeds.
 	if camera:
-		# Calculate speed percentage relative to the absolute max speed (Hyperdrive)
 		var speed_val = velocity.length()
 		var fov_scale = 0.0
 		if speed_val > max_warp_speed:
-			# Hyperdrive Epoch: 110 -> 132
+			# Hyperdrive Epoch: 92 -> 100
 			var t = clamp((speed_val - max_warp_speed) / (max_hyperdrive_speed - max_warp_speed), 0.0, 1.0)
-			fov_scale = 110.0 + (t * 22.0)
+			fov_scale = 92.0 + (t * 8.0)
 		elif speed_val > max_space_speed:
-			# Warp Epoch: 90 -> 110
+			# Warp Epoch: 82 -> 92
 			var t = clamp((speed_val - max_space_speed) / (max_warp_speed - max_space_speed), 0.0, 1.0)
-			fov_scale = 90.0 + (t * 20.0)
+			fov_scale = 82.0 + (t * 10.0)
 		else:
-			# Normal Flight: 75 -> 90
+			# Normal Flight: 70 -> 82
 			var t = clamp(speed_val / max_space_speed, 0.0, 1.0)
-			fov_scale = 75.0 + (t * 15.0)
+			fov_scale = 70.0 + (t * 12.0)
 		
 		camera.fov = lerp(camera.fov, fov_scale, 4.0 * delta)
 		
@@ -614,12 +601,47 @@ func _process_ace_flight(delta: float) -> void:
 	
 	move_and_slide()
 	
+	# ACE SAFETY FLOOR: Terrain-aware anti-clipping recovery (Radius-Aware)
+	if target_planet and target_planet.has_method("get_terrain_elevation"):
+		var p_center = target_planet.global_position
+		var to_ship = global_position - p_center
+		var dist_to_center = to_ship.length()
+		var up_dir = to_ship / dist_to_center
+		
+		var terrain_h = target_planet.get_terrain_elevation(up_dir)
+		var p_radius = target_planet.get("planet_radius")
+		
+		# ACE HARDENING: Optimized for 6m Hull Radius
+		# Target: 1.0m absolute gap for extreme ground-skimming
+		var ship_hull_radius = 6.0
+		var min_safe_dist = p_radius + terrain_h + ship_hull_radius + 1.0
+		
+		if dist_to_center < min_safe_dist:
+			# ACE REPULSION: Instantly eject ship from the terrain 
+			# We use a higher correction factor for low-altitude high-speed safety
+			var correction = up_dir * (min_safe_dist - dist_to_center)
+			global_position += correction
+			
+			# Kill downward velocity
+			var v_dot = velocity.dot(up_dir)
+			if v_dot < 0:
+				# Bounce slightly more aggressively when close to ground to prevent stickiness
+				velocity -= up_dir * v_dot * 1.8 
+		
+		# ACE TERRAIN FOLLOWING (NMS Style): Predictive pitch correction
+		# If we are close and moving, pull the nose up slightly to follow the land
+		if dist_to_center < (p_radius + terrain_h + 100.0):
+			var fwd = -global_transform.basis.z
+			if fwd.dot(up_dir) < -0.1: # Pointing down
+				# Apply a small virtual 'lift' force
+				velocity += up_dir * 120.0 * delta 
+	
 	# CELESTIAL CAMERA SYNC (Top-Level Smoothing)
 	# ACE HARDENING: We sync AFTER move_and_slide to prevent frame-latency at 12km/s.
 	if cam_pivot:
 		# 1. POSITION SYNC: Snap the independent pivot to the ship's final physical location
-		if v_update_30:
-			cam_pivot.global_position = global_position
+		# ACE HARDENING: Position must sync every physics frame to prevent 'Separation Jitter' at km/s speeds.
+		cam_pivot.global_position = global_position
 		
 		# 2. ORIENTATION SYNC: Calculate the tracking target
 		world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
@@ -631,8 +653,8 @@ func _process_ace_flight(delta: float) -> void:
 			var cam_q = Basis.looking_at(look_dir, world_up).get_rotation_quaternion()
 			
 			var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
-			if v_update_30:
-				cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
+			# ROTATION HARDENING: Camera orientation must follow at physics-rate to keep ship centered
+			cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
 		else:
 			# CHASE: Follow the hull with horizon-locked stabilization
 			var ship_q = global_transform.basis.get_rotation_quaternion()
@@ -640,8 +662,8 @@ func _process_ace_flight(delta: float) -> void:
 			
 			var target_q = (ship_q * orbit_q).normalized()
 			var current_q = cam_pivot.global_transform.basis.get_rotation_quaternion()
-			if v_update_30:
-				cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, 15.0 * delta))
+			# Orient at physics-rate for atmospheric stability
+			cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, 15.0 * delta))
 	
 	_update_polar_weather(delta)
 		
@@ -721,7 +743,7 @@ func _process_ace_flight(delta: float) -> void:
 		var dip_deg = -pitch * 8.0
 		var t_rot = Vector3(bank_deg, -90.0, dip_deg)
 		
-		# ACE ROTATION HARDENING: Accelerate recentering weight (8.0x) when inputs are zeroed
+		# ACE ROTATION HARDENING: Smooth lerp banking/dip every frame to prevent jitter
 		var rot_weight = 12.0 if (abs(yaw) < 0.01 and abs(pitch) < 0.01) else 4.0
 		
 		# BARREL ROLL LOGIC: 360 Degree helical rotation
@@ -729,42 +751,31 @@ func _process_ace_flight(delta: float) -> void:
 		if is_rolling:
 			barrel_roll_t -= delta * 1.85 # ~0.54s duration
 			var roll_perc = 1.0 - barrel_roll_t
-			# Easing: Quadratic out for snappy start
 			var roll_angle = roll_perc * 360.0 * barrel_roll_dir
-			
-			# OVERRIDE ROTATION: Bypass banking lerp for a precise 360 spin
 			ship_model.rotation_degrees.x = roll_angle
 			
-			# ACE KINETIC HARDENING: Side-strafe impulse with 'Atmospheric Damping'
-			# We move the impulse to 'velocity' to allow move_and_slide to handle collisions.
 			var ground_damping = clamp(true_altitude / 1000.0, 0.25, 1.0) 
 			var strafe_dir = -global_transform.basis.x * barrel_roll_dir
 			if target_planet and true_altitude < 20000.0:
 				strafe_dir = strafe_dir.slide(world_up).normalized()
 			velocity += strafe_dir * (2800.0 * ground_damping)
-			
-			# ACE ROTATION WRAP: Snap back to zero equivalent at final frame to prevent back-spin lerp
-
-
 
 			if barrel_roll_t <= 0.0:
 				ship_model.rotation_degrees.x = 0.0 
-		elif v_update_30:
+		else:
+			# ACE SYNC: Interpolate banking at physics-rate, but only snap visuals at 30fps if needed.
+			# For Starfox-fidelity, we maintain banking smoothness at physics-rate.
 			ship_model.rotation_degrees = ship_model.rotation_degrees.lerp(t_rot, rot_weight * delta)
 
-
-
-		
 		# Identity Snap: Force exact level-flight if within 0.1 degree of target
 		if abs(ship_model.rotation_degrees.x) < 0.1 and abs(ship_model.rotation_degrees.z) < 0.1 and abs(yaw) < 0.01:
 			ship_model.rotation_degrees.x = 0.0
 			ship_model.rotation_degrees.z = 0.0
 		
-		# HOVER IDLE ANIMATION (Quantized to 30fps)
-		if v_update_30:
-			var speed_ratio = clamp(velocity.length() / 200.0, 0.0, 1.0)
-			var hover_bob = sin(Time.get_ticks_msec() * 0.0015) * 1.5 * (1.0 - speed_ratio)
-			ship_model.position.y = lerp(ship_model.position.y, hover_bob, 5.0 * delta)
+		# HOVER IDLE ANIMATION (Physics-rate smooth lerp)
+		var speed_ratio = clamp(velocity.length() / 200.0, 0.0, 1.0)
+		var hover_bob = sin(Time.get_ticks_msec() * 0.0015) * 1.5 * (1.0 - speed_ratio)
+		ship_model.position.y = lerp(ship_model.position.y, hover_bob, 5.0 * delta)
 
 func _fire_alternating_cannon() -> void:
 	fire_cooldown = FIRE_RATE
@@ -911,85 +922,34 @@ func _process(delta: float) -> void:
 		var bullet_v = (-global_transform.basis.z * p_speed) + velocity
 		var aim_point = global_position + (bullet_v * 0.25)
 		
-		# ACE RADAR: Target acquisition sensor suite
-		var best_target: Node3D = null
-		var fwd = -global_transform.basis.z 
-		# Hard-safety: verify tree-state before group iteration
-		if is_inside_tree():
-			for t in get_tree().get_nodes_in_group("Targets"):
-				# High-fidelity validity check: Existential + Deletion state
-				if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
-				var d_v = (t.global_position - global_position)
-				if d_v.length() > 25000.0: continue # Sensor range boost
-				if fwd.dot(d_v.normalized()) > 0.70: # 45 degree radar cone
-					best_target = t; break
-		lock_on_target = best_target
+		# RADAR THROTTLE: Scans for targets only every 5 frames in process
+		_v_tick_30_v += 1
+		if _v_tick_30_v % 5 == 0:
+			var best_target: Node3D = null
+			var fwd = -global_transform.basis.z 
+			if is_inside_tree():
+				for t in get_tree().get_nodes_in_group("Targets"):
+					if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
+					var d_v = (t.global_position - global_position)
+					if d_v.length() > 25000.0: continue 
+					if fwd.dot(d_v.normalized()) > 0.70: 
+						best_target = t; break
+			lock_on_target = best_target
 
-		
-		# CRASH-HARDENING: Nullify pinned target if it's no longer world-legal
-		if pinned_target and (not is_instance_valid(pinned_target) or pinned_target.is_queued_for_deletion()):
-			pinned_target = null
-			
-		# ACE LOCK-ON VISOR SYNC: Dual-Stage Tracking
-		# 1. SCAN VISOR: Yellow-ish/White candidate tracking
-		if is_instance_valid(lock_on_target) and not camera.is_position_behind(lock_on_target.global_position):
-			hud_scan_lock.show()
-			hud_scan_lock.position = camera.unproject_position(lock_on_target.global_position) - Vector2(40, 40)
-			# Fade candidate if it's the same as pinned
-			hud_scan_lock.modulate = Color(1, 1, 1, 0.3) if lock_on_target == pinned_target else Color(1, 1, 1, 0.8)
-		else:
-			hud_scan_lock.hide()
-			
-		# 2. HARD LOCK VISOR
-		if is_instance_valid(pinned_target):
-			var s_pos = camera.unproject_position(pinned_target.global_position)
-			var s_rect = get_viewport().get_visible_rect().size
-			var behind = camera.is_position_behind(pinned_target.global_position)
-			# FRUSTUM HYGIENE: Check if target is truly outside the 2D frame
-			var is_off = behind or s_pos.x < 20 or s_pos.x > s_rect.x-20 or s_pos.y < 20 or s_pos.y > s_rect.y-20
-			
-			if is_off:
-				hud_target_lead.hide()
-				_draw_fleet_arrow(hud_hard_lock, pinned_target.global_position)
-			else:
-				hud_hard_lock.show()
-				hud_hard_lock.modulate = Color(1, 0.8, 0.1) # GOLD (Locked)
-				hud_hard_lock.position = s_pos - Vector2(50, 50)
+			# FLEET THREAT TRACKER: Draw arrows for ALL off-screen enemies
+			var adversaries = get_tree().get_nodes_in_group("Enemies")
+			var arrow_idx = 0
+			for a in adversaries:
+				if not is_instance_valid(a) or a.is_queued_for_deletion(): continue
+				if a == pinned_target: continue 
+				if arrow_idx >= hud_threat_arrows.size(): break
 				
-				# INTERCEPT LEAD: Predictive solution (Only if on-screen)
-				var lead_p_speed = 22000.0
-				var rel_vel = pinned_target.get_real_velocity() if pinned_target.has_method("get_real_velocity") else pinned_target.get("velocity")
-				if rel_vel == null: rel_vel = Vector3.ZERO
-				
-				var dist = global_position.distance_to(pinned_target.global_position)
-				var lead_pos = pinned_target.global_position + (rel_vel * (dist / lead_p_speed))
-
-				if not camera.is_position_behind(lead_pos):
-					hud_target_lead.show()
-					hud_target_lead.position = camera.unproject_position(lead_pos) - Vector2(20, 20)
-					var dist_px = (hud_reticle.position + Vector2(25,25)).distance_to(hud_target_lead.position + Vector2(20,20))
-					if dist_px < 60.0: hud_target_lead.modulate = Color(0.2, 1.0, 0.2)
-					else: hud_target_lead.modulate = Color(1.0, 0.5, 0.1)
-				else:
-					hud_target_lead.hide()
-		else:
-			hud_hard_lock.hide()
-			hud_target_lead.hide()
-
-		# 4. FLEET THREAT TRACKER: Draw arrows for ALL off-screen enemies
-		var adversaries = get_tree().get_nodes_in_group("Enemies")
-		var arrow_idx = 0
-		for a in adversaries:
-			if not is_instance_valid(a) or a.is_queued_for_deletion(): continue
-			if a == pinned_target: continue # Pinned has its own priority logic
-			if arrow_idx >= hud_threat_arrows.size(): break
-			
-			if camera.is_position_behind(a.global_position) or not camera.is_position_in_frustum(a.global_position):
-				_draw_fleet_arrow(hud_threat_arrows[arrow_idx], a.global_position)
-				arrow_idx += 1
-		# Clean up unused arrows
-		for k in range(arrow_idx, hud_threat_arrows.size()):
-			hud_threat_arrows[k].hide()
+				if camera.is_position_behind(a.global_position) or not camera.is_position_in_frustum(a.global_position):
+					_draw_fleet_arrow(hud_threat_arrows[arrow_idx], a.global_position)
+					arrow_idx += 1
+			# Clean up unused arrows
+			for k in range(arrow_idx, hud_threat_arrows.size()):
+				hud_threat_arrows[k].hide()
 
 
 
@@ -1031,8 +991,8 @@ func _process(delta: float) -> void:
 			reentry_vignette.material.set_shader_parameter("intensity", max(reentry_heat, alt_heat))
 			
 		# ACE MUZZLE-VISUAL SYNC: Poll and Fire in _process for interpolated visual alignment
-		# AERO-VORTEX TRAILS: Spawn condensation streaks during reentry
-		if reentry_intensity > 0.05 and _hb_tick % 2 == 0: 
+		# AERO-VORTEX TRAILS: Spawn condensation streaks during reentry (Uncapped 60FPS)
+		if reentry_intensity > 0.05: 
 			# ACE DISTANCE THROTTLE: Only spawn if the ship has traveled 15m since the last streak
 			var ship_vel_len = velocity.length()
 			if global_position.distance_to(_last_trail_pos) > 15.0:
@@ -1124,6 +1084,12 @@ func _process(delta: float) -> void:
 			node.queue_free(); live_bolts.remove_at(i)
 		elif v_update_30:
 			node.global_position = b["pos"]
+			# KINETIC STRETCH: Close the 30Hz gap for visual continuity in Retro Mode
+			# Bridges the 500m-1km gaps between frames with a solid energy streak.
+			var stretch_len = (move_dist.length() * 2.5) / 120.0 
+			for child in node.get_children():
+				if child is MeshInstance3D:
+					child.scale.y = max(1.0, stretch_len)
 		i -= 1
 				
 	# GUNSMITH FINAL SYNC: Fire AFTER bolt pool updates to ensure muzzle-snapping

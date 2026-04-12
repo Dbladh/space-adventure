@@ -45,6 +45,9 @@ func _ready() -> void:
 	
 	# 7. MATERIALIZE PILOT
 	_spawn_ace_pilot(Vector3.ZERO)
+	
+	# 8. TITAN DEVELOPER TOOLS (The Slider Sync)
+	_setup_debug_developer_suite()
 
 func _purge_ghost_entities() -> void:
 	for child in get_children():
@@ -70,9 +73,9 @@ func _setup_stellar_horizon() -> void:
 	var fn_n = FastNoiseLite.new(); fn_n.noise_type = FastNoiseLite.TYPE_SIMPLEX; fn_n.frequency = 0.02
 	var nt_n = NoiseTexture2D.new(); nt_n.width = 512; nt_n.height = 512; nt_n.noise = fn_n; nt_n.seamless = true
 	
-	# MACROSCOPIC CLOUD NOISE: 64^3 costs 8x less VRAM than 128^3 with identical visual quality at sky scale
+	# MACROSCOPIC CLOUD NOISE: 512x512 2D texture restores cinematic FPS and visual continuity
 	var fn_c = FastNoiseLite.new(); fn_c.noise_type = FastNoiseLite.TYPE_SIMPLEX; fn_c.frequency = 0.025; fn_c.fractal_octaves = 2
-	var nt_c = NoiseTexture3D.new(); nt_c.width = 64; nt_c.height = 64; nt_c.depth = 64; nt_c.noise = fn_c; nt_c.seamless = true
+	var nt_c = NoiseTexture2D.new(); nt_c.width = 512; nt_c.height = 512; nt_c.noise = fn_c; nt_c.seamless = true
 	
 	sky_mat.set_shader_parameter("star_noise", nt_s)
 	sky_mat.set_shader_parameter("nebula_noise", nt_n)
@@ -82,8 +85,18 @@ func _setup_stellar_horizon() -> void:
 	main_sky_mat = sky_mat
 	
 	sky_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	sky_env.ambient_light_color = Color("#3A75C4")
-	sky_env.ambient_light_energy = 0.65 
+	# Warm neutral ambient so shadow-side terrain reads as dark amber, not pitch black
+	sky_env.ambient_light_color = Color("#C8B89A")
+	sky_env.ambient_light_energy = 1.1
+	
+	# BOTW-STYLE ATMOSPHERIC HAZE: Exponential distance fog for aerial perspective
+	# This will fade distant mountains into a soft haze, giving enormous perceived depth
+	sky_env.fog_enabled = true
+	sky_env.fog_light_color = Color(0.72, 0.82, 0.95)  # Soft sky blue starter — updated per planet
+	sky_env.fog_light_energy = 0.4  # Low enough that OmniLights don't expose cluster tile boundaries
+	sky_env.fog_density = 0.0   # Start at 0, updated per-frame in _update_atmospheric_transition
+	sky_env.fog_aerial_perspective = 0.3  # Subtle sky blend — only affects very distant horizon
+	sky_env.fog_sun_scatter = 0.25  # Warm glow near the sun direction for golden horizon feel
 	env.environment = sky_env
 	add_child(env); move_child(env, 0); main_env = env
 	
@@ -94,20 +107,25 @@ func _setup_hardened_solar_genesis() -> void:
 	var sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-45, 45, 0) 
 	
-	# WARM SUNLIGHT: Compensates for the new saturated blue shadows
+	# WARM SUNLIGHT: Slightly reduced to balance the brighter ambient fill
 	sun.light_color = Color("#FFF0CE")
-	sun.light_energy = 1.2
+	sun.light_energy = 0.90
 	sun.shadow_enabled = true
 	
-	# ACE SHADOW HARDENING: PCF13 filtering (Integer 2) definitively purges 'flickering shadow' Moire
-	RenderingServer.directional_soft_shadow_filter_set_quality(2) 
-	
+	# ACE SHADOW LOD: 4-Split CSM (Cascaded Shadow Maps) for proximity fidelity
+	# High quality near player, low fidelity for distant horizon silhouettes
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	sun.directional_shadow_blend_splits = true
-	sun.set("shadow_blur", 0.0) 
-	sun.shadow_bias = 0.05
-	sun.shadow_normal_bias = 3.0 # Definitive purge of shadow Moire/grain
+	sun.directional_shadow_split_1 = 0.05 # Near focus (High Detail)
+	sun.directional_shadow_split_2 = 0.15
+	sun.directional_shadow_split_3 = 0.45 # Far focus
 	
-	sun.directional_shadow_max_distance = 5000.0 
+	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_MEDIUM)
+	sun.set("shadow_blur", 3.5) # Noticeably softer shadow edges on the terrain cliffs
+	sun.shadow_bias = 0.12
+	sun.shadow_normal_bias = 4.0 
+	
+	sun.directional_shadow_max_distance = 8000.0 
 	sun.add_to_group("World")
 	add_child(sun)
 	main_sun = sun
@@ -115,24 +133,88 @@ func _setup_hardened_solar_genesis() -> void:
 func _setup_titan_planetary() -> void:
 	var planet_gen_script = load("res://src/world/PlanetGen.gd")
 	if planet_gen_script:
-		# MAIN PLANET (75% Scale) — Seed 1001 for deterministic unique terrain+palette
+		# -----------------------------------------------------------------------
+		# GALAXY REGISTRY — THE ARCHITECT
+		# Solar system of 4 bodies, each with a unique seed ensuring distinct
+		# terrain noise, palette, and landmark placement per celestial body.
+		# Positions form a natural inner-system arc at varied orbital inclinations.
+		# -----------------------------------------------------------------------
+
+		# PLANET 1 — Hero World (seed 1001) — Main landable planet near origin
 		var planet = Node3D.new(); planet.set_script(planet_gen_script)
-		planet.name = "Planet"
+		planet.name = "Planet_Varn"
 		planet.set("planet_radius", 1125000.0)
-		planet.set("planet_seed", 1001)  # Deterministic unique terrain noise seed!
+		planet.set("planet_seed", 1001)
 		add_child(planet)
-		planet.global_position = Vector3(0, 0, -1425000.0)
+		# Varn: 1.5Mkm forward (–Z) — the home world directly ahead at game start
+		planet.global_position = Vector3(0, 0, -1500000.0)
 		planet.add_to_group("World")
 		planet_ref = planet
-		
-		# SECONDARY MOON — Seed 2002 for guaranteed distinct terrain+palette
+
+		# PLANET 2 — Tethys (seed 2002)
 		var moon = Node3D.new(); moon.set_script(planet_gen_script)
-		moon.name = "Moon"
-		moon.set("planet_radius", 450000.0)
-		moon.set("planet_seed", 2002)  # Guaranteed distinct seed from main planet!
+		moon.name = "Planet_Tethys"
+		moon.set("planet_radius", 625000.0)
+		moon.set("planet_seed", 2002)
 		add_child(moon)
-		moon.global_position = Vector3(1800000.0, 400000.0, -1400000.0)
+		moon.global_position = Vector3(2500000.0, 400000.0, -1800000.0)
 		moon.add_to_group("World")
+
+		# PLANET 3 — Keth (seed 3003)
+		var planet3 = Node3D.new(); planet3.set_script(planet_gen_script)
+		planet3.name = "Planet_Keth"
+		planet3.set("planet_radius", 820000.0)
+		planet3.set("planet_seed", 3003)
+		add_child(planet3)
+		planet3.global_position = Vector3(-3500000.0, -800000.0, 2800000.0)
+		planet3.add_to_group("World")
+
+		# PLANET 4 — Ido (seed 4004)
+		var planet4 = Node3D.new(); planet4.set_script(planet_gen_script)
+		planet4.name = "Planet_Ido"
+		planet4.set("planet_radius", 380000.0)
+		planet4.set("planet_seed", 4004)
+		add_child(planet4)
+		planet4.global_position = Vector3(1800000.0, 300000.0, 450000.0)
+		planet4.add_to_group("World")
+
+		# --- OUTER SYSTEM (Compressed) ---
+
+		# PLANET 5 — Obsidia (seed 5005)
+		var planet5 = Node3D.new(); planet5.set_script(planet_gen_script)
+		planet5.name = "Planet_Obsidia"
+		planet5.set("planet_radius", 1850000.0)
+		planet5.set("planet_seed", 5005)
+		add_child(planet5)
+		planet5.global_position = Vector3(-5000000.0, 1500000.0, -6800000.0)
+		planet5.add_to_group("World")
+
+		# PLANET 6 — Xylos (seed 6006)
+		var planet6 = Node3D.new(); planet6.set_script(planet_gen_script)
+		planet6.name = "Planet_Xylos"
+		planet6.set("planet_radius", 940000.0)
+		planet6.set("planet_seed", 6006)
+		add_child(planet6)
+		planet6.global_position = Vector3(8500000.0, -2200000.0, 5200000.0)
+		planet6.add_to_group("World")
+
+		# PLANET 7 — Beryll (seed 7007)
+		var planet7 = Node3D.new(); planet7.set_script(planet_gen_script)
+		planet7.name = "Planet_Beryll"
+		planet7.set("planet_radius", 2400000.0)
+		planet7.set("planet_seed", 7007)
+		add_child(planet7)
+		planet7.global_position = Vector3(-12000000.0, 3500000.0, 11500000.0)
+		planet7.add_to_group("World")
+
+		# PLANET 8 — Null-9 (seed 8008)
+		var planet8 = Node3D.new(); planet8.set_script(planet_gen_script)
+		planet8.name = "Planet_Null9"
+		planet8.set("planet_radius", 450000.0)
+		planet8.set("planet_seed", 8008)
+		add_child(planet8)
+		planet8.global_position = Vector3(4000000.0, -8500000.0, -19500000.0)
+		planet8.add_to_group("World")
 
 func _setup_asteroid_belt() -> void:
 	var belt_script = load("res://src/world/AsteroidBelt.gd")
@@ -224,12 +306,11 @@ func _process(_delta: float) -> void:
 		"VISOR: [V] | MOUSE: [ESC]%s"
 	) % [alt, floor(speed/1000.0), fps, m_time, draws, objs, vram, ram, act]
 	
-	# SOLAR ORBIT: Slowly rotate the sun around the world axis
-	# This creates a dynamic day/night cycle and shifts the planetary shadows perfectly.
-	solar_time += _delta * 0.005 # Majestic, slow galactic rotation
+	# SOLAR ORBIT: FROZEN FOR CINEMATIC STABILITY
+	# This creates a static, iconic high-contrast lighting environment.
 	if main_sun:
-		main_sun.rotation_degrees.y = fmod(solar_time * 30.0, 360.0)
-		main_sun.rotation_degrees.x = -45.0 # Fixed tilt for consistent highlight contrast
+		main_sun.rotation_degrees.y = 45.0 # Fixed iconic highlight angle
+		main_sun.rotation_degrees.x = -45.0 
 
 func _update_atmospheric_transition(p: Node) -> void:
 	var alt_m = 100000.0
@@ -243,36 +324,47 @@ func _update_atmospheric_transition(p: Node) -> void:
 	var surface_alt = 18000.0 # 18km - Clean surface atmosphere
 	
 	var raw_ratio = clamp((alt_m - surface_alt) / (space_alt - surface_alt), 0.0, 1.0) 
-	var ratio = raw_ratio * raw_ratio * (3.0 - 2.0 * raw_ratio) # Cubic S-curve smoothing
+	var lighting_ratio = raw_ratio * raw_ratio * (3.0 - 2.0 * raw_ratio) # Real altitude ratio for lighting
 	
 	if main_sky_mat:
-		main_sky_mat.set_shader_parameter("space_blend", ratio)
-		# UNIQUE PLANETARY SKYBOX
-		# Inject the dynamic sunset/zenith colors calculated by the current orbital body
-		if target and "sky_horizon_color" in target:
-			main_sky_mat.set_shader_parameter("horizon_color", target.sky_horizon_color)
-			main_sky_mat.set_shader_parameter("zenith_color", target.sky_zenith_color)
+		main_sky_mat.set_shader_parameter("space_blend", 1.0) # Always space — clouds are the sky now
 	
 	if main_env and main_env.environment:
 		var sky_env = main_env.environment
-		sky_env.ambient_light_color = Color("#3A75C4").lerp(Color("#0B1021"), ratio)
-		sky_env.ambient_light_energy = lerp(0.65, 0.1, ratio)
+		# ACE: Use altitude-based ratio for lighting so surface gets warm ambient fill
+		# Surface (ratio=0): warm amber ambient at 1.3, good fill for shadow faces
+		# Space  (ratio=1): near-black ambient at 0.08, authentic vacuum lighting
+		sky_env.ambient_light_color = Color("C8B89A").lerp(Color("0B1021"), lighting_ratio)
+		sky_env.ambient_light_energy = lerp(1.3, 0.08, lighting_ratio)
+		
+		# ATMOSPHERIC HAZE: Drastically reduced density so distant planets remain visible!
+		# Godot's exponential fog math completely wipes out geometry > 500km away at normal densities.
+		var surface_fog_density = 0.000005
+		sky_env.fog_density = lerp(surface_fog_density, 0.0, lighting_ratio)
+		sky_env.fog_aerial_perspective = 0.85 # Cranks up horizon haze to compensate for thinner fog
+		
+		# Tint the fog to the planet's horizon color for per-biome atmosphere feel
+		var fog_col = Color(0.72, 0.82, 0.95) # Default sky blue
+		if target and "sky_horizon_color" in target:
+			# Blend planet color with a bright sky tint so fog stays luminous, not muddy
+			fog_col = target.sky_horizon_color.lerp(Color(0.85, 0.90, 1.0), 0.5)
+		sky_env.fog_light_color = fog_col
 		
 	if main_sun:
-		main_sun.light_color = Color("#FFF0CE").lerp(Color.WHITE, ratio)
-		main_sun.light_energy = lerp(1.2, 1.6, ratio)
+		main_sun.light_color = Color("#FFF0CE").lerp(Color.WHITE, lighting_ratio)
+		main_sun.light_energy = lerp(0.90, 1.6, lighting_ratio)
 
 func _update_shadow_distance(p: Node) -> void:
 	if not main_sun: return
-	# ON FOOT: collapse shadow range to 400m — player can't see shadows beyond nearby terrain.
-	# IN SHIP: restore full 6000m for cinematic planetary shadows during flight.
+	# MACROSCOPIC SHADOW HUD: Increase distance during high-altitude transit
 	var on_foot = "in_ship" in p and not p.in_ship
-	main_sun.directional_shadow_max_distance = 400.0 if on_foot else 6000.0
+	main_sun.directional_shadow_max_distance = 800.0 if on_foot else 8000.0
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
 		if event.keycode == KEY_V: _toggle_retro_vfx()
 		if event.keycode == KEY_F3 or event.keycode == KEY_H: _toggle_hud()
+		if event.keycode == KEY_F4: _toggle_debug_suite()
 
 func _toggle_hud() -> void:
 	hud_visible = !hud_visible
@@ -286,3 +378,37 @@ func _toggle_retro_vfx() -> void:
 		rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var smat = ShaderMaterial.new(); smat.shader = load("res://src/world/retro_vfx.gdshader")
 		rect.material = smat; retro_node.add_child(rect); add_child(retro_node)
+
+var _debug_panel: Control = null
+func _setup_debug_developer_suite() -> void:
+	var canvas = CanvasLayer.new(); canvas.layer = 120; add_child(canvas)
+	var panel = PanelContainer.new(); canvas.add_child(panel); _debug_panel = panel
+	
+	# STYLEBOX SYNC: Deep charcoal background for elite visibility
+	var sb = StyleBoxFlat.new(); sb.bg_color = Color(0.1, 0.1, 0.1, 0.95); sb.set_corner_radius_all(10); sb.set_expand_margin_all(20.0); panel.add_theme_stylebox_override("panel", sb)
+	panel.custom_minimum_size = Vector2(460, 240) # TITANIC SCALE SYNC
+	
+	# CENTER-STAGE PRESET: Robust G4 anchor logic definitive visibility
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM, Control.PRESET_MODE_KEEP_WIDTH, 150)
+	
+	var vb = VBoxContainer.new(); panel.add_child(vb)
+	var title = Label.new(); vb.add_child(title); title.text = "--- TITAN DEVELOPER TOOLS (F4) ---"; title.add_theme_color_override("font_color", Color.CHARTREUSE); title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	
+	# INTERACTION HARDENING: Large targets for easy control
+	var t_box = HBoxContainer.new(); vb.add_child(t_box); t_box.add_child(Label.new()); t_box.get_child(0).text = "Trees: "
+	var t_sli = HSlider.new(); t_box.add_child(t_sli); t_sli.min_value = 0.1; t_sli.max_value = 2.0; t_sli.value = 1.0; t_sli.custom_minimum_size.x = 250; t_sli.size_flags_horizontal = 3; t_sli.value_changed.connect(func(v): DebugSettings.tree_mult = v)
+	var r_box = HBoxContainer.new(); vb.add_child(r_box); r_box.add_child(Label.new()); r_box.get_child(0).text = "Rocks: "
+	var r_sli = HSlider.new(); r_box.add_child(r_sli); r_sli.min_value = 0.1; r_sli.max_value = 2.0; r_sli.value = 1.0; r_sli.custom_minimum_size.x = 250; r_sli.size_flags_horizontal = 3; r_sli.value_changed.connect(func(v): DebugSettings.rock_mult = v)
+	var c_box = HBoxContainer.new(); vb.add_child(c_box); c_box.add_child(Label.new()); c_box.get_child(0).text = "Chaos: "
+	var c_sli = HSlider.new(); c_box.add_child(c_sli); c_sli.min_value = 0.1; c_sli.max_value = 2.0; c_sli.value = 1.0; c_sli.custom_minimum_size.x = 250; c_sli.size_flags_horizontal = 3; c_sli.value_changed.connect(func(v): DebugSettings.terrain_complexity = v)
+	
+	var btn = Button.new(); vb.add_child(btn); btn.text = "APPLY & REGENERATE WORLD"; btn.pressed.connect(func(): DebugSettings.emit_rebuild())
+	panel.visible = false
+
+func _toggle_debug_suite() -> void:
+	if not _debug_panel: return
+	_debug_panel.visible = !_debug_panel.visible
+	if _debug_panel.visible:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED

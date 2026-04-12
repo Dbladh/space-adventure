@@ -16,6 +16,14 @@ void fragment() {
 	// Sample texture for Starhawk hulls, or use pure color for asteroids
 	vec4 tex_col = texture(albedo_tex, v_uv);
 	ALBEDO = v_color * tex_col.rgb; 
+	
+	// ACE AUTO-NORMAL: Procedurally generate 3D depth from albedo intensity (Sobel-style)
+	// This provides tactile normal-mapping for EVERY texture without requiring extra files.
+	float h0 = dot(tex_col.rgb, vec3(0.333));
+	float h1 = dot(texture(albedo_tex, v_uv + vec2(0.002, 0.0)).rgb, vec3(0.333));
+	float h2 = dot(texture(albedo_tex, v_uv + vec2(0.0, 0.002)).rgb, vec3(0.333));
+	vec3 tangent_norm = normalize(vec3(h0 - h1, h0 - h2, 0.08));
+	NORMAL = normalize(TANGENT * tangent_norm.x + BINORMAL * tangent_norm.y + NORMAL * tangent_norm.z);
 }
 
 float aa_step(float edge, float val) {
@@ -35,8 +43,8 @@ void light() {
 	float t2 = aa_step(0.25, l_level);
 	float t1 = aa_step(0.65, l_level);
 	
-	vec3 shadow_col = ALBEDO * 0.18; // Vibrant ambient floor keeps trees from flickering black
-	vec3 mid_col = ALBEDO * 0.55;
+	vec3 shadow_col = ALBEDO * 0.55; // Softened ambient floor (Was 0.35)
+	vec3 mid_col = ALBEDO * 0.65;
 	
 	vec3 final_col = mix(shadow_col, mid_col, t2);
 	final_col = mix(final_col, ALBEDO, t1);

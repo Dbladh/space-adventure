@@ -4,11 +4,12 @@ extends CharacterBody3D
 # Player.gd (Celestial Final-Sync Edition)
 # Managed by THE ARCHITECT.
 
-@export var max_space_speed: float = 12000.0 
-@export var max_warp_speed: float = 65000.0 
-@export var rotation_speed: float = 2.8 
-@export var roll_speed: float = 2.0 
-@export var acceleration: float = 0.9 
+@export var max_space_speed: float = 12000.0
+@export var max_warp_speed: float = 65000.0
+@export var max_hyperdrive_speed: float = 320000.0 # L1+R1 — Hyperdrive tier, ~5× warp
+@export var rotation_speed: float = 2.8
+@export var roll_speed: float = 2.0
+@export var acceleration: float = 0.9
 
 var camera: Camera3D
 var ship_model: Node3D
@@ -24,7 +25,7 @@ var jetpack_fuel: float = 100.0
 
 # WEAPONS
 var fire_cooldown: float = 0.0
-const FIRE_RATE: float = 0.14
+const FIRE_RATE: float = 0.09 # ACE STARFOX CADENCE: Faster, snappier pulse
 var bolt_script: GDScript = null
 var _prev_fire_key: bool = false 
 var _hb_tick: int = 0             
@@ -36,8 +37,12 @@ var reentry_v: Vector3 = Vector3.ZERO
 var last_alt: float = 100000.0     # Atmospheric barrier detection
 var reentry_timer: float = 0.0     # Sustained transition shake timer
 var reentry_intensity: float = 0.0 
+var _last_trail_pos: Vector3 = Vector3.ZERO
 var heat_glow_mat: StandardMaterial3D = null
 var reentry_vignette: ColorRect = null
+var _v_tick_30_p: int = 0 # 30Hz ticker for physics-based visuals
+var _v_tick_30_v: int = 0 # 30Hz ticker for process-based visuals
+var _v_tick_8: int = 0  # 8Hz visual ticker for stop-motion environment sync
 
 # CAMERA PARAMS
 var cam_base_offset := Vector3(0, 18.0, 85.0)
@@ -49,7 +54,21 @@ var thruster_trails: Array = []
 var heat_soak: float = 0.0      # Engine thermal saturation
 var shard_timer: float = 0.0    # Plasma debris ejection interval
 
+var last_tap_l: float = 0.0
+var last_tap_r: float = 0.0
+var barrel_roll_t: float = 0.0  # Animation progress 0.0 to 1.0
+var barrel_roll_dir: float = 0.0 # 1.0 = CCW (Left), -1.0 = CW (Right)
 var ship_marker: MeshInstance3D = null
+var hud_reticle: Control = null
+var ship_nose_offset: float = -0.05
+var lock_on_target: Node3D = null
+var pinned_target: Node3D = null
+var hud_scan_lock: Control = null
+var hud_hard_lock: Control = null
+var hud_target_lead: Control = null
+var hud_threat_arrows: Array = []
+var snow_particles: CPUParticles3D = null
+
 
 func _ready() -> void:
 	self.add_to_group("Player")
@@ -62,58 +81,121 @@ func _ready() -> void:
 	add_child(ship_marker); ship_marker.hide()
 	ship_marker.position = Vector3(0, 22.0, -10.0) # Floating ahead of player
 	
+	
 	# 0. PRELOAD WEAPONS SCRIPT
 	# Load once at startup, not every fire event
 	bolt_script = load("res://src/combat/LaserBolt.gd")
 	if bolt_script: print("--- GUNSMITH: LaserBolt loaded OK ---")
 	else: print("!!! GUNSMITH ERROR: Cannot find res://src/combat/LaserBolt.gd !!!")
 	
-	# 0. PHYSICAL BOUNDARIES: X-Wing Class Hardening (64m Radius)
+	# 0. PHYSICAL BOUNDARIES: X-Wing Class Hardening (18m Radius)
 	coll_node = CollisionShape3D.new()
-	var shape = SphereShape3D.new()
-	shape.radius = 64.0 
+	var shape = SphereShape3D.new(); shape.radius = 18.0 
 	coll_node.shape = shape
 	add_child(coll_node)
 	self.collision_layer = 2 # THE SHIP
 	self.collision_mask = 1 | 4 # World + Sun/Others
-	coll_node.shape = shape
-	add_child(coll_node)
 	
 	# 1. ACE CAMERA PIPELINE
 	_setup_ace_camera()
+	_setup_polar_weather()
 	
 	# 2. MOUNT STARHAWK
 	_setup_starhawk_hull()
+	
+	# TEST: SPAWN NPC ENEMY FOR ENGAGEMENT
+	get_tree().create_timer(1.0).timeout.connect(func():
+		var enemy_scene = load("res://src/combat/NPCEnemy.gd")
+		var health_scene = load("res://src/combat/HealthComponent.gd")
+		if enemy_scene:
+			var npc = CharacterBody3D.new()
+			npc.set_script(enemy_scene)
+			var hc = Node.new()
+			hc.set_script(health_scene)
+			hc.set("max_health", 400.0) # ACE DURABILITY: 400 HP
+			hc.name = "HealthComponent"
+			npc.add_child(hc)
+			get_parent().add_child(npc)
+			npc.global_position = global_position - global_transform.basis.z * 1500.0 # Just ahead
+	)
+
 
 func _setup_ace_camera() -> void:
 	# 360 ORBIT CAMERA STACK
 	cam_pivot = Node3D.new()
 	add_child(cam_pivot)
+	cam_pivot.top_level = true # DECOUPLE: Prevents ship-rotation 'Jerking'
 	
 	cam_spring = SpringArm3D.new()
 	cam_pivot.add_child(cam_spring)
 	cam_spring.spring_length = 250.0
 	cam_spring.position.y = 10.0 # Vertical lift for better ship profile
-	cam_spring.collision_mask = 1 # Hits World Terrain (1), Ignores Ship Hull (2) and Decorative Grass (8)
-	cam_spring.margin = 3.5 # Huge buffer against external terrain
+	cam_spring.collision_mask = 1 # Hits World Terrain (1)
+	cam_spring.margin = 3.5 
 	
 	camera = Camera3D.new()
 	cam_spring.add_child(camera)
-	camera.position = Vector3.ZERO # Parented to SpringArm, stays at pivot
-	camera.near = 12.0 # ACE COCKPIT HARDENING: Provides clearance for upscaled Starhawk hull
-	camera.far = 3500000.0 # 3,500km Baseline
+	camera.position = Vector3.ZERO 
+	camera.near = 12.0 
+	camera.far = 150000000.0 # ASTROMETRY: 150,000,000m far-clip to safely encompass the 90Mkm galaxy scale.
 	camera.make_current()
 	
-	# INITIALIZE 5 THRUSTER TRAILS (Aft-Docked Cluster: Perfect Depth 0.75)
+	_setup_combat_hud()
+	_setup_thruster_trails()
+
+func _setup_combat_hud() -> void:
+	var hud = CanvasLayer.new(); hud.name = "CombatHUD"; add_child(hud)
+	
+	# ACE VISOR: Create a high-fidelity dynamic targeting circle
+	hud_reticle = Control.new()
+	hud_reticle.name = "Reticle"
+	hud_reticle.custom_minimum_size = Vector2(128, 128) # Larger canvas for anti-aliased arcs
+	hud_reticle.set_script(load("res://src/combat/ReticleUI.gd"))
+	hud.add_child(hud_reticle)
+	
+	# ACE LOCK-ON: HUD target tracking diamond
+	# ACE LOCK-ON: Dual-Stage visors
+	hud_scan_lock = Control.new()
+	hud_scan_lock.custom_minimum_size = Vector2(80, 80)
+	hud_scan_lock.set_script(load("res://src/combat/TargetLockUI.gd"))
+	hud.add_child(hud_scan_lock); hud_scan_lock.hide()
+	
+	hud_hard_lock = Control.new()
+	hud_hard_lock.custom_minimum_size = Vector2(100, 100)
+	hud_hard_lock.set_script(load("res://src/combat/TargetLockUI.gd"))
+	hud.add_child(hud_hard_lock); hud_hard_lock.hide()
+	hud_hard_lock.modulate = Color(1.0, 0.8, 0.1) # GOLD (Locked)
+	
+	# ACE: INTERCEPT LEAD RETICLE (Predictive solution)
+	hud_target_lead = Control.new()
+	hud_target_lead.custom_minimum_size = Vector2(40, 40)
+	hud_target_lead.set_script(load("res://src/combat/TargetLockUI.gd"))
+	hud.add_child(hud_target_lead); hud_target_lead.hide()
+	hud_target_lead.modulate = Color(1.0, 0.5, 0.1) # ORANGE Lead
+	
+	# ACE: FLEET THREAT TRACKER (Pooled Arrows)
+	for i in range(8):
+		var arrow = Control.new()
+		arrow.custom_minimum_size = Vector2(40, 40)
+		arrow.set_script(load("res://src/combat/TargetLockUI.gd"))
+		hud.add_child(arrow); arrow.hide()
+		hud_threat_arrows.append(arrow)
+
+
+
+
+
+func _setup_thruster_trails() -> void:
 	var trail_script = load("res://src/combat/ThrusterTrail.gd")
 	var ports = [
-		Vector3(0.85, -0.16, 0.0),       # Center Hub (Stern Axis +Docked)
+		Vector3(0.85, -0.16, 0.0),       # Center Hub
 		Vector3(0.83, -0.08, -0.3),     # Upper Left
 		Vector3(0.83, -0.08, 0.3),      # Upper Right
 		Vector3(0.80, -0.25, -0.28),    # Lower Left
 		Vector3(0.80, -0.25, 0.28)      # Lower Right
 	]
 	for p in ports:
+
 		# 1. THE TRAIL
 		var t = MeshInstance3D.new()
 		t.set_script(trail_script)
@@ -139,9 +221,13 @@ func _setup_ace_camera() -> void:
 		light.name = "EngineLight"
 		light.light_color = Color.RED
 		light.light_energy = 0.0 # Dynamics handled in _process
-		light.omni_range = 25.0
-		light.light_specular = 0.0 # ACE CLUSTER PURGE: Prevents blocky specular squares on ground
-		light.omni_attenuation = 2.4 # Steeper falloff hides cluster-grid boundaries
+		light.omni_range = 12.0 # Tight range - engine glow only, doesn't reach terrain/water
+		light.light_specular = 0.0
+		light.omni_attenuation = 3.0 # Very steep falloff - dies out before cluster tile boundaries
+		light.shadow_enabled = false # No shadows needed - prevents square shadow map artifacts
+		light.distance_fade_enabled = true
+		light.distance_fade_begin = 30.0
+		light.distance_fade_length = 10.0
 		add_child(light)
 		
 		t.set_meta("glow_node", glow)
@@ -165,7 +251,28 @@ func _setup_starhawk_hull() -> void:
 			reentry_vignette.material = mat
 			hud.add_child(reentry_vignette)
 			
-			print("--- PILOT: CELESTIAL SYNC COMPLETE (Hull Ready) ---")
+			# ACE HULL ANALYSIS: Dynamic nose detection
+			var model_aabb = AABB()
+			var aabb_init = false
+			var nodes = [ship_model]
+			while nodes.size() > 0:
+				var n = nodes.pop_back()
+				if n is MeshInstance3D:
+					var a = n.get_mesh().get_aabb()
+					if not aabb_init: model_aabb = a; aabb_init = true
+					else: model_aabb = model_aabb.merge(a)
+				nodes.append_array(n.get_children())
+			
+			# Identify which local axis of the upscaled model points FORWARD (-Z in parent space)
+			var f_local = (ship_model.transform.basis.inverse() * Vector3(0, 0, -1)).normalized()
+			if abs(f_local.x) > 0.8:
+				ship_nose_offset = model_aabb.position.x if f_local.x < 0 else model_aabb.end.x
+			elif abs(f_local.z) > 0.8:
+				ship_nose_offset = model_aabb.position.z if f_local.z < 0 else model_aabb.end.z
+			
+			print("--- PILOT: HULL SCAN COMPLETE (Nose Axis: ", f_local, " Offset: ", ship_nose_offset, ") ---")
+
+
 
 func _apply_toon_shading(node: Node) -> void:
 	# EXCLUSION: Skip engine glows and VFX to prevent black square outlines on plasma
@@ -178,9 +285,13 @@ func _apply_toon_shading(node: Node) -> void:
 			var cel_mat = ShaderMaterial.new()
 			cel_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
 			
-			# Pass through original texture if present
+			# Pass through original texture or use a white fallback to prevent 'Black Silhouettes'
 			if mat.albedo_texture:
 				cel_mat.set_shader_parameter("albedo_tex", mat.albedo_texture)
+			else:
+				# ACE FALLBACK: Assign a procedural white texture so vertex colors shine through
+				var white_tex = GradientTexture2D.new(); white_tex.width = 1; white_tex.height = 1
+				cel_mat.set_shader_parameter("albedo_tex", white_tex)
 				
 			# SCREEN-SPACE OUTLINE: Add outline pass
 			var outline = ShaderMaterial.new()
@@ -200,17 +311,10 @@ func _physics_process(delta: float) -> void:
 		_hb_tick = 0
 		print("[PLAYER HB] in_ship:", in_ship, " fire_cd:", fire_cooldown)
 	
-	# FIRE INPUT: Rising-edge poll — fires once per key-press, immune to event routing
+	# FIRE HEARTBEAT: Tick-down combat timers
 	fire_cooldown -= delta
 	var cur_fire = Input.is_key_pressed(KEY_F)
-	if cur_fire and not _prev_fire_key and in_ship and fire_cooldown <= 0.0:
-		_fire_alternating_cannon()
-	_prev_fire_key = cur_fire
-	
-	# CONTROLLER: Poll Y button with same rising-edge approach
 	var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
-	if cur_joy_fire and in_ship and fire_cooldown <= 0.0:
-		_fire_alternating_cannon()
 	
 	# Continuously evaluate multi-planetary proximity to lock onto the closest orbit!
 	var planets = get_tree().get_nodes_in_group("Planet")
@@ -324,21 +428,69 @@ func _process_on_foot(delta: float) -> void:
 	move_and_slide()
 
 func _process_ace_flight(delta: float) -> void:
-	var yaw = -Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
-	var pitch = Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
+	# ACE DEADZONE HARDENING: Purges phantom rotation drift from stick-wear
+	const FLY_DEAD = 0.15
+	var yaw_stick = -Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
+	var pitch_stick = Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
+	if abs(yaw_stick) < FLY_DEAD: yaw_stick = 0.0
+	if abs(pitch_stick) < FLY_DEAD: pitch_stick = 0.0
+	
+	var yaw = yaw_stick
+	var pitch = pitch_stick
 	
 	if Input.is_key_pressed(KEY_A): yaw = 1.0
 	if Input.is_key_pressed(KEY_D): yaw = -1.0
 	if Input.is_key_pressed(KEY_W): pitch = 1.0 
 	if Input.is_key_pressed(KEY_S): pitch = -1.0
 	
-	rotate(basis.x.normalized(), pitch * rotation_speed * delta)
-	rotate(basis.y.normalized(), yaw * rotation_speed * delta)
-	
 	var roll_input: float = 0.0
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER): roll_input += 1.0
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER): roll_input -= 1.0
-	rotate(basis.z.normalized(), roll_input * roll_speed * delta)
+	# CELESTIAL ROTATION TIERING (NMS-STYLE HORIZON LOCK)
+	var is_in_atmo = target_planet and true_altitude < 26000.0
+	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
+	
+	# 1. PITCH: Local-axis rotation remains standard for vertical authority
+	rotate(basis.x.normalized(), pitch * rotation_speed * delta)
+	
+	# 2. YAW: Planetary-stabilized rotation
+	if is_in_atmo:
+		# Rotating around World-Up ensures 'Flat Turns' relative to the planet surface
+		rotate(world_up, yaw * rotation_speed * delta)
+	else:
+		rotate(basis.y.normalized(), yaw * rotation_speed * delta)
+	
+	# 3. ROLL: Leveling with 'No Man's Sky' Surface-Lock Logic
+	if is_in_atmo:
+		# ACE HARDENING: We reconstruct the 'Ideal Horizon Basis' every frame.
+		# This prevents 'Upside-Down' flipping by enforcing a global Upward bias.
+		var current_fwd = -global_transform.basis.z
+		
+		# Define the 'Ideal Right' (Horizon Plane)
+		var horizon_right = current_fwd.cross(world_up).normalized()
+		# Define the 'Ideal Up' (Upright relative to gravity)
+		var horizon_up = horizon_right.cross(current_fwd).normalized()
+		
+		# Construct the target orientation (Flat with horizon, but preserving pitch)
+		var ideal_basis = Basis(horizon_right, horizon_up, -current_fwd)
+		
+		# Proportional Leveling: Slerp the current rotation toward the horizon-locked state
+		# We use a high weight (6.0) to ensure the ship feels 'Heavy' and 'Upright' in atmo.
+		if abs(roll_input) < 0.1:
+			var target_q = ideal_basis.get_rotation_quaternion()
+			var current_q = global_transform.basis.get_rotation_quaternion()
+			var result_q = current_q.slerp(target_q, 6.0 * delta)
+			global_transform.basis = Basis(result_q)
+		else:
+			# If player is manually rolling, we just orthonormalize to prevent drift-flipping
+			rotate(basis.z.normalized(), roll_input * roll_speed * delta)
+	else:
+		# Deep Space: Full manual roll authority
+		rotate(basis.z.normalized(), roll_input * roll_speed * delta)
+	
+	# PHYSICS HARDENING: Orthonormalize basis to prevent floating-point stretching
+	# At massive scales, tiny precision errors in rotation accumulate into a 'Flipped Hull'.
+	global_transform.basis = global_transform.basis.orthonormalized()
 	
 	# ADAPTIVE ANALOG INPUT: Proportional control for precise docking/maneuvering
 	var raw_thrust = Input.get_joy_axis(0, JOY_AXIS_TRIGGER_RIGHT) # R2 = Gas
@@ -347,7 +499,12 @@ func _process_ace_flight(delta: float) -> void:
 	# Apply deadzone and precision curve (more control at low speeds)
 	raw_thrust = pow(clamp((raw_thrust - 0.05) / 0.95, 0.0, 1.0), 1.8)
 	raw_reverse = pow(clamp((raw_reverse - 0.05) / 0.95, 0.0, 1.0), 1.8)
-	var is_warping = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT)
+	var is_warping: bool = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT)
+	# HYPERDRIVE: L1 + R1 held together = 3rd thrust tier (5× warp)
+	# L1 = JOY_BUTTON_LEFT_SHOULDER, R1 = JOY_BUTTON_RIGHT_SHOULDER
+	var is_hyperdrive: bool = is_warping \
+		and Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER) \
+		and Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER)
 	
 	var thrust_mapped = max(raw_thrust, 1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0)
 	var reverse_mapped = max(raw_reverse, 1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
@@ -369,47 +526,126 @@ func _process_ace_flight(delta: float) -> void:
 	# TURBULENCE RATIO: Grass-skimming ONLY (peaks at 150m, clears at 800m)
 	var turb_altitude_ratio = smoothstep(150.0, 800.0, true_altitude)
 	
-	var dynamic_max_speed = lerp(800.0, max_space_speed, altitude_ratio)
-	var dynamic_warp_speed = lerp(3500.0, max_warp_speed, altitude_ratio)
+	# ATMOSPHERIC SPEED DECELERATION: 40% reduction in surface-level kinetic energy to ensure cinematic stability
+	var dynamic_max_speed = lerp(480.0, max_space_speed, altitude_ratio)
+	var dynamic_warp_speed = lerp(2100.0, max_warp_speed, altitude_ratio)
 	
-	var s_val = dynamic_warp_speed if is_warping else dynamic_max_speed
+	# THREE-TIER SPEED SELECTION
+	# Normal: R2 analog → dynamic_max_speed
+	# Warp:   A + R2   → dynamic_warp_speed  
+	# Hyper:  A + L1 + R1 + R2 → dynamic_hyperdrive_speed (only in space, blocked in atmo)
+	var dynamic_hyperdrive_speed: float = lerp(dynamic_warp_speed, max_hyperdrive_speed, altitude_ratio)
+	var s_val: float
+	if is_hyperdrive:
+		s_val = dynamic_hyperdrive_speed
+	elif is_warping:
+		s_val = dynamic_warp_speed
+	else:
+		s_val = dynamic_max_speed
 	var target_vel = -global_transform.basis.z * s_val * thrust_mapped
 	
 	if reverse_mapped > 0.1:
 		target_vel = global_transform.basis.z * dynamic_max_speed * 0.4 * reverse_mapped
 		
-	# ATMOSPHERIC DRAG: Aggressive deceleration during exosphere penetration (26km cutoff)
-	if is_warping and true_altitude < 26000.0:
-		var drag = 1.0 - altitude_ratio
-		velocity = velocity.lerp(target_vel, (2.8 + drag * 8.0) * delta)
-	else:
-		velocity = velocity.lerp(target_vel, 2.8 * delta)
+	# ACE DIVERGENT FLIGHT DYNAMICS: Modulate drag and inertia based on atmospheric density
+	# Space (Ratio 1.0) = Newtonian Inertia (Low Drag, Floating)
+	# Planet (Ratio 0.0) = Atmospheric Authority (High Drag, Grounded)
+	var dynamic_inertia = lerp(4.5, 1.2, altitude_ratio)
 	
-	# DYNAMIC FOV
+	if target_vel.length_squared() < 0.01:
+		var brake_power = lerp(12.0, 0.4, altitude_ratio) # Space drift takes ages to stop
+		velocity = velocity.lerp(Vector3.ZERO, brake_power * delta)
+		if velocity.length_squared() < 0.25:
+			velocity = Vector3.ZERO
+	else:
+		# ATMOSPHERIC DRAG & SPACE INERTIA SYNC
+		var follow_weight = dynamic_inertia
+		if is_warping and true_altitude < 26000.0:
+			var drag = 1.0 - altitude_ratio
+			follow_weight = (dynamic_inertia + drag * 6.0)
+			
+		velocity = velocity.lerp(target_vel, follow_weight * delta)
+	
+	self.motion_mode = CharacterBody3D.MOTION_MODE_FLOATING # ACE DRIFT PURGE
+	
+	# DYNAMIC FOV: Scaled carefully for astronomical speeds (Capped at 132°)
 	if camera:
-		var speed_perc = velocity.length() / max_warp_speed
-		var target_fov = 75.0 + (speed_perc * 30.0) 
-		camera.fov = lerp(camera.fov, target_fov, 4.0 * delta)
+		# Calculate speed percentage relative to the absolute max speed (Hyperdrive)
+		var speed_val = velocity.length()
+		var fov_scale = 0.0
+		if speed_val > max_warp_speed:
+			# Hyperdrive Epoch: 110 -> 132
+			var t = clamp((speed_val - max_warp_speed) / (max_hyperdrive_speed - max_warp_speed), 0.0, 1.0)
+			fov_scale = 110.0 + (t * 22.0)
+		elif speed_val > max_space_speed:
+			# Warp Epoch: 90 -> 110
+			var t = clamp((speed_val - max_space_speed) / (max_warp_speed - max_space_speed), 0.0, 1.0)
+			fov_scale = 90.0 + (t * 20.0)
+		else:
+			# Normal Flight: 75 -> 90
+			var t = clamp(speed_val / max_space_speed, 0.0, 1.0)
+			fov_scale = 75.0 + (t * 15.0)
+		
+		camera.fov = lerp(camera.fov, fov_scale, 4.0 * delta)
 		
 	# ATMOSPHERIC TURBULENCE: Extremely subtle jitter, grass-skimming ONLY
 	var turb_intensity = (1.0 - turb_altitude_ratio) * (velocity.length() / 2500.0)
 	if turb_intensity > 0.05:
 		turb_v = Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * turb_intensity * 0.08
 	else:
-		turb_v = turb_v.lerp(Vector3.ZERO, 3.0 * delta)
+		# Rapidly zero out effects when ship comes to a stop
+		turb_v = turb_v.lerp(Vector3.ZERO, 15.0 * delta)
 	
-	# ORBIT CAMERA ROTATION (Right Stick)
+	# ORBIT CAMERA ROTATION (Right Stick & Mouse)
+	const CAM_DEAD = 0.15
 	var rs_x = Input.get_joy_axis(0, JOY_AXIS_RIGHT_X)
 	var rs_y = Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
-	if abs(rs_x) > 0.1: cam_orbit.x -= rs_x * cam_orbit_sensitivity * delta * 2.0
-	if abs(rs_y) > 0.1: cam_orbit.y -= rs_y * cam_orbit_sensitivity * delta * 2.0
-	cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2) # Limit pitch to avoid gimbal lock flip
+	if abs(rs_x) < CAM_DEAD: rs_x = 0.0
+	if abs(rs_y) < CAM_DEAD: rs_y = 0.0
 	
-	if cam_pivot:
-		cam_pivot.rotation.y = lerp_angle(cam_pivot.rotation.y, cam_orbit.x, 15.0 * delta)
-		cam_pivot.rotation.x = lerp_angle(cam_pivot.rotation.x, cam_orbit.y, 15.0 * delta)
+	if abs(rs_x) > 0.01: cam_orbit.x -= rs_x * cam_orbit_sensitivity * delta * 2.0
+	if abs(rs_y) > 0.01: cam_orbit.y -= rs_y * cam_orbit_sensitivity * delta * 2.0
+	cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2) 
+	
+	# SHADOWGLASS 30FPS SYNC: Only update visual nodes every 33.3ms
+	var cur_v_tick = int(Time.get_ticks_msec() / 33.33)
+	var v_update_30 = cur_v_tick != _v_tick_30_p
+	if v_update_30: _v_tick_30_p = cur_v_tick
 	
 	move_and_slide()
+	
+	# CELESTIAL CAMERA SYNC (Top-Level Smoothing)
+	# ACE HARDENING: We sync AFTER move_and_slide to prevent frame-latency at 12km/s.
+	if cam_pivot:
+		# 1. POSITION SYNC: Snap the independent pivot to the ship's final physical location
+		if v_update_30:
+			cam_pivot.global_position = global_position
+		
+		# 2. ORIENTATION SYNC: Calculate the tracking target
+		world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
+		if is_instance_valid(pinned_target):
+			# TRACKING: Frame the Ship and Adversary
+			var t_dir = (pinned_target.global_position - global_position).normalized()
+			var s_fwd = -global_transform.basis.z
+			var look_dir = s_fwd.lerp(t_dir, 0.35).normalized()
+			var cam_q = Basis.looking_at(look_dir, world_up).get_rotation_quaternion()
+			
+			var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
+			if v_update_30:
+				cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
+		else:
+			# CHASE: Follow the hull with horizon-locked stabilization
+			var ship_q = global_transform.basis.get_rotation_quaternion()
+			var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
+			
+			var target_q = (ship_q * orbit_q).normalized()
+			var current_q = cam_pivot.global_transform.basis.get_rotation_quaternion()
+			if v_update_30:
+				cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, 15.0 * delta))
+	
+	_update_polar_weather(delta)
+		
+
 	
 	# UPDATE THRUSTER TRAILS (Sync after physical move to prevent high-velocity lag)
 	# At 64km/s, even a single frame of lag causes a 1km visual gap.
@@ -480,80 +716,128 @@ func _process_ace_flight(delta: float) -> void:
 		# Because the model is baseline-rotated -90.0 on Y, X becomes local Roll and Z becomes local Pitch!
 		var target_hull_euler = Vector3(target_bank, -90.0, target_pitch_visual)
 		
-		# KINEMATIC BANKING: Re-synchronized for -90.0 Y Euler system
-		var raw_yaw = -Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
-		var raw_pitch = Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
-		if Input.is_key_pressed(KEY_A): raw_yaw = 1.0
-		if Input.is_key_pressed(KEY_D): raw_yaw = -1.0
-		if Input.is_key_pressed(KEY_W): raw_pitch = 1.0
-		if Input.is_key_pressed(KEY_S): raw_pitch = -1.0
-		
-		var bank_deg = raw_yaw * 28.0
-		var dip_deg = -raw_pitch * 8.0
-		
-		# Combine with baseline -90 Y rotation
+		# KINEMATIC BANKING: Sync with deadzone-hardened flight controls to purge drift-lean
+		var bank_deg = yaw * 28.0
+		var dip_deg = -pitch * 8.0
 		var t_rot = Vector3(bank_deg, -90.0, dip_deg)
-		ship_model.rotation_degrees = ship_model.rotation_degrees.lerp(t_rot, 4.0 * delta)
 		
-		# HOVER IDLE ANIMATION
-		var speed_ratio = clamp(velocity.length() / 200.0, 0.0, 1.0)
-		var hover_bob = sin(Time.get_ticks_msec() * 0.0015) * 1.5 * (1.0 - speed_ratio)
-		ship_model.position.y = lerp(ship_model.position.y, hover_bob, 5.0 * delta)
+		# ACE ROTATION HARDENING: Accelerate recentering weight (8.0x) when inputs are zeroed
+		var rot_weight = 12.0 if (abs(yaw) < 0.01 and abs(pitch) < 0.01) else 4.0
+		
+		# BARREL ROLL LOGIC: 360 Degree helical rotation
+		var is_rolling = barrel_roll_t > 0.0
+		if is_rolling:
+			barrel_roll_t -= delta * 1.85 # ~0.54s duration
+			var roll_perc = 1.0 - barrel_roll_t
+			# Easing: Quadratic out for snappy start
+			var roll_angle = roll_perc * 360.0 * barrel_roll_dir
+			
+			# OVERRIDE ROTATION: Bypass banking lerp for a precise 360 spin
+			ship_model.rotation_degrees.x = roll_angle
+			
+			# ACE KINETIC HARDENING: Side-strafe impulse with 'Atmospheric Damping'
+			# We move the impulse to 'velocity' to allow move_and_slide to handle collisions.
+			var ground_damping = clamp(true_altitude / 1000.0, 0.25, 1.0) 
+			var strafe_dir = -global_transform.basis.x * barrel_roll_dir
+			if target_planet and true_altitude < 20000.0:
+				strafe_dir = strafe_dir.slide(world_up).normalized()
+			velocity += strafe_dir * (2800.0 * ground_damping)
+			
+			# ACE ROTATION WRAP: Snap back to zero equivalent at final frame to prevent back-spin lerp
+
+
+
+			if barrel_roll_t <= 0.0:
+				ship_model.rotation_degrees.x = 0.0 
+		elif v_update_30:
+			ship_model.rotation_degrees = ship_model.rotation_degrees.lerp(t_rot, rot_weight * delta)
+
+
+
+		
+		# Identity Snap: Force exact level-flight if within 0.1 degree of target
+		if abs(ship_model.rotation_degrees.x) < 0.1 and abs(ship_model.rotation_degrees.z) < 0.1 and abs(yaw) < 0.01:
+			ship_model.rotation_degrees.x = 0.0
+			ship_model.rotation_degrees.z = 0.0
+		
+		# HOVER IDLE ANIMATION (Quantized to 30fps)
+		if v_update_30:
+			var speed_ratio = clamp(velocity.length() / 200.0, 0.0, 1.0)
+			var hover_bob = sin(Time.get_ticks_msec() * 0.0015) * 1.5 * (1.0 - speed_ratio)
+			ship_model.position.y = lerp(ship_model.position.y, hover_bob, 5.0 * delta)
 
 func _fire_alternating_cannon() -> void:
 	fire_cooldown = FIRE_RATE
 	
 	var fire_dir = -global_transform.basis.z.normalized()
-	var wing_r = global_transform.basis.y.normalized() # Relative to ship rotated -90
 	var wing_up = global_transform.basis.x.normalized()
 	var main_scene = get_parent()
 	if not main_scene: return
 	
-	var side = float(fire_side)
-	fire_side *= -1
-	
-	# Turret Offset relative to ship orientation: Focused Central Fire
-	# Turret Offset relative to ship orientation: X-Wing Wing-Tip Spread
-	var local_x_off = 32.0 * side
-	var turret_pos = global_position + (fire_dir * 60.0) + (wing_up * local_x_off)
-	
-	# RECOIL & MUZZLE FLASH: Tick-feedback
-	recoil_v += (global_transform.basis.z * 0.45) + (global_transform.basis.x * -side * 0.15)
-	_spawn_muzzle_flash(turret_pos, fire_dir)
-	
-	# BUILD BOLT: Lean 1.8m energy spear
-	var bolt = MeshInstance3D.new()
-	var capsule = CapsuleMesh.new()
-	capsule.radius = 1.8   # Refined Bolt
-	capsule.height = 200.0 # Long Streak
-	bolt.mesh = capsule
-	
-	var mat = StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(0.2, 0.9, 1.0)
-	mat.emission_enabled = true
-	mat.emission = Color(0.2, 0.9, 1.0)
-	mat.emission_energy_multiplier = 14.0
-	mat.disable_fog = true
-	bolt.material_override = mat
-	
-	bolt.rotation = global_transform.basis.get_rotation_quaternion().get_euler()
-	bolt.rotate_object_local(Vector3.RIGHT, PI / 2.0)
-	
-	main_scene.add_child(bolt)
-	# SPAN OFFSET: Now 60m ahead
-	bolt.global_position = turret_pos + (fire_dir * 45.0)
-	
-	# Projectile Momentum Inheritance: Ensures bolts don't spawn behind at high ship speeds
-	live_bolts.append({"node": bolt, "dir": fire_dir, "life": 0.0, "ship_v": velocity})
+	# STARFOX TWIN-LASER SYNC: Micro-convergence for hitbox-anchored fire
+	if not ship_model: return
+	var weapon_offsets = [-0.14, 0.14]
+	for off in weapon_offsets:
+		# MUZZLE SYNC: Using dynamic AABB nose detection
+		var turret_pos = ship_model.global_transform * Vector3(ship_nose_offset, -0.18, off)
+		recoil_v += (global_transform.basis.z * 0.25)
+		
+		# BOLT ORIGIN: Shifted 10m FORWARD to ensure clearance from the internal cockpit mesh 
+		# now that frame-dwell is active.
+		var bolt_origin = turret_pos - (global_transform.basis.z * 10.0)
+		_spawn_muzzle_flash(turret_pos, fire_dir)
+
+
+
+		
+		# BUILD BOLT: 3.5m Girth, 50m Length (Tighter for relativistic sync)
+		var bolt = MeshInstance3D.new()
+		var capsule = CapsuleMesh.new()
+		capsule.radius = 3.5; capsule.height = 50.0
+		bolt.mesh = capsule
+
+		
+		var mat = StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(0.2, 0.9, 1.0); mat.emission_enabled = true; mat.emission = Color(0.2, 0.9, 1.0); mat.emission_energy_multiplier = 18.0; mat.disable_fog = true; bolt.material_override = mat
+		
+		# WORLD-SPACE RELEASE: Firing AFTER movement guarantees muzzle-alignment
+		main_scene.add_child(bolt)
+		bolt.add_to_group("World")
+		
+		# ACE TARGET HAND-OFF: Pass either pinned or auto-lock
+		var final_t = pinned_target if is_instance_valid(pinned_target) else lock_on_target
+		
+		# MUZZLE SYNC
+		bolt.global_position = bolt_origin
+
+
+		bolt.rotation = global_transform.basis.get_rotation_quaternion().get_euler()
+		bolt.rotate_object_local(Vector3.RIGHT, PI / 2.0)
+		
+		# ACE RELATIVISTIC MOMENTUM: inherited ship full vector + 9k-35k Acceleration Ramp
+		live_bolts.append({
+			"node": bolt, 
+			"dir": fire_dir, 
+			"life": 0.0, 
+			"ship_v": velocity,
+			"target": final_t,
+			"pos": bolt_origin # Physical position
+		})
+
+
+		
+	# NEWTONIAN RECOIL: Physical Impulse backwash
+	velocity += global_transform.basis.z * 25.0 # Enhanced recoil weight
 
 func _spawn_muzzle_flash(pos: Vector3, _dir: Vector3) -> void:
 	# POINT LIGHT FLASH: Replaced mesh with high-energy point light for true "light flash" look
 	var flash = OmniLight3D.new()
 	flash.light_color = Color(1.0, 0.95, 0.7) # Bright Warm Flash
-	flash.omni_range = 45.0 # Illuminates ship wings/hull
-	flash.light_energy = 15.0 # Intense blink
-	flash.light_specular = 2.0
+	flash.omni_range = 35.0 # Illuminates ship wings/hull
+	flash.light_energy = 12.0
+	flash.light_specular = 0.5
+	flash.shadow_enabled = false # No shadow maps on muzzle flash - avoids square artifacts
 	get_parent().add_child(flash)
 	flash.global_position = pos
 	
@@ -586,6 +870,20 @@ func _input(event: InputEvent) -> void:
 		if in_ship and fire_cooldown <= 0.0:
 			_fire_alternating_cannon()
 		
+	if event is InputEventJoypadButton and event.pressed:
+		var cur_time = Time.get_ticks_msec() / 1000.0
+		if event.button_index == JOY_BUTTON_LEFT_SHOULDER:
+			if (cur_time - last_tap_l) < 0.22: _trigger_barrel_roll(1.0)
+			last_tap_l = cur_time
+		if event.button_index == JOY_BUTTON_RIGHT_SHOULDER:
+			if (cur_time - last_tap_r) < 0.22: _trigger_barrel_roll(-1.0)
+			last_tap_r = cur_time
+		
+		# ACE LOCK-ON: Left Joystick Click (L3) OR B-Button (Right Face)
+		if event.button_index == JOY_BUTTON_LEFT_STICK or event.button_index == JOY_BUTTON_B:
+			pinned_target = lock_on_target
+			if pinned_target: print("--- PILOT: TARGET PINNED ---")
+		
 	# E: Embark / Disembark
 	if event is InputEventKey and event.keycode == KEY_E and event.pressed:
 		if in_ship and true_altitude < 500.0: _disembark()
@@ -601,7 +899,113 @@ func _input(event: InputEvent) -> void:
 			cam_orbit.y -= event.relative.y * 0.005
 
 func _process(delta: float) -> void:
+	# SHADOWGLASS 30FPS SYNC: Only update visual nodes every 33.3ms
+	var cur_v_tick = int(Time.get_ticks_msec() / 33.33)
+	var v_update_30 = cur_v_tick != _v_tick_30_v
+	if v_update_30: _v_tick_30_v = cur_v_tick
+	
+	# ACE LOCK-ON ACTIVE (Radar Online)
+	# Factors in BOTH ship forward velocity AND base projectile speed (150km/s avg)
+	if hud_reticle and camera:
+		var p_speed = 22000.0 # Average cinematic ramp-speed for visual tracking
+		var bullet_v = (-global_transform.basis.z * p_speed) + velocity
+		var aim_point = global_position + (bullet_v * 0.25)
+		
+		# ACE RADAR: Target acquisition sensor suite
+		var best_target: Node3D = null
+		var fwd = -global_transform.basis.z 
+		# Hard-safety: verify tree-state before group iteration
+		if is_inside_tree():
+			for t in get_tree().get_nodes_in_group("Targets"):
+				# High-fidelity validity check: Existential + Deletion state
+				if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
+				var d_v = (t.global_position - global_position)
+				if d_v.length() > 25000.0: continue # Sensor range boost
+				if fwd.dot(d_v.normalized()) > 0.70: # 45 degree radar cone
+					best_target = t; break
+		lock_on_target = best_target
+
+		
+		# CRASH-HARDENING: Nullify pinned target if it's no longer world-legal
+		if pinned_target and (not is_instance_valid(pinned_target) or pinned_target.is_queued_for_deletion()):
+			pinned_target = null
+			
+		# ACE LOCK-ON VISOR SYNC: Dual-Stage Tracking
+		# 1. SCAN VISOR: Yellow-ish/White candidate tracking
+		if is_instance_valid(lock_on_target) and not camera.is_position_behind(lock_on_target.global_position):
+			hud_scan_lock.show()
+			hud_scan_lock.position = camera.unproject_position(lock_on_target.global_position) - Vector2(40, 40)
+			# Fade candidate if it's the same as pinned
+			hud_scan_lock.modulate = Color(1, 1, 1, 0.3) if lock_on_target == pinned_target else Color(1, 1, 1, 0.8)
+		else:
+			hud_scan_lock.hide()
+			
+		# 2. HARD LOCK VISOR
+		if is_instance_valid(pinned_target):
+			var s_pos = camera.unproject_position(pinned_target.global_position)
+			var s_rect = get_viewport().get_visible_rect().size
+			var behind = camera.is_position_behind(pinned_target.global_position)
+			# FRUSTUM HYGIENE: Check if target is truly outside the 2D frame
+			var is_off = behind or s_pos.x < 20 or s_pos.x > s_rect.x-20 or s_pos.y < 20 or s_pos.y > s_rect.y-20
+			
+			if is_off:
+				hud_target_lead.hide()
+				_draw_fleet_arrow(hud_hard_lock, pinned_target.global_position)
+			else:
+				hud_hard_lock.show()
+				hud_hard_lock.modulate = Color(1, 0.8, 0.1) # GOLD (Locked)
+				hud_hard_lock.position = s_pos - Vector2(50, 50)
+				
+				# INTERCEPT LEAD: Predictive solution (Only if on-screen)
+				var lead_p_speed = 22000.0
+				var rel_vel = pinned_target.get_real_velocity() if pinned_target.has_method("get_real_velocity") else pinned_target.get("velocity")
+				if rel_vel == null: rel_vel = Vector3.ZERO
+				
+				var dist = global_position.distance_to(pinned_target.global_position)
+				var lead_pos = pinned_target.global_position + (rel_vel * (dist / lead_p_speed))
+
+				if not camera.is_position_behind(lead_pos):
+					hud_target_lead.show()
+					hud_target_lead.position = camera.unproject_position(lead_pos) - Vector2(20, 20)
+					var dist_px = (hud_reticle.position + Vector2(25,25)).distance_to(hud_target_lead.position + Vector2(20,20))
+					if dist_px < 60.0: hud_target_lead.modulate = Color(0.2, 1.0, 0.2)
+					else: hud_target_lead.modulate = Color(1.0, 0.5, 0.1)
+				else:
+					hud_target_lead.hide()
+		else:
+			hud_hard_lock.hide()
+			hud_target_lead.hide()
+
+		# 4. FLEET THREAT TRACKER: Draw arrows for ALL off-screen enemies
+		var adversaries = get_tree().get_nodes_in_group("Enemies")
+		var arrow_idx = 0
+		for a in adversaries:
+			if not is_instance_valid(a) or a.is_queued_for_deletion(): continue
+			if a == pinned_target: continue # Pinned has its own priority logic
+			if arrow_idx >= hud_threat_arrows.size(): break
+			
+			if camera.is_position_behind(a.global_position) or not camera.is_position_in_frustum(a.global_position):
+				_draw_fleet_arrow(hud_threat_arrows[arrow_idx], a.global_position)
+				arrow_idx += 1
+		# Clean up unused arrows
+		for k in range(arrow_idx, hud_threat_arrows.size()):
+			hud_threat_arrows[k].hide()
+
+
+
+
+
+		
+		if camera.is_position_behind(aim_point):
+			hud_reticle.hide()
+		else:
+			hud_reticle.show()
+			var screen_pos = camera.unproject_position(aim_point)
+			hud_reticle.position = screen_pos - (hud_reticle.size / 2.0)
+
 	# RECOIL & TURBULENCE & REENTRY SHAKE
+
+
 	recoil_v = recoil_v.lerp(Vector3.ZERO, 12.0 * delta)
 	
 	reentry_v = Vector3.ZERO
@@ -618,48 +1022,78 @@ func _process(delta: float) -> void:
 			heat_glow_mat.emission = Color(1.0, 0.3 * heat, 0.0) # From Bright Orange to Deep Red
 			heat_glow_mat.emission_energy_multiplier = heat * 12.0
 		
-		# RED HEAT VIGNETTE: Sync screen filter with exosphere friction (18km-26km window)
+		# REENTRY HEAT VIGNETTE SYNC
 		if reentry_vignette:
 			var reentry_heat = (reentry_timer / 3.0)
-			
-			# BELL CURVE: Heat peaks at the transition midpoint and clears at surface/space
 			var raw_dist = clamp((true_altitude - 18000.0) / (26000.0 - 18000.0), 0.0, 1.0)
 			var alt_heat = 1.0 - abs(raw_dist - 0.5) * 2.0 
 			alt_heat = clamp(alt_heat, 0.0, 1.0)
-			
 			reentry_vignette.material.set_shader_parameter("intensity", max(reentry_heat, alt_heat))
 			
+		# ACE MUZZLE-VISUAL SYNC: Poll and Fire in _process for interpolated visual alignment
 		# AERO-VORTEX TRAILS: Spawn condensation streaks during reentry
-		if _hb_tick % 2 == 0: 
-			var wing_up = global_transform.basis.x.normalized()
-			var fire_dir = -global_transform.basis.z.normalized()
-			var heat_val = (reentry_timer / 3.0)
-			var s_length = clamp(velocity.length() * 0.02, 40.0, 200.0)
-			for side in [-1.0, 1.0]:
-				var jitter = Vector3(randf_range(-0.5, 0.5), randf_range(-0.5, 0.5), randf_range(-0.5, 0.5)) * reentry_intensity
-				_spawn_vortex_trail(global_position + (wing_up * 14.0 * side) + jitter, fire_dir, heat_val, s_length)
+		if reentry_intensity > 0.05 and _hb_tick % 2 == 0: 
+			# ACE DISTANCE THROTTLE: Only spawn if the ship has traveled 15m since the last streak
+			var ship_vel_len = velocity.length()
+			if global_position.distance_to(_last_trail_pos) > 15.0:
+				_last_trail_pos = global_position
+				var wing_up = global_transform.basis.x.normalized()
+				var fire_dir = -global_transform.basis.z.normalized()
+				var heat_val = (reentry_timer / 3.0)
+				var s_length = clamp(ship_vel_len * 0.02, 40.0, 200.0)
+				for side in [-1.0, 1.0]:
+					var jitter = Vector3(randf_range(-0.5, 0.5), randf_range(-0.5, 0.5), randf_range(-0.5, 0.5)) * reentry_intensity
+					_spawn_vortex_trail(global_position + (wing_up * 14.0 * side) + jitter, fire_dir, heat_val, s_length)
+
 	
 	# CAMERA DYNAMICS: Recoil & Reentry Shake (Ship-only Visual Sync)
 	# Snap the camera pivot in _process to align with visual 'leaning' and 'banking'
 	var cam_base_y = 10.0 if in_ship else 1.85
 	if cam_spring: cam_spring.position = Vector3(0, cam_base_y, 0) + recoil_v + turb_v + reentry_v
 	
-	# BOLT POOL UPDATE: High-Velocity Physics (Direct-Space intersect_ray)
-	const BOLT_SPEED: float = 2500.0
-	const BOLT_LIFETIME: float = 3.0
+	# BOLT POOL UPDATE: Relativistic Physics Hardening
+	# 25km/s base creates the 'Cracked the Code' visual lead observed in elite titles (Starfox/NMS).
+	const BOLT_SPEED: float = 25000.0 
+	const BOLT_LIFETIME: float = 1.5
 	var space_state = get_world_3d().direct_space_state
 	
 	var i = live_bolts.size() - 1
 	while i >= 0:
 		var b = live_bolts[i]
-		b["life"] += delta
-		if b["life"] > BOLT_LIFETIME:
-			b["node"].queue_free(); live_bolts.remove_at(i); i -= 1; continue
-		
 		var node = b["node"]
-		var old_pos = node.global_position
-		var move_dist = (b["dir"] * BOLT_SPEED + b["ship_v"]) * delta
+		
+		# 9,000m/s start (relative) ensures the discharge ignites AT THE MUZZLE in Frame 1.
+		# 35,000m/s peak ensures a more cinematic planetary dogfight feel.
+		var accel_t = clamp(b["life"] / 0.6, 0.0, 1.0)
+		
+		# ACE TUNER: I will use a non-linear quadratic ramp for 'Muzzle Ignite' feel.
+		var ease_t = accel_t * accel_t # Quadratic Ramp
+		var current_rel_speed = lerp(9000.0, 35000.0, ease_t)
+
+		# ACE SMART-LOCK HOMING: Fired bolts track the target mid-flight
+		if is_instance_valid(b["target"]):
+			var target_pos = b["target"].global_position
+			var t_dir = (target_pos - node.global_position).normalized()
+			
+			# PRECISION CONE: Only pull if the pilot's aim is already high-quality (>0.98 dot)
+			# 0.98 dot product is roughly a 1.5-degree correction window.
+			var align = b["dir"].dot(t_dir)
+			if align > 0.98:
+				# Snappy but subtle corrective steering (Rewarding the pilot's lead)
+				b["dir"] = b["dir"].lerp(t_dir, 2.5 * delta).normalized()
+				# Align rod: High-fidelity visual update only when correction is active
+				if b["dir"].length() > 0.01:
+					node.look_at(node.global_position + b["dir"])
+					node.rotate_object_local(Vector3.RIGHT, PI / 2.0)
+
+
+
+		
+		var old_pos = b["pos"]
+		# NEWTONIAN VECTOR SYNC: Inherit full ship inertia + directional relative speed
+		var move_dist = (b["dir"] * current_rel_speed + b["ship_v"]) * delta
 		var next_pos = old_pos + move_dist
+		b["pos"] = next_pos # Update internal physical pos
 		
 		# SWEPT-FRAME PHYSICS: Direct raycast from old to new position
 		var query = PhysicsRayQueryParameters3D.create(old_pos, next_pos)
@@ -669,20 +1103,41 @@ func _process(delta: float) -> void:
 		
 		if result and is_instance_valid(result.collider):
 			var target = result.collider
-			# CENTRIC TRIGGER: Spawn at the target center rather than the surface hit point
-			_trigger_explosion_inline(target.global_position, target, result.normal)
+			var hp = target.get_node_or_null("HealthComponent")
+			var is_dying = false
+			if hp:
+				is_dying = (hp.current_health <= 25.0)
+				hp.take_damage(25.0)
+				
+				# ACE DESTRUCTION: Handle actual removal if health is depleted
+				if is_dying:
+					target.set_deferred("collision_layer", 0); target.set_deferred("collision_mask", 0)
+					# Hide all visual components (Meshes/HP Bars)
+					for child in target.get_children():
+						if child is VisualInstance3D: child.hide()
+					get_tree().create_timer(0.15).timeout.connect(func(): if is_instance_valid(target): target.queue_free())
 			
-			if target is CollisionObject3D:
-				target.set_deferred("collision_layer", 0); target.set_deferred("collision_mask", 0)
-				for child in target.get_children(): if child is VisualInstance3D: child.hide()
-				get_tree().create_timer(0.12).timeout.connect(func(): if is_instance_valid(target): target.queue_free())
+			# ACE VISUALS: Hit-spark vs Catastrophic Nova
+			_trigger_explosion_inline(result.position, target, result.normal, is_dying)
+
 			
 			node.queue_free(); live_bolts.remove_at(i)
-		else:
-			node.global_position = next_pos
+		elif v_update_30:
+			node.global_position = b["pos"]
 		i -= 1
+				
+	# GUNSMITH FINAL SYNC: Fire AFTER bolt pool updates to ensure muzzle-snapping
+	if in_ship and fire_cooldown <= 0.0:
+		var cur_fire = Input.is_key_pressed(KEY_F)
+		var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
+		if (cur_fire and not _prev_fire_key) or cur_joy_fire:
+			_fire_alternating_cannon()
+			fire_cooldown = 0.18 # ACE RPS NERF: 5.5 shots per second
+		_prev_fire_key = cur_fire
 
-func _trigger_explosion_inline(pos: Vector3, target: Node, normal: Vector3) -> void:
+
+
+func _trigger_explosion_inline(pos: Vector3, target: Node, normal: Vector3, is_big: bool = false) -> void:
 	_spawn_impact_flash(pos, normal)
 	_spawn_scorch_mark(pos, target, normal)
 	
@@ -690,15 +1145,25 @@ func _trigger_explosion_inline(pos: Vector3, target: Node, normal: Vector3) -> v
 	if not explosion_script: return
 	var fx = Node3D.new()
 	fx.set_script(explosion_script)
-	get_parent().add_child(fx)
-	fx.global_position = pos
-	var sz = 15.0 # High-Floor for combat tactile feedback
-	if target is Node3D:
-		# RADIAL MASS MULTIPLIER: Account for the asteroid's 17.0m base diameter
-		# Multiplier set to 2.2x to ensure the fireball mass 'envelops' the rock
-		sz = target.scale.x * 17.0 * 2.2
-	# VOLUMETRIC CAP: Boosted to 1600.0m for titan-class planetary bodies.
-	fx.set("explosion_scale", clamp(sz, 15.0, 1600.0))
+	
+	# HULL WELDING: Small hit-sparks follow the ship. 
+	# Catastrophic Novas stay at world-origin for visual stability.
+	if not is_big and is_instance_valid(target):
+		target.add_child(fx)
+		fx.global_position = pos # Position in world then convert to local via add_child
+	else:
+		get_tree().root.add_child(fx)
+		fx.global_position = pos
+	
+	var sz = 8.0 # Small hit spark (Wind Waker style)
+	if is_big:
+		if target.is_in_group("Enemies") or target.is_in_group("Player"):
+			sz = 600.0 # TITANIC NOVA (Ships)
+		else:
+			# ASTEROID: Match physical diameter (1:1 visual payout)
+			sz = target.scale.x * 16.0
+	
+	fx.set("explosion_scale", clamp(sz, 8.0, 1600.0))
 
 func _spawn_scorch_mark(pos: Vector3, target: Node, normal: Vector3) -> void:
 	# BORDERLINE: If the asteroid is deleted, the mark is useless. 
@@ -821,6 +1286,29 @@ func _disembark() -> void:
 		cam_spring.position.y = 0.0 
 		cam_spring.spring_length = 35.0 # Titanic Overview Standoff
 
+func _draw_fleet_arrow(arrow: Control, target_pos: Vector3) -> void:
+	# ACE: THREAT RADIAL INDICATOR
+	var screen_pos = camera.unproject_position(target_pos)
+	var screen_size = get_viewport().get_visible_rect().size
+	var is_behind = camera.is_position_behind(target_pos)
+	
+	arrow.show()
+	var margin = 60.0
+	var clamped_x = clamp(screen_pos.x, margin, screen_size.x - margin)
+	var clamped_y = clamp(screen_pos.y, margin, screen_size.y - margin)
+	
+	if is_behind:
+		clamped_x = margin if screen_pos.x > screen_size.x/2 else screen_size.x - margin
+	
+	arrow.position = Vector2(clamped_x, clamped_y) - Vector2(25, 25)
+	var dist = global_position.distance_to(target_pos)
+	# RANGE BOOST: Persistent tracking up to 50km
+	var danger = clamp(1.0 - (dist / 50000.0), 0.5, 1.0)
+	arrow.modulate = Color(1, 0, 0, danger) # Red stays vivid
+	arrow.scale = Vector2.ONE * danger
+
+
+
 func _embark() -> void:
 	in_ship = true
 	cam_orbit.x = 0; cam_orbit.y = 0
@@ -840,7 +1328,14 @@ func _embark() -> void:
 	if cam_spring: 
 		cam_spring.position.y = 10.0 # Restore Ship-clearance vertical lift
 		cam_spring.spring_length = 250.0 # Restore Space Standoff
-		cam_spring.spring_length = 250.0 # Restore Space Standoff
+
+func _trigger_barrel_roll(dir: float) -> void:
+	if not in_ship: return
+	if barrel_roll_t > 0.1: return # Prevent spam-stacking
+	barrel_roll_t = 1.0
+	barrel_roll_dir = dir
+	print("--- PILOT: BARREL ROLL TRIGGERED (Dir: ", dir, ") ---")
+
 
 func lock_mouse() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -876,3 +1371,83 @@ func _spawn_plasma_shard(pos: Vector3) -> void:
 	tween.tween_property(shard, "position", local_fly_target, 0.4)
 	tween.parallel().tween_property(shard, "scale", Vector3.ZERO, 0.4)
 	tween.tween_callback(shard.queue_free)
+
+func _setup_polar_weather() -> void:
+	# ACE WEATHER: Blocky 'Superhot' style snow particles
+	snow_particles = CPUParticles3D.new()
+	# Attach to camera so they always surround the player but stay local to the world
+	if camera: camera.add_child(snow_particles)
+	snow_particles.amount = 800
+	snow_particles.lifetime = 2.5
+	snow_particles.preprocess = 1.0
+	
+	var m = BoxMesh.new(); m.size = Vector3(0.35, 0.35, 0.35)
+	snow_particles.mesh = m
+	
+	snow_particles.direction = Vector3(0, -1, 0)
+	snow_particles.spread = 20.0
+	snow_particles.gravity = Vector3(12.0, -15.0, 5.0) # Wind-drifted snow
+	snow_particles.initial_velocity_min = 25.0
+	snow_particles.initial_velocity_max = 45.0
+	
+	snow_particles.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	snow_particles.emission_box_extents = Vector3(200, 100, 200)
+	snow_particles.position = Vector3(0, 80.0, -50.0) # Spawn overhead and slightly ahead
+	snow_particles.emitting = false
+
+func _update_polar_weather(delta: float) -> void:
+	if not snow_particles: return
+	
+	# Detect if we are at a pole of a snowy-capable planet
+	var nearest_p = null; var min_d = 1e16
+	for p in get_tree().get_nodes_in_group("Planet"):
+		var d = p.global_position.distance_to(global_position)
+		if d < min_d: min_d = d; nearest_p = p
+	
+	# Atmospheric Layer: Extend detection to 60km to ensure visibility during descent
+	if nearest_p and min_d < nearest_p.planet_radius + 60000.0:
+		var p_type = nearest_p.get("archetype")
+		
+		# POLAR vs GLOBAL WEATHER
+		var is_polar_only = (p_type == "FROZEN" or p_type == "LUSH" or p_type == "CANDY")
+		var global_intensity = 1.0
+		if is_polar_only:
+			var l_pos = (global_position - nearest_p.global_position).normalized()
+			var dot_up = l_pos.dot(nearest_p.global_transform.basis.y)
+			global_intensity = smoothstep(0.72, 0.92, abs(dot_up)) # 42-degree frost zone
+		
+		var alt_mask = 1.0 - smoothstep(15000.0, 45000.0, true_altitude)
+		var intensity = global_intensity * alt_mask
+		
+		# DYNAMIC WEATHER EFFECTS based on Archtype
+		var mat = snow_particles.material_override
+		if not mat:
+			mat = StandardMaterial3D.new()
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			snow_particles.material_override = mat
+			
+		match p_type:
+			"VOLCANIC":
+				mat.albedo_color = Color(1.0, 0.35, 0.1) # Glowing Ash
+				snow_particles.gravity = Vector3(3.0, -5.0, 3.0) # Floating embers
+				snow_particles.amount = 400
+			"DESERT":
+				mat.albedo_color = Color(0.85, 0.75, 0.5) # Sand
+				snow_particles.gravity = Vector3(45.0, -8.0, 15.0) # Horizon-sweeping Wind
+				snow_particles.amount = 1200
+			"TOXIC", "RADIATED":
+				mat.albedo_color = Color(0.35, 0.95, 0.45) # Acid rain
+				snow_particles.gravity = Vector3(5.0, -45.0, 5.0) # Heavy fall
+				snow_particles.amount = 1000
+			"ABYSS":
+				mat.albedo_color = Color(0.1, 0.2, 0.3) # Dark mist drops
+				snow_particles.gravity = Vector3(2.0, -5.0, 2.0)
+				snow_particles.amount = 600
+			_: # FROZEN, LUSH, CANDY
+				mat.albedo_color = Color.WHITE # Snow
+				snow_particles.gravity = Vector3(12.0, -15.0, 5.0)
+				snow_particles.amount = 800
+				
+		snow_particles.emitting = intensity > 0.05
+	else:
+		snow_particles.emitting = false

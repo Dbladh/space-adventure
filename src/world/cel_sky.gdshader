@@ -10,7 +10,7 @@ uniform float sun_blur : hint_range(0.0, 0.2) = 0.01;
 
 uniform sampler2D star_noise;
 uniform sampler2D nebula_noise;
-uniform sampler3D cloud_noise;
+uniform sampler2D cloud_noise;
 
 void sky() {
 	// 0. LOCAL PLANETARY HORIZON ROTATION
@@ -30,36 +30,32 @@ void sky() {
 	float raw_stars = texture(star_noise, polar_uv * vec2(16.0, 8.0)).r;
 	float star_mask = step(0.85, raw_stars);
 	
-	// Multiply the raw noise value by 1000 as a sine offset, forcing every single star to twinkle totally out-of-sync!
-	float twinkle = sin(TIME * 3.0 + raw_stars * 1000.0) * 0.5 + 0.5;
+	// ACE STATIC SYNC: Twinkle halted for cinematic stability
+	float twinkle = 0.5; 
 	vec3 stars = vec3(star_mask * (0.6 + twinkle * 1.5)); 
 	
 	// Soft, Transparent Milky Way Dust
-	// Slowly drift the galactic nebula UVs to simulate a living universe
+	// Frozen nebula position for iconic visual alignment
 	vec2 nebula_uv = polar_uv * vec2(2.0, 1.0);
-	nebula_uv.x += TIME * 0.002;
-	nebula_uv.y += sin(TIME * 0.005) * 0.05;
 	
 	float dust = texture(nebula_noise, nebula_uv).r;
 	float band = smoothstep(0.1, 1.0, 1.0 - abs(EYEDIR.y * 1.8)); 
 	
-	// PULSING GALAXY: Slow rhythmic fade in and out from 10% to 100% intensity
-	float neb_pulse = sin(TIME * 0.05) * 0.45 + 0.55;
+	// PULSING GALAXY: Halted at 75% intensity for consistent contrast
+	float neb_pulse = 0.75;
 	dust = smoothstep(0.3, 0.8, dust * band) * neb_pulse;
 	
-	// Dynamic Shifting Colors
-	float c_phase = sin(polar_uv.x * PI * 2.0 + TIME * 0.05) * cos(polar_uv.y * PI * 2.0 + TIME * 0.03);
+	// Dynamic Shifting Colors: Static iconic purple-red blend
+	float c_phase = sin(polar_uv.x * PI * 2.0) * cos(polar_uv.y * PI * 2.0);
 	c_phase = smoothstep(-0.5, 0.5, c_phase);
 	
 	vec3 c_purple = vec3(0.25, 0.0, 0.45);
 	vec3 c_red = vec3(0.65, 0.05, 0.15);
 	vec3 nebula_col = mix(c_purple, c_red, c_phase) * (0.8 + neb_pulse * 0.4);
 	
-	// The Absolute Void
-	// Slowly interpolates between incredibly subtle dark hues so the deep space background is never completely flat
-	// Multipliers on PI must be EVEN INTEGERS (2.0, 4.0) to ensure the seams perfectly loop!
-	float void_phase1 = sin(polar_uv.x * PI * 2.0 + TIME * 0.015) * 0.5 + 0.5;
-	float void_phase2 = cos(polar_uv.y * PI * 2.0 - TIME * 0.01) * 0.5 + 0.5;
+	// The Absolute Void: Halted phase loop
+	float void_phase1 = sin(polar_uv.x * PI * 2.0) * 0.5 + 0.5;
+	float void_phase2 = cos(polar_uv.y * PI * 2.0) * 0.5 + 0.5;
 	
 	vec3 deep_black  = vec3(0.01, 0.01, 0.01);
 	vec3 deep_blue   = vec3(0.01, 0.02, 0.05);
@@ -70,85 +66,60 @@ void sky() {
 	vec3 void_mix2 = mix(deep_purple, deep_red, 1.0 - void_phase1);
 	vec3 void_col  = mix(void_mix1, void_mix2, void_phase2);
 	
-	// Compositing the Universe (Lowering dust multiplier to 65% makes it beautifully transparent!)
+	// Compositing the Universe
 	vec3 space_col = mix(void_col, nebula_col, dust * 0.65) + stars;
 	
-	// 2. STRIKING ATMOSPHERIC GRADIENT (Animated Sunset)
-	// Make the horizon mathematically breathe/pulse slightly using TIME
-	float horizon_pulse = sin(TIME * 0.3) * 0.08;
+	// 2. STRIKING ATMOSPHERIC GRADIENT (Static Sunset)
+	float sky_grad = smoothstep(-0.35, 0.7, local_e.y);
+	vec3 final_col = mix(horizon_color, zenith_color, sky_grad);
 	
-	// Shift the gradient up slightly and blend the colors with the animated pulse
-	float sky_grad = smoothstep(-0.35, 0.7 + horizon_pulse, local_e.y);
+	// 3. ICONIC WINDWAKER CLOUDS (Static Texture Sync)
+	vec3 cl_pos1 = local_e * vec3(0.35, 1.2, 0.35); 
+	vec2 cl_uv1 = cl_pos1.xz + cl_pos1.y * 0.15;
+	float base_n = texture(cloud_noise, cl_uv1).r;
+	float bumpy_n = texture(cloud_noise, cl_uv1 * 3.5).r;
+	float final_n = base_n + bumpy_n * 0.2; 
 	
-	// Force the horizon band to be extraordinarily vivid for that glowing sunset look
-	vec3 glowing_horizon = mix(horizon_color, horizon_color * 1.5, abs(horizon_pulse) * 5.0);
-	vec3 final_col = mix(glowing_horizon, zenith_color, sky_grad);
+	// SHAPE SYNC: Static puffs
+	float puff_mask1 = step(0.86, final_n);
 	
-	// 3. HORIZONTAL TOON CLOUDS
-	// Squash clouds strictly vertically relative to local gravity to form Zelda banks
-	vec3 cl_pos = local_e * vec3(2.0, 5.5, 2.0);
-	cl_pos.x += TIME * 0.02; // Rapid horizontal drift
-	cl_pos.z += cos(TIME * 0.15) * 0.1; // Gentle coordinate shifting
-	float n = texture(cloud_noise, cl_pos).r;
+	// ICONIC SHADOW SYNC
+	vec2 shad_uv = cl_uv1 - vec2(0.02, 0.02);
+	float n_shad = texture(cloud_noise, shad_uv).r + texture(cloud_noise, shad_uv * 3.5).r * 0.2;
+	float is_shadow = puff_mask1 * (1.0 - step(0.86, n_shad));
 	
-	// Dynamic Shifting Cloud Density
-	float c_pulse = sin(TIME * 0.1) * 0.04;
-	float c_target = 0.62 + c_pulse;
-	float cloud_mask = step(c_target, n);
+	// Layer B: Distant horizon puffs
+	vec2 cl_uv2 = (local_e * vec3(1.1, 2.5, 1.1)).xz;
+	float n2 = texture(cloud_noise, cl_uv2).r;
+	float puff_mask2 = step(0.92, n2);
 	
-	// TRUE LOCAL DOWN-SHADOWING
-	vec3 lower_pos = cl_pos;
-	lower_pos.y -= 0.15; 
-	float n_lower = texture(cloud_noise, lower_pos).r;
+	float cloud_mask = clamp(puff_mask1 + puff_mask2, 0.0, 1.0);
 	
-	float is_bottom = cloud_mask * (1.0 - step(c_target, n_lower));
-	float is_top = cloud_mask - is_bottom;
+	// FADE AT HORIZON
+	float atmospheric_wrap = smoothstep(0.04, 0.28, local_e.y);
+	cloud_mask *= atmospheric_wrap;
+	is_shadow *= atmospheric_wrap;
 	
-	// FADE CLOUDS AT THE HORIZON
-	// Gradually dissolve clouds slightly above the horizon (0.15) down to the absolute horizon (0.02)
-	// This prevents clouds from intersecting or bunching up tightly against the terrain mesh!
-	float atmospheric_wrap = smoothstep(0.02, 0.15, local_e.y);
-	is_top *= atmospheric_wrap;
-	is_bottom *= atmospheric_wrap;
+	final_col = mix(final_col, vec3(1.0), cloud_mask * (1.0 - space_blend));
+	// LUMINOUS CLOUD HARDENING: Light airy feel
+	vec3 light_shadow = mix(vec3(1.0), zenith_color, 0.15);
+	final_col = mix(final_col, light_shadow, is_shadow * (1.0 - space_blend));
 	
-	// Shadows render as a dark stain on the local zenith color
-	// Tops are painted white, but restricted to 75% alpha! This makes the clouds somewhat transparent!
-	final_col = mix(final_col, final_col * 0.70, is_bottom * (1.0 - space_blend));
-	final_col = mix(final_col, vec3(1.0), is_top * 0.75 * (1.0 - space_blend));
-	
-	// 4. THE CENTRAL STAR (SUN)
-	// Calculate a razor-sharp sun disc that aligns perfectly with the main light source
+	// 4. ICONIC TOON SUN (The central Great Sea star)
 	float sun_dot = max(0.0, dot(EYEDIR, LIGHT0_DIRECTION));
-	float s_size = 0.022; // Slightly smaller and sharper
-	float s_blur = 0.008;
-	float sun_disc = smoothstep(1.0 - s_size - s_blur, 1.0 - s_size, sun_dot);
+	float sun_disc = smoothstep(0.9992, 0.9996, sun_dot); // Sharp, iconic disc
 	
-	// WARM PHOTONIC CORE
-	vec3 warm_sun = mix(sun_color, vec3(1.0, 0.6, 0.2), 0.5);
-	
-	// Add a massive procedural corona glow around the star
-	float sun_glow = pow(sun_dot, 80.0) * 5.0; 
-	vec3 out_sun = (sun_disc * warm_sun * 30.0) + (sun_glow * warm_sun * 8.0);
-	
-	// 5. CINEMATIC STARBURST & HALO
+	// 4-POINT ICONIC STARBURST
 	vec3 light_right = normalize(cross(LIGHT0_DIRECTION, vec3(0.0, 1.0, 0.0)));
 	vec3 light_up = cross(light_right, LIGHT0_DIRECTION);
+	float s_x = abs(dot(EYEDIR, light_right));
+	float s_y = abs(dot(EYEDIR, light_up));
+	float burst = pow(max(0.0, 1.0 - s_x * 8.0), 30.0) + pow(max(0.0, 1.0 - s_y * 8.0), 30.0);
+	float starburst = burst * pow(sun_dot, 8.0) * 2.5;
 	
-	// A. ORBITAL HALO RING (Thin glowing circle)
-	float halo_dist = 0.94;
-	float halo = smoothstep(halo_dist - 0.005, halo_dist, sun_dot) * (1.0 - smoothstep(halo_dist, halo_dist + 0.005, sun_dot));
-	out_sun += halo * warm_sun * 4.0;
-	
-	// B. HIGH-FREQUENCY STARBURST (Thin rays)
-	float angle = atan(dot(EYEDIR, light_right), dot(EYEDIR, light_up));
-	// Multi-frequency wave interference creates realistic, non-uniform ray patterns
-	float ray_pattern = pow(abs(sin(angle * 45.0)), 12.0) + pow(abs(cos(angle * 12.0 + 0.5)), 8.0) * 0.4;
-	float starburst = ray_pattern * pow(sun_dot, 150.0) * 15.0;
-	out_sun += starburst * warm_sun;
-	
-	// C. ANAMORPHIC HORIZONTAL STREAK
-	float flare_h = pow(max(0.0, 1.0 - abs(dot(EYEDIR, light_right)) * 18.0), 220.0);
-	out_sun += flare_h * warm_sun * 6.0 * pow(sun_dot, 4.0);
+	vec3 out_sun = (sun_disc * vec3(1.0) * 10.0) + (starburst * vec3(1.0));
+	// Soft golden bloom around the disc
+	out_sun += pow(sun_dot, 150.0) * vec3(1.0, 0.95, 0.85) * 6.0;
 	
 	// FINAL COMPOSITION: Atmospheric blend + The Star
 	COLOR = mix(final_col, space_col, space_blend) + out_sun;

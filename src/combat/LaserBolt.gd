@@ -51,14 +51,15 @@ func _ready() -> void:
 	body_entered.connect(_on_body_entered)
 	set_process(true)
 
-func _process(delta: float) -> void:
-	elapsed += delta
+func _process(_delta: float) -> void:
+	elapsed += _delta
 	if elapsed > LIFETIME:
 		queue_free()
 		return
 	
-	# ADVANCE: Move the bolt forward along the direction it was fired
-	global_position += direction * SPEED * delta
+	# ACE: AUTONOMOUS MOVEMENT DISABLED
+	# Movement is now managed by the ship's projectile pool to support 
+	# relativistic physics and homing logic without competing vectors.
 
 func _on_body_entered(body: Node) -> void:
 	# Try to find a destroyable target. Allow asteroids and any tagged Destructible

@@ -8,6 +8,8 @@ extends MeshInstance3D
 @export var trail_color: Color = Color(1, 1, 1, 0.4)
 
 var points: Array[Vector3] = []
+var _v_tick: int = 0
+var _last_v_update: bool = false
 var mesh_gen: ImmediateMesh
 var pulse_time: float = 0.0
 
@@ -32,6 +34,12 @@ func shift_points(offset: Vector3) -> void:
 		points[i] -= offset
 
 func update_trail(port_pos: Vector3, vel: Vector3, is_warping: bool, thrust: float, delta: float) -> void:
+	# SHADOWGLASS 30FPS SYNC
+	var v_t = int(Time.get_ticks_msec() / 33.33)
+	var v_update = v_t != _v_tick
+	if v_update: _v_tick = v_t
+	_last_v_update = v_update
+	
 	pulse_time += delta
 	# 1. DYNAMIC LENGTH: Stretch based on Warp/Speed
 	var speed_ratio = clamp(vel.length() / 8000.0, 0.0, 1.0)
@@ -52,6 +60,7 @@ func update_trail(port_pos: Vector3, vel: Vector3, is_warping: bool, thrust: flo
 		mesh_gen.clear_surfaces()
 		return
 		
+	if not _last_v_update: return
 	mesh_gen.clear_surfaces()
 	mesh_gen.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
 	

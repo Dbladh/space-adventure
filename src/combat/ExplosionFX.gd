@@ -1,101 +1,101 @@
 extends Node3D
 
-const STYLED_SMOKE_COUNT: int = 12 # Main bubble mass
-const FRAGMENT_COUNT: int = 8      # Physical rock shards
-const SPIKE_COUNT: int = 6         # Radiant 'smoke' pillars
-const LIFETIME: float = 2.4
-const FADE_DELAY: float = 0.8
-const SPREAD_SPEED: float = 12.0
+# ExplosionFX.gd (Zero-Latency MultiMesh Edition)
+# THE PROCEDURALIST: Wind Waker-style Cel-Shaded Explosion (Optimized for 60FPS)
 
-var explosion_scale: float = 12.0 # Injected by Player.gd
+const STYLED_SMOKE_COUNT: int = 16 # Total particle count
+const LIFETIME: float = 2.4
+const FADE_DELAY: float = 0.5
+const SPREAD_SPEED: float = 48.0
+
+var explosion_scale: float = 12.0
 var elapsed: float = 0.0
-var pieces: Array[Node3D] = []
+var mmi: MultiMeshInstance3D
 var velocities: Array[Vector3] = []
+var scaling_data: Array[float] = [] # Per-particle scale multipliers
+var _v_tick: int = 0
 var rng := RandomNumberGenerator.new()
 
 func _ready() -> void:
 	rng.randomize()
-	_spawn_all()
+	_setup_multimesh()
 
-func _spawn_all() -> void:
-	# 1. THE CORE: BUBBLE CLOUDS (Wind Waker 'Cloud' Clusters)
-	# Alternating between Orange (#FF8800) and Yellow (#FFCC00)
-	for i in range(STYLED_SMOKE_COUNT):
-		var mi = _create_bubble(i % 2 == 0)
-		# Rapid initial expansion
-		var sc = rng.randf_range(0.8, 1.5) * explosion_scale
-		mi.scale = Vector3.ZERO
-		
-		var t = get_tree().create_tween()
-		t.tween_property(mi, "scale", Vector3.ONE * sc, rng.randf_range(0.05, 0.15)).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		
-		# Billow Velocity: Slow outward drift
-		var dir = Vector3(rng.randf_range(-1.0, 1.0), rng.randf_range(-1.0, 1.0), rng.randf_range(-1.0, 1.0)).normalized()
-		velocities.append(dir * SPREAD_SPEED * (explosion_scale * 0.1))
-		pieces.append(mi)
-		
-	# 2. THE BLAST: RADIANT SPIKES (Velocity Pillars)
-	for i in range(SPIKE_COUNT):
-		var mi = _create_bubble(false) # Pure Yellow
-		var dir = Vector3(rng.randf_range(-1.0, 1.0), rng.randf_range(-1.0, 1.0), rng.randf_range(-1.0, 1.0)).normalized()
-		var sc = explosion_scale * 0.6
-		mi.scale = Vector3.ZERO
-		
-		# Align with outward direction (NaN STABILITY)
-		if dir.length() > 0.1:
-			var target_vec = mi.position + dir.normalized()
-			if not mi.position.is_equal_approx(target_vec):
-				mi.look_at(target_vec)
-				mi.rotate_object_local(Vector3.RIGHT, PI/2.0)
-		
-		var t = get_tree().create_tween()
-		# Long 'Pillar' Scaling
-		t.tween_property(mi, "scale", Vector3(sc * 0.5, sc * 3.5, sc * 0.5), 0.1).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
-		
-		velocities.append(dir * SPREAD_SPEED * (explosion_scale * 0.6))
-		pieces.append(mi)
-		
-	# 3. PHYSICAL TEXTURE: FRAGMENTS (Grey Rock)
-	for i in range(FRAGMENT_COUNT):
-		var mi = _create_bubble(false, true) # Concrete Grey Rock
-		mi.scale = Vector3.ONE * (explosion_scale * 0.15)
-		var dir = Vector3(rng.randf_range(-1.0, 1.0), rng.randf_range(-1.0, 1.0), rng.randf_range(-1.0, 1.0)).normalized()
-		velocities.append(dir * SPREAD_SPEED * (explosion_scale * 0.8))
-		pieces.append(mi)
-
-func _create_bubble(is_orange: bool, is_rock: bool = false) -> MeshInstance3D:
-	var mi = MeshInstance3D.new()
-	var sm = SphereMesh.new()
-	sm.radial_segments = 8; sm.rings = 4 # Faceted Retro look
-	mi.mesh = sm
+func _setup_multimesh() -> void:
+	mmi = MultiMeshInstance3D.new()
+	var mm = MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true # Toon palette shifts
 	
+	# LOW-POLY: Faceted sphere (Rule 2)
+	var sm = SphereMesh.new()
+	sm.radial_segments = 8; sm.rings = 6
+	mm.mesh = sm
+	
+	mm.instance_count = STYLED_SMOKE_COUNT
+	mmi.multimesh = mm
+	add_child(mmi)
+	
+	# STYLED MAT: Pure flat unshaded colors (Wind Waker style)
 	var mat = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.vertex_color_use_as_albedo = true
 	
-	if is_rock:
-		mat.albedo_color = Color(0.533, 0.533, 0.533) # Charcoal Grey
-	elif is_orange:
-		mat.albedo_color = Color(1.0, 0.53, 0.0) # Orange #FF8800
-	else:
-		mat.albedo_color = Color(1.0, 0.8, 0.0) # Yellow #FFCC00
+	var out = StandardMaterial3D.new()
+	out.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	out.cull_mode = BaseMaterial3D.CULL_FRONT
+	out.albedo_color = Color.BLACK
+	out.grow = true; out.grow_amount = 0.1
+	mat.next_pass = out
+	
+	mmi.material_override = mat
+	
+	# INITIALIZE PARTICLES
+	for i in range(STYLED_SMOKE_COUNT):
+		var dir = Vector3(rng.randf_range(-1,1), rng.randf_range(-1,1), rng.randf_range(-1,1)).normalized()
+		velocities.append(dir * SPREAD_SPEED * (rng.randf_range(0.2, 1.2)))
+		scaling_data.append(rng.randf_range(0.8, 1.5) * explosion_scale)
 		
-	mi.material_override = mat
-	add_child(mi)
-	return mi
+		# Orange -> Yellow -> Smoke White
+		var col = Color(1.0, 0.4, 0.0) 
+		if i > (STYLED_SMOKE_COUNT * 0.4): col = Color(1.0, 0.8, 0.0)
+		if i > (STYLED_SMOKE_COUNT * 0.7): col = Color(0.9, 0.9, 0.9)
+		mm.set_instance_color(i, col)
+		
+		# Snap to center
+		mm.set_instance_transform(i, Transform3D(Basis(), Vector3.ZERO))
 
 func _process(delta: float) -> void:
+	# SHADOWGLASS 8FPS SYNC
+	var v_t = int(Time.get_ticks_msec() / 125.0)
+	var v_update = v_t != _v_tick
+	if v_update: _v_tick = v_t
+	
 	elapsed += delta
-	# SLOW BILLOW PHYSICS
-	for i in range(pieces.size()):
-		var mi = pieces[i]
-		velocities[i] *= 0.92 # Stellar Drag
-		mi.position += velocities[i] * delta
+	if not v_update: return
+	
+	var mm = mmi.multimesh
+	
+	for i in range(STYLED_SMOKE_COUNT):
+		var tf = mm.get_instance_transform(i)
 		
-	# FADE-OUT SEQUENCE
-	if elapsed > FADE_DELAY:
-		for mi in pieces:
-			if is_instance_valid(mi) and mi.scale.x > 0.01:
-				mi.scale = mi.scale.move_toward(Vector3.ZERO, delta * (explosion_scale * 2.0))
+		# 1. DRAG-AWARE KINETICS
+		velocities[i] *= (1.0 - 1.5 * delta)
+		tf.origin += velocities[i] * delta
+		
+		# 2. WIND WAKER SCALING (Bouncy Pop-out -> Late Shrink)
+		var sc = scaling_data[i]
+		if elapsed < 0.2:
+			# Pop-in (Rapid)
+			var pop = elapsed / 0.2
+			tf.basis = Basis().scaled(Vector3.ONE * sc * pop)
+		elif elapsed > FADE_DELAY:
+			# Fade-out (Shrink)
+			var fade = 1.0 - ((elapsed - FADE_DELAY) / (LIFETIME - FADE_DELAY))
+			tf.basis = Basis().scaled(Vector3.ONE * sc * clamp(fade, 0.0, 1.0))
+		else:
+			tf.basis = Basis().scaled(Vector3.ONE * sc)
 			
+		mm.set_instance_transform(i, tf)
+
 	if elapsed > LIFETIME:
 		queue_free()

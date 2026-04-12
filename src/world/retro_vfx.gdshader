@@ -1,7 +1,7 @@
 shader_type canvas_item;
 
-uniform float pixel_size : hint_range(1, 20) = 2.0;
-uniform float dither_strength : hint_range(0.0, 1.0) = 0.08;
+uniform float pixel_size : hint_range(1, 20) = 4.0;
+uniform float dither_strength : hint_range(0.0, 1.0) = 0.25;
 uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_nearest;
 
 // Bayer Matrix for Ordering Dithering (4x4)
@@ -13,23 +13,29 @@ const mat4 bayer_matrix = mat4(
 );
 
 void fragment() {
-    // 1. PIXELATION
+    // 1. FIXED PIXEL GRID (Simulate hardware low-res buffer)
     vec2 size = vec2(textureSize(SCREEN_TEXTURE, 0));
-    vec2 uv = floor(SCREEN_UV * size / pixel_size) / (size / pixel_size);
+    vec2 p_size = size / pixel_size;
+    vec2 uv = floor(SCREEN_UV * p_size) / p_size;
     
-    vec4 scene_color = texture(SCREEN_TEXTURE, uv);
+    // 2. SCENE COLOR SAMPLING
+    vec3 scene_col = texture(SCREEN_TEXTURE, uv).rgb;
     
-    // 2. DITHERING
+    // 3. SHADOWGLASS VIBRANCE: Saturated but crunchy color depth
+    float lum = dot(scene_col, vec3(0.299, 0.587, 0.114));
+    scene_col = mix(vec3(lum), scene_col, 1.25); // Boost color richness
+    
+    // 4. LUMINANCE-STEERED DITHERING
+    // Dither intensity spikes in mid-tones and gradients to simulate painterly depth
     ivec2 pixel = ivec2(FRAGCOORD.xy / pixel_size);
-    float threshold = bayer_matrix[pixel.x % 4][pixel.y % 4];
-    scene_color.rgb += (threshold - 0.5) * dither_strength;
+    float dither = bayer_matrix[pixel.x % 4][pixel.y % 4];
     
-    // 3. SCANLINES
-    float scanline = sin(FRAGCOORD.y * 1.5) * 0.04;
-    scene_color.rgb -= scanline;
+    // Focused dither mask for textured transitions
+    float d_mask = (1.0 - abs(lum - 0.5) * 2.0) * dither_strength;
+    scene_col += (dither - 0.5) * d_mask;
     
-    // 4. COLOR CRUNCH (16-level bit depth for cleaner toon gradients)
-    scene_color.rgb = floor(scene_color.rgb * 16.0) / 16.0;
+    // 5. CRUNCHY PALETTE CLAMP (6-level bit depth for extreme retro banding)
+    scene_col = floor(scene_col * 6.5 + 0.5) / 6.5;
 
-    COLOR = scene_color;
+    COLOR = vec4(scene_col, 1.0);
 }

@@ -7,6 +7,7 @@ extends CharacterBody3D
 @onready var health = $HealthComponent
 var player: Node3D = null
 var hp_bar: MeshInstance3D
+var model_node: Node3D # ACE CACHE: Optimized child reference
 
 # SHIP SPECS: Advanced Accessibility Mode (Dampened)
 var max_speed: float = 1200.0
@@ -41,6 +42,7 @@ func _ready():
 			add_child(model)
 			model.scale = Vector3(100, 100, 100) # Match Player Scale
 			model.rotate_object_local(Vector3.UP, deg_to_rad(-90))
+			model_node = model
 			
 			# Health Component Hook
 	health.health_changed.connect(_on_health_changed)
@@ -110,16 +112,18 @@ func _physics_process(delta):
 	velocity = velocity.lerp(target_vel, 6.0 * delta)
 	
 	# SHADOWGLASS 8FPS SYNC: Snap visuals for NPCs
+	# ACE PERFORMANCE: Avoid group-looping; only update the visual representation.
 	var v_t = int(Time.get_ticks_msec() / 125.0)
-	var v_update = v_t != _v_tick
-	if v_update:
+	if v_t != _v_tick:
 		_v_tick = v_t
-		# Only update model transform on 8Hz ticks
-		for child in get_children():
-			if child is Node3D and not child is CollisionShape3D:
-				child.global_transform = global_transform
-				if "Starhawk" in child.name:
-					child.rotate_object_local(Vector3.UP, deg_to_rad(-90))
+		# Update visual orientation/position at 8Hz for the stop-motion look
+		if model_node:
+			model_node.global_transform = global_transform
+			model_node.rotate_object_local(Vector3.UP, deg_to_rad(-90))
+			model_node.scale = Vector3(100, 100, 100)
+		
+		if hp_bar:
+			hp_bar.global_position = global_position + Vector3(0, 80, 0)
 	
 	move_and_slide()
 	

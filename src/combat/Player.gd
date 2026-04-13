@@ -22,6 +22,11 @@ var parked_ship: Node3D = null
 var coll_node: CollisionShape3D
 var walk_yaw: float = 0.0
 var jetpack_fuel: float = 100.0
+var health_component: HealthComponent = null
+var flash_tween: Tween = null
+var is_dead: bool = false
+var health_bar_bg: ColorRect = null
+var health_bar_fill: ColorRect = null
 
 # WEAPONS
 var fire_cooldown: float = 0.0
@@ -34,6 +39,8 @@ var fire_side: int = 1
 var recoil_v: Vector3 = Vector3.ZERO
 var turb_v: Vector3 = Vector3.ZERO
 var reentry_v: Vector3 = Vector3.ZERO
+var shake_v: Vector3 = Vector3.ZERO
+var shake_intensity: float = 0.0
 var last_alt: float = 100000.0     # Atmospheric barrier detection
 var reentry_timer: float = 0.0     # Sustained transition shake timer
 var reentry_intensity: float = 0.0 
@@ -42,12 +49,13 @@ var heat_glow_mat: StandardMaterial3D = null
 var reentry_vignette: ColorRect = null
 var _v_tick_30_p: int = 0 # 30Hz ticker for physics-based visuals
 var _v_tick_30_v: int = 0 # 30Hz ticker for process-based visuals
+var _radar_tick: int = 0 # ACE RADAR THROTTLE
 var _v_tick_8: int = 0  # 8Hz visual ticker for stop-motion environment sync
 
 # CAMERA PARAMS
 var cam_base_offset := Vector3(0, 18.0, 85.0)
 var cam_orbit := Vector2.ZERO 
-var cam_orbit_sensitivity := 2.5
+var cam_orbit_sensitivity := 1.2
 var cam_pivot: Node3D
 var cam_spring: SpringArm3D
 var thruster_trails: Array = []
@@ -68,6 +76,7 @@ var hud_hard_lock: Control = null
 var hud_target_lead: Control = null
 var hud_threat_arrows: Array = []
 var snow_particles: CPUParticles3D = null
+var _cur_aim_point: Vector3 = Vector3.ZERO
 
 
 func _ready() -> void:
@@ -95,6 +104,14 @@ func _ready() -> void:
 	add_child(coll_node)
 	self.collision_layer = 2 # THE SHIP
 	self.collision_mask = 1 | 4 # World + Sun/Others
+	
+	# COMBAT HARDENING: Player Health Tracking
+	health_component = HealthComponent.new(); health_component.max_health = 1000.0
+	add_child(health_component)
+	health_component.damaged.connect(func(amt): _trigger_hit_flash(0.85))
+	health_component.health_depleted.connect(_on_player_death)
+	
+	_setup_player_hud() # Vitality Visuals
 	
 	# 1. ACE CAMERA PIPELINE
 	_setup_ace_camera()
@@ -308,7 +325,125 @@ func _apply_toon_shading(node: Node) -> void:
 	for child in node.get_children():
 		_apply_toon_shading(child)
 
+func _process_ace_camera(delta: float) -> void:
+	if not cam_pivot or not camera: return
+	
+	# ACE: Master Camera Sync (Post-Physics)
+	# This avoids frame-latency and ensures zero-separation at high velocities.
+	cam_pivot.global_position = global_position
+	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
+	
+	if is_instance_valid(pinned_target):
+		var t_dir = (pinned_target.global_position - global_position).normalized()
+		var s_fwd = -global_transform.basis.z
+		var look_dir = s_fwd.lerp(t_dir, 0.35).normalized()
+		var cam_q = Basis.looking_at(look_dir, world_up).get_rotation_quaternion()
+		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
+		cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
+	else:
+		var ship_q = global_transform.basis.get_rotation_quaternion()
+		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
+		var target_q = (ship_q * orbit_q).normalized()
+		var current_q = cam_pivot.global_transform.basis.get_rotation_quaternion()
+		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, 15.0 * delta))
+
+	# FOV SYNC
+	var speed_val = velocity.length()
+	var fov_scale = 70.0 # Baseline
+	if speed_val > max_warp_speed:
+		var t = clamp((speed_val - max_warp_speed) / (max_hyperdrive_speed - max_warp_speed), 0.0, 1.0)
+		fov_scale = 92.0 + (t * 8.0)
+	elif speed_val > max_space_speed:
+		var t = clamp((speed_val - max_space_speed) / (max_warp_speed - max_space_speed), 0.0, 1.0)
+		fov_scale = 82.0 + (t * 10.0)
+	else:
+		var t = clamp(speed_val / max_space_speed, 0.0, 1.0)
+		fov_scale = 70.0 + (t * 12.0)
+	camera.fov = lerp(camera.fov, fov_scale, 4.0 * delta)
+
+	# HUD SYNC
+	if health_bar_fill and health_component:
+		var hp_p = health_component.current_health / health_component.max_health
+		health_bar_fill.scale.x = hp_p
+		health_bar_fill.color = Color.CRIMSON.lerp(Color.SPRING_GREEN, hp_p)
+
+	# ACE KINETIC SHAKE: High-frequency jitter
+	if shake_intensity > 0.01:
+		shake_v = Vector3(randf_range(-1,1), randf_range(-1,1), randf_range(-1,1)) * shake_intensity * 0.5
+		shake_intensity = lerp(shake_intensity, 0.0, 5.0 * delta)
+	else:
+		shake_v = Vector3.ZERO
+
+func take_damage(amount: float) -> void:
+	if is_dead: return
+	if health_component: health_component.take_damage(amount)
+
+func _setup_player_hud() -> void:
+	var hud = CanvasLayer.new(); hud.layer = 100; add_child(hud)
+	
+	# ACE: Master Vitality Bar (Top Center)
+	var bar_w = 400.0; var bar_h = 24.0
+	health_bar_bg = ColorRect.new()
+	health_bar_bg.color = Color(0.1, 0.1, 0.1, 0.8)
+	health_bar_bg.custom_minimum_size = Vector2(bar_w, bar_h)
+	health_bar_bg.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	health_bar_bg.position.y = 40.0; health_bar_bg.position.x -= bar_w/2.0
+	hud.add_child(health_bar_bg)
+	
+	health_bar_fill = ColorRect.new()
+	health_bar_fill.color = Color.SPRING_GREEN
+	health_bar_fill.custom_minimum_size = Vector2(bar_w - 4.0, bar_h - 4.0)
+	health_bar_fill.position = Vector2(2, 2)
+	health_bar_bg.add_child(health_bar_fill)
+
+func _on_player_death() -> void:
+	if is_dead: return
+	is_dead = true
+	print("!!! PILOT TERMINATED: SHIP K.I.A. !!!")
+	
+	if ship_model: ship_model.hide()
+	
+	# ACE: TITANIC EXPLOSION (1600m Radius)
+	var fx_script = load("res://src/combat/ExplosionFX.gd")
+	if fx_script:
+		var fx = Node3D.new(); fx.set_script(fx_script)
+		get_parent().add_child(fx)
+		fx.global_position = global_position
+		fx.set("explosion_scale", 1600.0)
+	
+	# CINEMATIC RESTART: 3s Orbital Orbit
+	var t = get_tree().create_timer(4.0)
+	t.timeout.connect(func(): get_tree().reload_current_scene())
+
+func _trigger_hit_flash(intensity: float) -> void:
+	if not ship_model: return
+	if flash_tween: flash_tween.kill()
+	flash_tween = create_tween()
+	
+	# ACE: Get all materials that support the flash_intensity uniform
+	var mats = []
+	var nodes = [ship_model]
+	while nodes.size() > 0:
+		var n = nodes.pop_back()
+		if n is MeshInstance3D:
+			for i in range(n.get_mesh().get_surface_count()):
+				var m = n.get_surface_override_material(i)
+				if m is ShaderMaterial: mats.append(m)
+		nodes.append_array(n.get_children())
+	
+	for m in mats: m.set_shader_parameter("flash_intensity", intensity)
+	shake_intensity += intensity * 12.0 # Impact Jitter
+	flash_tween.tween_method(func(v): 
+		for m in mats: m.set_shader_parameter("flash_intensity", v)
+	, intensity, 0.0, 0.35).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+
 func _physics_process(delta: float) -> void:
+	if is_dead:
+		# DEAD CAMERA: Slow cinematic orbit around the death spot
+		cam_orbit.x += delta * 0.4
+		_process_ace_camera(delta)
+		return
+		
 	# HEARTBEAT: Prints every 120 physics frames (~4s) to confirm script is alive
 	_hb_tick += 1
 	if _hb_tick >= 120:
@@ -575,6 +710,12 @@ func _process_ace_flight(delta: float) -> void:
 		
 		camera.fov = lerp(camera.fov, fov_scale, 4.0 * delta)
 		
+	# SYNC HUD: Dynamic Color Scaling (Green -> Crimson)
+	if health_bar_fill and health_component:
+		var hp_p = health_component.current_health / health_component.max_health
+		health_bar_fill.scale.x = hp_p
+		health_bar_fill.color = Color.CRIMSON.lerp(Color.SPRING_GREEN, hp_p)
+		
 	# ATMOSPHERIC TURBULENCE: Extremely subtle jitter, grass-skimming ONLY
 	var turb_intensity = (1.0 - turb_altitude_ratio) * (velocity.length() / 2500.0)
 	if turb_intensity > 0.05:
@@ -675,7 +816,7 @@ func _process_ace_flight(delta: float) -> void:
 	if ship_model:
 		for t in thruster_trails:
 			var world_pos = ship_model.global_transform * t.offset
-			t.node.update_trail(world_pos, velocity, is_warping, thrust_mapped, delta)
+			t.node.update_trail(world_pos, global_transform.basis.z, velocity, is_warping, thrust_mapped, delta)
 			
 			# SYNC DYNAMIC NOZZLE ORB (Sphere core + Physical OmniLight)
 			if t.node.has_meta("glow_node"):
@@ -728,6 +869,8 @@ func _process_ace_flight(delta: float) -> void:
 				var impact_force = velocity.length()
 				velocity = velocity.bounce(n) * 0.6 # 60% energy retention
 				reentry_intensity += impact_force * 0.05
+				_trigger_hit_flash(clamp(impact_force / 400.0, 0.4, 0.95))
+				if health_component: health_component.take_damage(impact_force * 0.02)
 	
 	# 5. VISUAL HULL DYNAMICS
 	# Simulates physical G-Forces forcing the Starhawk to bank and pitch violently during maneuvers
@@ -777,10 +920,12 @@ func _process_ace_flight(delta: float) -> void:
 		var hover_bob = sin(Time.get_ticks_msec() * 0.0015) * 1.5 * (1.0 - speed_ratio)
 		ship_model.position.y = lerp(ship_model.position.y, hover_bob, 5.0 * delta)
 
+	# ACE: Master Camera & HUD Sync
+	_process_ace_camera(delta)
+
 func _fire_alternating_cannon() -> void:
 	fire_cooldown = FIRE_RATE
 	
-	var fire_dir = -global_transform.basis.z.normalized()
 	var wing_up = global_transform.basis.x.normalized()
 	var main_scene = get_parent()
 	if not main_scene: return
@@ -793,8 +938,10 @@ func _fire_alternating_cannon() -> void:
 		var turret_pos = ship_model.global_transform * Vector3(ship_nose_offset, -0.18, off)
 		recoil_v += (global_transform.basis.z * 0.25)
 		
-		# BOLT ORIGIN: Shifted 10m FORWARD to ensure clearance from the internal cockpit mesh 
-		# now that frame-dwell is active.
+		# CONVERGENCE: Point bullets toward the current Pilot HUD reticle
+		var fire_dir = (_cur_aim_point - turret_pos).normalized()
+		
+		# BOLT ORIGIN: Shifted 10m FORWARD to ensure clearance from internal meshes
 		var bolt_origin = turret_pos - (global_transform.basis.z * 10.0)
 		_spawn_muzzle_flash(turret_pos, fire_dir)
 
@@ -821,9 +968,7 @@ func _fire_alternating_cannon() -> void:
 		
 		# MUZZLE SYNC
 		bolt.global_position = bolt_origin
-
-
-		bolt.rotation = global_transform.basis.get_rotation_quaternion().get_euler()
+		bolt.look_at(bolt.global_position + fire_dir)
 		bolt.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 		
 		# ACE RELATIVISTIC MOMENTUM: inherited ship full vector + 9k-35k Acceleration Ramp
@@ -871,8 +1016,8 @@ func _input(event: InputEvent) -> void:
 	
 	# ORBIT CAMERA: Mouse Look
 	if event is InputEventMouseMotion and mouse_locked and in_ship:
-		cam_orbit.x -= event.relative.x * 0.005
-		cam_orbit.y -= event.relative.y * 0.005
+		cam_orbit.x -= event.relative.x * 0.002
+		cam_orbit.y -= event.relative.y * 0.002
 		cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
 	
 	# CONTROLLER FIRE: Triangle (PS) / Y (Xbox)
@@ -903,8 +1048,8 @@ func _input(event: InputEvent) -> void:
 	# MOUSE LOOK
 	if event is InputEventMouseMotion and mouse_locked:
 		if in_ship:
-			cam_orbit.x -= event.relative.x * 0.005
-			cam_orbit.y -= event.relative.y * 0.005
+			cam_orbit.x -= event.relative.x * 0.002
+			cam_orbit.y -= event.relative.y * 0.002
 		else:
 			walk_yaw -= event.relative.x * 0.005
 			cam_orbit.y -= event.relative.y * 0.005
@@ -920,20 +1065,34 @@ func _process(delta: float) -> void:
 	if hud_reticle and camera:
 		var p_speed = 22000.0 # Average cinematic ramp-speed for visual tracking
 		var bullet_v = (-global_transform.basis.z * p_speed) + velocity
-		var aim_point = global_position + (bullet_v * 0.25)
-		
-		# RADAR THROTTLE: Scans for targets only every 5 frames in process
-		_v_tick_30_v += 1
-		if _v_tick_30_v % 5 == 0:
+		# RADAR THROTTLE: Scans for targets with frame-jitter protection (Throttled to ~6Hz)
+		_radar_tick += 1
+		if _radar_tick >= 10:
+			_radar_tick = 0
 			var best_target: Node3D = null
 			var fwd = -global_transform.basis.z 
 			if is_inside_tree():
-				for t in get_tree().get_nodes_in_group("Targets"):
-					if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
-					var d_v = (t.global_position - global_position)
-					if d_v.length() > 25000.0: continue 
-					if fwd.dot(d_v.normalized()) > 0.70: 
-						best_target = t; break
+				var highest_dot = 0.98 # ACE PRECISION: Required 11-degree 'Close Proximity' cone
+				
+				# PRECEDENCE SCAN: Prioritize Enemies over passive targets
+				var candidate_pools = [
+					get_tree().get_nodes_in_group("Enemies"),
+					get_tree().get_nodes_in_group("Targets")
+				]
+				
+				for pool in candidate_pools:
+					for t in pool:
+						if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
+						var d_v = (t.global_position - global_position)
+						if d_v.length() > 25000.0: continue 
+						
+						var dot = fwd.dot(d_v.normalized())
+						if dot > highest_dot: 
+							highest_dot = dot
+							best_target = t
+					# If we found an enemy in the first pool, don't even look at rocks
+					if best_target: break
+					
 			lock_on_target = best_target
 
 			# FLEET THREAT TRACKER: Draw arrows for ALL off-screen enemies
@@ -951,16 +1110,29 @@ func _process(delta: float) -> void:
 			for k in range(arrow_idx, hud_threat_arrows.size()):
 				hud_threat_arrows[k].hide()
 
-
-
-
-
+		# KINETIC RETICLE SYNC: Determines whether the crosshair tracks the target
+		var default_aim = global_position + (bullet_v * 0.25)
+		var final_target_point = default_aim
 		
-		if camera.is_position_behind(aim_point):
+		# RETICLE SNAPPING: Jump visually to the target when within lock-cone
+		if is_instance_valid(lock_on_target):
+			final_target_point = lock_on_target.global_position
+			hud_reticle.is_locked = true
+		else:
+			hud_reticle.is_locked = false
+		
+		# INITIAL BOOT: Snap first frame to avoid screen-zip
+		if _cur_aim_point.length_squared() < 1.0:
+			_cur_aim_point = final_target_point
+			
+		# ACE TRACKING: Smooth 18.0x lerp for fluid target hand-offs
+		_cur_aim_point = _cur_aim_point.lerp(final_target_point, 18.0 * delta)
+		
+		if camera.is_position_behind(_cur_aim_point):
 			hud_reticle.hide()
 		else:
 			hud_reticle.show()
-			var screen_pos = camera.unproject_position(aim_point)
+			var screen_pos = camera.unproject_position(_cur_aim_point)
 			hud_reticle.position = screen_pos - (hud_reticle.size / 2.0)
 
 	# RECOIL & TURBULENCE & REENTRY SHAKE
@@ -1009,7 +1181,7 @@ func _process(delta: float) -> void:
 	# CAMERA DYNAMICS: Recoil & Reentry Shake (Ship-only Visual Sync)
 	# Snap the camera pivot in _process to align with visual 'leaning' and 'banking'
 	var cam_base_y = 10.0 if in_ship else 1.85
-	if cam_spring: cam_spring.position = Vector3(0, cam_base_y, 0) + recoil_v + turb_v + reentry_v
+	if cam_spring: cam_spring.position = Vector3(0, cam_base_y, 0) + recoil_v + turb_v + reentry_v + shake_v
 	
 	# BOLT POOL UPDATE: Relativistic Physics Hardening
 	# 25km/s base creates the 'Cracked the Code' visual lead observed in elite titles (Starfox/NMS).

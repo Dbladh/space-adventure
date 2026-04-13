@@ -7,6 +7,7 @@ class_name HealthComponent
 
 signal health_changed(new_health: float)
 signal health_depleted()
+signal damaged(amount: float)
 
 @export var max_health: float = 100.0
 @onready var current_health: float = max_health
@@ -14,6 +15,7 @@ signal health_depleted()
 ## Deduct health and emit signals.
 func take_damage(amount: float) -> void:
 	current_health = maxf(0.0, current_health - amount)
+	damaged.emit(amount)
 	health_changed.emit(current_health)
 	
 	if current_health <= 0.0:

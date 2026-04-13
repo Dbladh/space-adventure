@@ -16,6 +16,7 @@ var scale_factor: float = 1.0
 var planet_seed: int = 0  
 var scatter_grass: bool = false
 var archetype: String = "LUSH"
+var continent_pole: Vector3 = Vector3.UP # ACE: Synchronized continent anchor
 
 # DYNAMIC PROCEDURAL PLANET PALETTE
 static var _tex_cache := {}
@@ -143,22 +144,30 @@ func get_terrain_elevation(sn: Vector3) -> float:
 			var layer_step = floor(local_geo / terrace_height) + smoothstep(0.15, 0.85, h_frac)
 			local_geo = layer_step * terrace_height
 	
-	# CONTINENTS VS OCEANS: Large-scale landmasses (2.2 freq) with ~50-60% land coverage
+	# CONTINENTS VS OCEANS: Large-scale landmasses
 	var c_n: float = noise.get_noise_3dv(sn * 2.2)
 	var cont_mask: float = smoothstep(-0.1, 0.1, c_n)
 	var abyss_depth: float = SEA_LEVEL - 400.0
-	var elev: float = lerp(abyss_depth, local_geo + (SEA_LEVEL + 50.0), cont_mask)
 	
-	# PROCEDURAL WALLED CITIES
-	var city_n: float = noise.get_noise_3dv(sn * 6.0)
-	if cont_mask > 0.5 and city_n > 0.42:
-		var is_city = smoothstep(0.44, 0.45, city_n)
-		var is_wall = smoothstep(0.42, 0.44, city_n) - smoothstep(0.44, 0.45, city_n)
+	# MAJOR ISLAND OVERRIDE: Proximity-Boosted Tectonic Landmass (5-15% coverage)
+	var dist_to_pole = sn.distance_to(continent_pole)
+	var proximity = 1.0 - smoothstep(0.0, 1.1, dist_to_pole)
+	var major_mask = smoothstep(0.4, 0.7, c_n + proximity * 0.85)
+	
+	# Force 'Mega-Continent' above sea level and flatten it significantly
+	var base_elev = lerp(abyss_depth, local_geo + (SEA_LEVEL + 50.0), cont_mask)
+	var island_elev = SEA_LEVEL + 850.0 + (local_geo * 0.1) 
+	
+	var elev = lerp(base_elev, island_elev, major_mask)
+	
+	# MEGA-CITY: The entire landmass is an urban fortress
+	if major_mask > 0.05:
+		var city_plateau = smoothstep(0.1, 0.45, major_mask)
+		var base_city_h = SEA_LEVEL + 850.0
+		elev = lerp(elev, base_city_h, city_plateau)
 		
-		# A stable plateau for the city 
-		var base_city_h = (noise.get_noise_3dv(sn * 0.5) * 0.5 + 0.5) * terrain_strength * 0.6 + SEA_LEVEL
-		elev = lerp(elev, base_city_h, is_city)
-		elev += is_wall * 600.0 # 600m high fortress wall!
+		var is_wall = smoothstep(0.05, 0.15, major_mask) - smoothstep(0.15, 0.25, major_mask)
+		elev += is_wall * 600.0 
 	
 	return elev
 
@@ -310,13 +319,18 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 		create_trimesh_collision()
 
 func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
-	# CPU HARDENING: Only populate vegetation for chunks visible during atmospheric approach (<= 20km)
-	if scale_factor > 0.02: return 
+	# CPU HARDENING: Vegetation only for approach (<= 20km). Cities seen from further (<= 45km).
+	# This limit is strictly enforced to prevent 'Grid Iteration' lag on huge chunks.
+	if scale_factor > 0.045: return 
 	var radius_ratio: float = clamp(radius / 1000000.0, 0.3, 1.5)
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []; var g_pts: Array[Transform3D] = []; var c_pts: Array[Transform3D] = []
 	
-	# ACE BOTANICAL THICKENING: Reducing cell-size (0.00014) to increase canopy-saturation
-	var t_cell: float = 0.00014 / radius_ratio
+	# ACE MESH HARDENING: Use tiered cell sizes to prevent 3.5M+ loop iterations.
+	# High-LOD chunks use fine-detail (0.00008), Mid-LOD chunks use sparse-scatter (0.0008).
+	var base_cell: float = 0.00008
+	if scale_factor > 0.015: base_cell = 0.0008 
+	
+	var t_cell: float = base_cell / radius_ratio
 	var ts_x = int(floor((offset.x - scale_factor) / t_cell)); var te_x = int(ceil((offset.x + scale_factor) / t_cell))
 	var ts_y = int(floor((offset.y - scale_factor) / t_cell)); var te_y = int(ceil((offset.y + scale_factor) / t_cell))
 	# ACE STABILITY HARDENING: Broad-phase scanning must be 100% deterministic.
@@ -336,31 +350,48 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			var cluster_n = noise.get_noise_3dv(cp * 18000.0) 
 			var detail_n = noise.get_noise_3dv(cp * 65000.0)
 			
-			var city_n = noise.get_noise_3dv(cp * 6.0)
+			# NATURE THROTTLE: Trees/Rocks only spawn on high-detail chunks with fine grid
+			var nature_ok = scale_factor <= 0.02 and base_cell < 0.0002
 			
-			if city_n > 0.45:
-				# CITY ZONE: Ignore nature, build Urban Infrastructure
-				var h = get_terrain_elevation(cp)
-				if h > SEA_LEVEL:
-					# Very high density skyscrapers (using tree_mult block math logic for heavy spawning)
-					if (h_v % 1000) < int(120 * DebugSettings.tree_mult):
-						var b_w = 15.0 + (float((h_v >> 3) % 100) / 100.0) * 30.0
-						var b_xform = _get_object_xform(cp * (radius + h), cp, float(h_v % 100)/100.0, b_w)
-						c_pts.append(b_xform.rotated_local(Vector3.UP, float(h_v % 360)))
+			# MEGA-CITY SYNC: Tectonic Warp for Organic Urban Districts
+			var warp_n = noise.get_noise_3dv(cp * 1.2)
+			var warped_cp = (cp + Vector3(warp_n, warp_n, warp_n) * 0.35).normalized()
+			var dist_to_pole = warped_cp.distance_to(continent_pole)
+			
+			var c_n = noise.get_noise_3dv(cp * 2.2)
+			var proximity = smoothstep(1.0, 0.4, dist_to_pole)
+			var major_mask = smoothstep(0.48, 0.52, c_n + proximity * 0.9)
+			
+			if major_mask > 0.5:
+				# TITAN GRID: Expanded districts to accommodate 280m wide monoliths
+				var grid_cycle = 14
+				var road_size = 5
+				var is_road = (abs(x_idx) % grid_cycle < road_size) or (abs(y_idx) % grid_cycle < road_size)
+				
+				if not is_road:
+					# TITAN SPACING: 6-cell interval (approx 600m+) ensures no overlaps for 280m buildings
+					if (abs(x_idx) % 6 == 0) and (abs(y_idx) % 6 == 0):
+						var h = get_terrain_elevation(cp)
+						# Deterministic Density check
+						if (h_v % 1000) < int(180 * DebugSettings.tree_mult):
+							var b_scale = 0.6 + (float((h_v >> 3) % 100) / 100.0) * 1.4
+							var b_xform = _get_object_xform(cp * (radius + h), cp, float(h_v % 100)/100.0, b_scale)
+							c_pts.append(b_xform.rotated_local(Vector3.UP, float(h_v % 360)))
 			else:
-				# NATURE ZONE
-				if cluster_n > 0.22:
-					var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
-					if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult):
-						var h = get_terrain_elevation(cp)
-						if h > -150.0 and (h + sin(cp.x * 12000.0)*300.0) < 1450.0:
-							var xform = _get_object_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
-							t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
-				elif cluster_n < -0.20: # Expanded rock biome threshold from -0.28
-					if (h_v % 1000) < int(60 * DebugSettings.rock_mult): # 6x Density Upgrade (was 10)
-						var h = get_terrain_elevation(cp)
-						if h > -150.0:
-							r_pts.append(_get_rock_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
+				# NATURE ZONE: Follow standard noise rules
+				if nature_ok:
+					if cluster_n > 0.22:
+						var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
+						if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult):
+							var h = get_terrain_elevation(cp)
+							if h > -150.0 and (h + sin(cp.x * 12000.0)*300.0) < 1450.0:
+								var xform = _get_object_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
+								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
+					elif cluster_n < -0.20: # Expanded rock biome threshold from -0.28
+						if (h_v % 1000) < int(200 * DebugSettings.rock_mult): # 3.3x Density Upgrade (was 60)
+							var h = get_terrain_elevation(cp)
+							if h > -150.0:
+								r_pts.append(_get_rock_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
 
 	
 	if scale_factor <= 0.00055:
@@ -703,6 +734,11 @@ func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
 	p.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
 	add_child(p)
+	
+	# ACE MEMORY HARDENING: Ensure ephemeral botanical emitters are purged!
+	# Without this, high-density forest flight causes a massive 'Node Leak' that kills framerate.
+	var t = get_tree().create_timer(p.lifetime + 1.0)
+	t.timeout.connect(func(): if is_instance_valid(p): p.queue_free())
 
 static var _leaf_p_shader: Shader = null
 static func _get_leaf_particle_shader() -> Shader:
@@ -779,53 +815,117 @@ void fragment() {
 	mmi_h.visibility_range_end = 1500.0; mmi_h.visibility_range_end_margin = 300.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
 	add_child(mmi_h); _flora_nodes.append(mmi_h)
-
+	
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:
-	var st = SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	if points.is_empty(): return
 	
-	# A single modular "Tower" generation algorithm built from stacking random box blocks
-	var floors = 3
-	var base_w = 40.0
-	var cur_y = 0.0
-	for i in range(floors):
-		var h = 30.0 + i * 20.0
-		var bx = BoxMesh.new(); bx.size = Vector3(base_w, h, base_w)
-		var xf = Transform3D().translated(Vector3(0, cur_y + h * 0.5, 0))
-		st.append_from(bx, 0, xf)
-		cur_y += h
-		base_w *= 0.65
+	# ACE PBR ASSET POOL: Full suite (Albedo, Normal, Spec, Disp, AO)
+	var tex_paths = [
+		"res://assets/textures/building_texture_1.png", "res://assets/textures/building_texture_2.png",
+		"res://assets/textures/building_texture_3.png", "res://assets/textures/building_texture_4.png"
+	]
+	var roof_t = load("res://assets/textures/building_roof_texture.png")
+	var roof_n = load("res://assets/textures/building_roof_texture_normal.png")
+	var roof_s = load("res://assets/textures/building_roof_texture_specular.png")
+	var roof_d = load("res://assets/textures/building_roof_texture_displacement.png")
+	var roof_a = load("res://assets/textures/building_roof_texture_ambient.png")
 	
-	st.generate_normals(false)
-	st.generate_tangents()
-	var tower_mesh = st.commit()
+	# ACE ARCHITECTURAL DEPTH SHADER: Parallax-recessed windows and AO shadowing
+	var shader = Shader.new()
+	shader.code = """shader_type spatial;
+	uniform sampler2D albedo_tex : source_color;
+	uniform sampler2D normal_tex : hint_normal;
+	uniform sampler2D spec_tex : source_color;
+	uniform sampler2D disp_tex : source_color;
+	uniform sampler2D ao_tex : source_color;
+	uniform sampler2D roof_tex : source_color;
+	uniform sampler2D roof_norm : hint_normal;
+	uniform sampler2D roof_spec : source_color;
+	uniform sampler2D roof_disp : source_color;
+	uniform sampler2D roof_ao : source_color;
+	varying vec3 v_normal;
+	varying vec3 v_local_pos;
+	varying vec3 v_view_dir;
+	void vertex() {
+		v_normal = NORMAL;
+		v_local_pos = VERTEX;
+		// View Direction in Local Space for Parallax mapping
+		v_view_dir = (inverse(MODELVIEW_MATRIX) * vec4(0.0, 0.0, 1.0, 0.0)).xyz;
+	}
+	void fragment() {
+		float roof_mask = clamp(v_normal.y * 10.0 - 5.0, 0.0, 1.0);
+		float t_scale = 0.035; 
+		
+		// DUAL-SURFACE BASE UVs
+		vec2 s_uv;
+		if (abs(v_normal.x) > 0.5) { s_uv = vec2((v_local_pos.z + 140.0) / 280.0, v_local_pos.y * t_scale); }
+		else { s_uv = vec2((v_local_pos.x + 140.0) / 280.0, v_local_pos.y * t_scale); }
+		vec2 r_uv = (v_local_pos.xz + 140.0) / 280.0;
+		
+		// PARALLAX DEPTH: Simulating physical structural recession
+		float side_height = texture(disp_tex, s_uv).r;
+		vec2 p_s_uv = s_uv - v_view_dir.xy * (side_height * 0.02);
+		float roof_height = texture(roof_disp, r_uv).r;
+		vec2 p_r_uv = r_uv - v_view_dir.xz * (roof_height * 0.02);
+		
+		// TEXTURE SAMPLING (WITH PARALLAX OFFSET)
+		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb;
+		vec3 roof_alb = texture(roof_tex, p_r_uv).rgb;
+		vec3 base_alb = mix(side_alb, roof_alb, roof_mask);
+		
+		// AMBIENT OCCLUSION: Detailed self-shadowing
+		float side_ao = texture(ao_tex, p_s_uv).r;
+		float roof_ao_v = texture(roof_ao, p_r_uv).r;
+		float base_ao = mix(side_ao, roof_ao_v, roof_mask);
+		
+		// GROUNDING GRADIENT
+		float height_grad = mix(0.2, 1.0, smoothstep(-240.0, 100.0, v_local_pos.y));
+		ALBEDO = base_alb * height_grad * base_ao;
+		
+		// SPECULAR & METALLIC (REFLECTIVE WINDOWS)
+		float s_spec = texture(spec_tex, p_s_uv).r;
+		float r_spec = texture(roof_spec, p_r_uv).r;
+		SPECULAR = mix(s_spec, r_spec, roof_mask);
+		METALLIC = mix(s_spec * 0.8, 0.1, roof_mask);
+		ROUGHNESS = mix(0.7 - s_spec * 0.5, 0.8, roof_mask);
+		
+		// NEON EMISSION
+		float luma = dot(base_alb, vec3(0.299, 0.587, 0.114));
+		float neon_mask = step(0.45, luma) * (1.0 - roof_mask);
+		EMISSION = base_alb * neon_mask * 10.0;
+		
+		// NORMAL ENHANCEMENT
+		NORMAL_MAP = mix(texture(normal_tex, p_s_uv).rgb, texture(roof_norm, p_r_uv).rgb, roof_mask);
+		NORMAL_MAP_DEPTH = 1.35; 
+	}
+	"""
 	
-	var mm = MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.use_colors = true
-	mm.mesh = tower_mesh
-	mm.instance_count = points.size()
+	var groups: Array[Array] = [[], [], [], []]; for p in points: groups[hash(p.origin) % 4].append(p)
 	
-	for i in range(points.size()):
-		mm.set_instance_transform(i, points[i])
-		var hue_jit = fmod(float(hash(points[i].origin)), 10.0)/60.0
-		mm.set_instance_color(i, Color.from_hsv(0.6 + hue_jit, 0.4, 0.4))
-	
-	var mmi = MultiMeshInstance3D.new()
-	mmi.multimesh = mm
-	
-	# Standard unshaded material to prevent giant blocks from absorbing light
-	var mat = StandardMaterial3D.new()
-	mat.albedo_color = Color(0.3, 0.3, 0.35)
-	mat.metallic = 0.8
-	mat.roughness = 0.5
-	mat.vertex_color_use_as_albedo = true
-	mmi.material_override = mat
-	
-	# Unified LOD Policy: Cities follow 'Proxy' rules for massive scale
-	_apply_planetary_lod_policy(mmi, false)
-	
-	add_child(mmi); _flora_nodes.append(mmi)
+	for i in range(4):
+		if groups[i].is_empty(): continue
+		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = BoxMesh.new(); mm.mesh.size = Vector3(280, 480, 280)
+		mm.instance_count = groups[i].size()
+		for j in range(groups[i].size()):
+			var xf = groups[i][j]
+			var s_var = 0.7 + (float(hash(xf.origin) % 100) / 100.0) * 0.6
+			mm.set_instance_transform(j, xf.scaled_local(Vector3(1.0, s_var, 1.0)))
+		
+		var mat = ShaderMaterial.new(); mat.shader = shader
+		mat.set_shader_parameter("albedo_tex", load(tex_paths[i]))
+		mat.set_shader_parameter("normal_tex", load(tex_paths[i].replace(".png", "_normal.png")))
+		mat.set_shader_parameter("spec_tex", load(tex_paths[i].replace(".png", "_specular.png")))
+		mat.set_shader_parameter("disp_tex", load(tex_paths[i].replace(".png", "_displacement.png")))
+		mat.set_shader_parameter("ao_tex", load(tex_paths[i].replace(".png", "_ambient.png")))
+		mat.set_shader_parameter("roof_tex", roof_t); mat.set_shader_parameter("roof_norm", roof_n)
+		mat.set_shader_parameter("roof_spec", roof_s); mat.set_shader_parameter("roof_disp", roof_d)
+		mat.set_shader_parameter("roof_ao", roof_a)
+		
+		var mmi = MultiMeshInstance3D.new(); mmi.multimesh = mm; mmi.material_override = mat
+		mmi.visibility_range_end = 60000.0; mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		add_child(mmi); _flora_nodes.append(mmi)
+  
 
 func _get_rock_xform(pos: Vector3, up: Vector3, noise_val: float, b_scale: float) -> Transform3D:
 	var t_bas = Basis(); t_bas.y = up; t_bas.x = up.cross(Vector3.RIGHT).normalized()

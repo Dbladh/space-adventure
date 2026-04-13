@@ -35,6 +35,7 @@ var player: Node3D
 
 # ACE MEMORY POOLING: Hibernation buffer for QuadTree nodes to prevent GC stutters
 var chunk_pool: Array[MeshInstance3D] = []
+var continent_pole: Vector3 = Vector3.UP # ACE: Deterministic anchor for the major island
 
 # NMS OPTIMIZATION: Throttle chunk streaming to prevent CPU micro-stutters!
 # One split per frame keeps mesh generation within frame budget.
@@ -43,6 +44,7 @@ const MAX_SPLITS_PER_FRAME: int = 2
 const PROXIMITY_CUTOFF: float = 5000000.0 # 5,000km - Transition to Impostor mode for astronomical efficiency
 var impostor: Node3D = null
 var faces_hidden: bool = false
+var _lod_face_idx: int = 0 # ACE PERFORMANCE: Load-balanced face updates
 
 
 
@@ -156,6 +158,10 @@ func _ready() -> void:
 	base_hue = pal_grass_col.h
 	self.pal_forest_h = base_hue # Seed for tree variety
 	
+	# MAJOR CONTINENT ARCHITECT: Every planet gets one iconic, massive landmass
+	var c_rng = RandomNumberGenerator.new(); c_rng.seed = planet_seed + 999
+	continent_pole = Vector3(c_rng.randf_range(-1,1), c_rng.randf_range(-1,1), c_rng.randf_range(-1,1)).normalized()
+	
 	for normal in FACE_NORMALS:
 		var face = QuadTreeFace.new(self, normal)
 		faces.append(face)
@@ -208,7 +214,7 @@ func get_terrain_height_at(pos: Vector3) -> float:
 func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: float) -> void:
 	# 1. PUFFY CLOUD BELTS: A massive celestial sphere wrapping the planet at 35km altitude
 	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 35000.0; c_mesh.height = c_mesh.radius * 2.0; c_mesh.radial_segments = 64; c_mesh.rings = 32
-	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_never, cull_disabled;
+	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 	uniform vec3 sun_dir;
 	uniform vec3 horizon_col;
 	varying vec3 v_local_pos;
@@ -267,6 +273,8 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		if (cam_dist > 4000000.0) ALPHA = 0.0;
 	}"""
 	var c_inst = MeshInstance3D.new(); c_inst.mesh = c_mesh; c_inst.material_override = ShaderMaterial.new(); c_inst.material_override.shader = c_shader
+	# ACE DEPTH SORT: Ensure atmosphere layers have unique priorities to kill Z-fighting
+	c_inst.material_override.render_priority = 5
 	var sun_dir = Vector3(0.5, 0.5, 0.707).normalized()
 	c_inst.material_override.set_shader_parameter("sun_dir", sun_dir)
 	# SYNC ATMOSPHERE: Pass the generated horizon color for distant silhouette optimization
@@ -276,7 +284,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	# 2. PLANETARY RINGS (50% chance per planet - flat, layered Saturn-style disc)
 	if rng.randf() > 0.5:
 		var r_mesh = TorusMesh.new(); r_mesh.inner_radius = planet_radius + 150000.0; r_mesh.outer_radius = planet_radius + 400000.0; r_mesh.rings = 128; r_mesh.ring_segments = 4
-		var r_shader = Shader.new(); r_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_never, cull_disabled;
+		var r_shader = Shader.new(); r_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 		uniform vec3 ring_col_a;
 		uniform vec3 ring_col_b;
 		varying vec3 v_local_pos;
@@ -304,6 +312,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		r_mat.set_shader_parameter("ring_col_a", Color.from_hsv(base_hue, 0.50, 0.95))
 		r_mat.set_shader_parameter("ring_col_b", Color.from_hsv(base_hue, 0.25, 0.80))
 		r_inst.material_override = r_mat
+		r_inst.material_override.render_priority = 1 # Deep space sort
 		r_inst.rotation_degrees = Vector3(rng.randf_range(10.0, 35.0), rng.randf_range(0, 360), 0.0)
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
 		add_child(r_inst)
@@ -314,7 +323,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 func _spawn_polar_auroras(base_color: Color) -> void:
 	# Aurora sphere is slightly larger than the cloud layer (45km alt)
 	var a_mesh = SphereMesh.new(); a_mesh.radius = planet_radius + 45000.0; a_mesh.height = a_mesh.radius * 2.0; a_mesh.radial_segments = 48; a_mesh.rings = 24
-	var a_shader = Shader.new(); a_shader.code = """shader_type spatial; render_mode unshaded, blend_add, depth_draw_never, cull_disabled;
+	var a_shader = Shader.new(); a_shader.code = """shader_type spatial; render_mode unshaded, blend_add, depth_draw_always, cull_disabled;
 	uniform vec3 aura_col;
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
@@ -351,6 +360,8 @@ func _spawn_polar_auroras(base_color: Color) -> void:
 		ALPHA = final_mask * 0.65 * smoothstep(15000.0, 800000.0, length(CAMERA_POSITION_WORLD - v_world_pos));
 	}"""
 	var a_inst = MeshInstance3D.new(); a_inst.mesh = a_mesh; a_inst.material_override = ShaderMaterial.new(); a_inst.material_override.shader = a_shader
+	# Aurora is rendered on top of clouds but below rings
+	a_inst.material_override.render_priority = 6
 	# Aurora is a bright, ethereal version of the planetary hue
 	var a_col = base_color.lightened(0.2)
 	a_col.s += 0.2; a_col.v += 0.3
@@ -639,8 +650,11 @@ func _process(_delta: float) -> void:
 			_ensure_impostor_active(false)
 			faces_hidden = false
 	
-	for face in faces:
-		face.update_lod(player.global_position)
+	# ACE PERFORMANCE HARDENING: Frame-Slice the QuadTree update
+	# Instead of checking all 6 faces every frame, we cycle through them.
+	# This ensures zero micro-stutter during high-speed low-altitude flight.
+	_lod_face_idx = (_lod_face_idx + 1) % faces.size()
+	faces[_lod_face_idx].update_lod(player.global_position)
 	
 	# High-performance splitting: one mesh commit per frame
 	for i in range(min(split_queue.size(), MAX_SPLITS_PER_FRAME)):
@@ -683,7 +697,31 @@ func get_terrain_elevation(sn: Vector3) -> float:
 	var S_LVL: float = -120.0
 	var abyss_depth: float = S_LVL - 400.0
 	
-	return lerp(abyss_depth, local_geo + (S_LVL + 50.0), cont_mask)
+	# TECTONIC WARP: Domain warping to break the circular continent shape
+	var warp_n = noise.get_noise_3dv(sn * 1.2)
+	var warped_sn = (sn + Vector3(warp_n, warp_n, warp_n) * 0.35).normalized()
+	var dist_to_pole = warped_sn.distance_to(continent_pole)
+	
+	# ORGANIC MASK: Combine warped proximity with fractal noise for jagged coastlines
+	var proximity = smoothstep(1.0, 0.4, dist_to_pole)
+	# major_mask is now an organic emergence from the tectonic noise field
+	var major_mask = smoothstep(0.48, 0.52, c_n + proximity * 0.9)
+	
+	# Force 'Mega-Continent' above sea level and flatten it significantly
+	var base_elev = lerp(abyss_depth, local_geo + (S_LVL + 50.0), cont_mask)
+	var island_elev = S_LVL + 850.0 + (local_geo * 0.1) 
+	var elev = lerp(base_elev, island_elev, major_mask)
+	
+	# MEGA-CITY: The entire landmass is an urban fortress
+	if major_mask > 0.05:
+		var city_plateau = smoothstep(0.1, 0.45, major_mask)
+		var base_city_h = S_LVL + 850.0
+		elev = lerp(elev, base_city_h, city_plateau)
+		
+		var is_wall = smoothstep(0.05, 0.15, major_mask) - smoothstep(0.15, 0.25, major_mask)
+		elev += is_wall * 600.0 
+	
+	return elev
 
 func _ensure_impostor_active(active: bool) -> void:
 	if active:
@@ -694,6 +732,7 @@ func _ensure_impostor_active(active: bool) -> void:
 			# Pass the ACTUAL terrain palette colors (not sky!) so impostor matches what you see up close
 			impostor.set("planet_color", pal_grass_col)
 			impostor.set("planet_color_b", pal_mount_col)
+			impostor.set("continent_pole", continent_pole) # ACE SYNC
 			add_child(impostor); impostor.global_position = global_position
 		impostor.visible = true
 	elif impostor:
@@ -820,6 +859,7 @@ class QuadTreeNode:
 		chunk.pal_water_base = face.planet.pal_water_base
 		chunk.pal_water_light = face.planet.pal_water_light
 		chunk.pal_water_shore = face.planet.pal_water_shore
+		chunk.continent_pole = face.planet.continent_pole
 		
 		var p = face.planet.player
 		chunk.scatter_grass = (p != null and not p.get("in_ship"))

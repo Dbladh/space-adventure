@@ -4,8 +4,9 @@ importer="texture"
 type="CompressedTexture2D"
 uid="uid://co21j4yh3j2d0"
 path.s3tc="res://.godot/imported/Meshy_AI_Starhawk_01_0331051011_texture_Image_1.jpg-9c98885874fb1e6f5db52fb1d2d0da8a.s3tc.ctex"
+path.etc2="res://.godot/imported/Meshy_AI_Starhawk_01_0331051011_texture_Image_1.jpg-9c98885874fb1e6f5db52fb1d2d0da8a.etc2.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
 "vram_texture": true
 }
 generator_parameters={
@@ -15,7 +16,7 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/models/player/ship/Meshy_AI_Starhawk_01_0331051011_texture_Image_1.jpg"
-dest_files=["res://.godot/imported/Meshy_AI_Starhawk_01_0331051011_texture_Image_1.jpg-9c98885874fb1e6f5db52fb1d2d0da8a.s3tc.ctex"]
+dest_files=["res://.godot/imported/Meshy_AI_Starhawk_01_0331051011_texture_Image_1.jpg-9c98885874fb1e6f5db52fb1d2d0da8a.s3tc.ctex", "res://.godot/imported/Meshy_AI_Starhawk_01_0331051011_texture_Image_1.jpg-9c98885874fb1e6f5db52fb1d2d0da8a.etc2.ctex"]
 
 [params]
 

@@ -16,14 +16,15 @@ var main_env: WorldEnvironment
 var main_sun: DirectionalLight3D
 var main_sky_mat: ShaderMaterial
 var planet_ref: Node3D
+var world_root: Node3D  # O(1) World Shifting Root
 var solar_time: float = 0.0
 
 func _ready() -> void:
 	print("--- [DIAGNOSTIC] EXECUTING PERFORMANCE TELEMETRY SYNC ---")
 	
-	# CAP AT 30 FPS: Doubles the per-frame time budget, smoothing generation stalls
-	# and preventing the GPU from burning power rendering frames faster than needed.
-	Engine.max_fps = 30
+	# CELESTIAL HEADROOM: Increase engine ceiling to 60fps to provide the budget
+	# needed for 30fps quantization without stuttering.
+	Engine.max_fps = 60
 	
 	# 1. ATOMIC PURGE
 	_purge_ghost_entities()
@@ -33,6 +34,12 @@ func _ready() -> void:
 	
 	# 3. SOLAR GENESIS 
 	_setup_hardened_solar_genesis()
+	
+	# 4. TITAN-WORLD ROOT
+	world_root = Node3D.new()
+	world_root.name = "WorldRoot"
+	world_root.add_to_group("WorldRoot")
+	add_child(world_root)
 	
 	# 5. TITAN-WORLD GENESIS
 	_setup_titan_planetary()
@@ -97,6 +104,13 @@ func _setup_stellar_horizon() -> void:
 	sky_env.fog_density = 0.0   # Start at 0, updated per-frame in _update_atmospheric_transition
 	sky_env.fog_aerial_perspective = 0.3  # Subtle sky blend — only affects very distant horizon
 	sky_env.fog_sun_scatter = 0.25  # Warm glow near the sun direction for golden horizon feel
+	# CINEMATIC BLOOM: Critical for energy bolt visibility in Retro/Pixelated modes
+	sky_env.glow_enabled = true
+	sky_env.glow_intensity = 0.8
+	sky_env.glow_strength = 1.0
+	sky_env.glow_bloom = 0.4
+	sky_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	
 	env.environment = sky_env
 	add_child(env); move_child(env, 0); main_env = env
 	
@@ -145,7 +159,7 @@ func _setup_titan_planetary() -> void:
 		planet.name = "Planet_Varn"
 		planet.set("planet_radius", 1125000.0)
 		planet.set("planet_seed", 1001)
-		add_child(planet)
+		world_root.add_child(planet)
 		# Varn: 1.5Mkm forward (–Z) — the home world directly ahead at game start
 		planet.global_position = Vector3(0, 0, -1500000.0)
 		planet.add_to_group("World")
@@ -156,7 +170,7 @@ func _setup_titan_planetary() -> void:
 		moon.name = "Planet_Tethys"
 		moon.set("planet_radius", 625000.0)
 		moon.set("planet_seed", 2002)
-		add_child(moon)
+		world_root.add_child(moon)
 		moon.global_position = Vector3(2500000.0, 400000.0, -1800000.0)
 		moon.add_to_group("World")
 
@@ -165,7 +179,7 @@ func _setup_titan_planetary() -> void:
 		planet3.name = "Planet_Keth"
 		planet3.set("planet_radius", 820000.0)
 		planet3.set("planet_seed", 3003)
-		add_child(planet3)
+		world_root.add_child(planet3)
 		planet3.global_position = Vector3(-3500000.0, -800000.0, 2800000.0)
 		planet3.add_to_group("World")
 
@@ -174,7 +188,7 @@ func _setup_titan_planetary() -> void:
 		planet4.name = "Planet_Ido"
 		planet4.set("planet_radius", 380000.0)
 		planet4.set("planet_seed", 4004)
-		add_child(planet4)
+		world_root.add_child(planet4)
 		planet4.global_position = Vector3(1800000.0, 300000.0, 450000.0)
 		planet4.add_to_group("World")
 
@@ -185,7 +199,7 @@ func _setup_titan_planetary() -> void:
 		planet5.name = "Planet_Obsidia"
 		planet5.set("planet_radius", 1850000.0)
 		planet5.set("planet_seed", 5005)
-		add_child(planet5)
+		world_root.add_child(planet5)
 		planet5.global_position = Vector3(-5000000.0, 1500000.0, -6800000.0)
 		planet5.add_to_group("World")
 
@@ -194,7 +208,7 @@ func _setup_titan_planetary() -> void:
 		planet6.name = "Planet_Xylos"
 		planet6.set("planet_radius", 940000.0)
 		planet6.set("planet_seed", 6006)
-		add_child(planet6)
+		world_root.add_child(planet6)
 		planet6.global_position = Vector3(8500000.0, -2200000.0, 5200000.0)
 		planet6.add_to_group("World")
 
@@ -203,7 +217,7 @@ func _setup_titan_planetary() -> void:
 		planet7.name = "Planet_Beryll"
 		planet7.set("planet_radius", 2400000.0)
 		planet7.set("planet_seed", 7007)
-		add_child(planet7)
+		world_root.add_child(planet7)
 		planet7.global_position = Vector3(-12000000.0, 3500000.0, 11500000.0)
 		planet7.add_to_group("World")
 
@@ -212,7 +226,7 @@ func _setup_titan_planetary() -> void:
 		planet8.name = "Planet_Null9"
 		planet8.set("planet_radius", 450000.0)
 		planet8.set("planet_seed", 8008)
-		add_child(planet8)
+		world_root.add_child(planet8)
 		planet8.global_position = Vector3(4000000.0, -8500000.0, -19500000.0)
 		planet8.add_to_group("World")
 
@@ -228,7 +242,7 @@ func _setup_asteroid_belt() -> void:
 		belt.set("outer_radius", 2000000.0)
 		belt.set("thickness", 40000.0) # Compressed vertically for a sharp ring look
 		belt.set("count", 3000)
-		add_child(belt)
+		world_root.add_child(belt)
 		belt.global_position = planet_ref.global_position
 		belt.add_to_group("World")
 
@@ -249,7 +263,9 @@ func _spawn_ace_pilot(pos: Vector3) -> void:
 		player.name = "AcePlayer"; add_child(player)
 		player.global_position = pos
 		var origin = get_tree().get_first_node_in_group("FloatingOrigin")
-		if origin: origin.player_node = player
+		if origin: 
+			origin.player_node = player
+			origin.world_root = world_root
 
 func _process(_delta: float) -> void:
 	# Cache player reference — group scans are expensive; only search once

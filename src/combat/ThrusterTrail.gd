@@ -33,11 +33,9 @@ func shift_points(offset: Vector3) -> void:
 	for i in range(points.size()):
 		points[i] -= offset
 
-func update_trail(port_pos: Vector3, vel: Vector3, is_warping: bool, thrust: float, delta: float) -> void:
-	# SHADOWGLASS 30FPS SYNC
-	var v_t = int(Time.get_ticks_msec() / 33.33)
-	var v_update = v_t != _v_tick
-	if v_update: _v_tick = v_t
+func update_trail(port_pos: Vector3, fwd: Vector3, vel: Vector3, is_warping: bool, thrust: float, delta: float) -> void:
+	# UNLOCKED RIBBONS: Update every frame for silky smoothness
+	var v_update = true
 	_last_v_update = v_update
 	
 	pulse_time += delta
@@ -47,12 +45,16 @@ func update_trail(port_pos: Vector3, vel: Vector3, is_warping: bool, thrust: flo
 	if is_warping: dynamic_max = 120
 	
 	# 2. MOMENTUM INHERITANCE: Makes the trail 'float' and curve naturally
-	# We move existing points with the ship's current frame of reference.
-	var inherit_factor = 0.98 # high inheritance for stiff, directed look
+	var inherit_factor = 0.98 
 	for i in range(points.size()):
 		points[i] += vel * delta * inherit_factor
 	
+	# 3. STIFF ORIGIN: Ensures the plume is straight at the source (12m plume depth)
+	# This represents high-velocity ionized exhaust before it disperses.
 	points.push_front(port_pos)
+	if points.size() > 1:
+		points[1] = port_pos + fwd * 12.0
+	
 	while points.size() > dynamic_max:
 		points.pop_back()
 	

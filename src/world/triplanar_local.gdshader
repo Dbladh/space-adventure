@@ -29,7 +29,25 @@ void fragment() {
 	
 	vec3 final_tex = x_tex * blending.x + y_tex * blending.y + z_tex * blending.z;
 	
+	# NEON ROADS: Procedural Cyberpunk Grid
+	# ACE RADIAL STABILITY: We use a high-contrast radial mask for the 1000m city grid
+	vec2 road_grid = fract(v_local_pos.xz * 0.001); 
+	float road_mask = step(0.8, road_grid.x) + step(0.8, road_grid.y);
+	
+	// Robust City Height Mask: 850m is the plateau height. 
+	// We use the distance from center minus the planet base radius (estimated 1M-ish)
+	// Since v_local_pos is absolute local coordinate on the sphere:
+	float dist_from_center = length(v_local_pos);
+	// We'll use a derivative-based mask or a wider threshold to ensure visibility
+	float city_height_mask = smoothstep(500.0, 800.0, dist_from_center - 1000000.0 * (length(v_normal))); 
+	// That's tricky because radius varies. Let's use a simpler heuristic:
+	// A high-pass filter on the distance from center
+	float h_mask = smoothstep(150.0, 250.0, dist_from_center - 1000000.0); // Assume 1M radius base
+	
+	vec3 road_col = vec3(0.0, 1.0, 1.0) * road_mask * 15.0; // High intensity neon
+	
 	ALBEDO = COLOR.rgb * final_tex;
+	EMISSION = road_col * step(0.5, h_mask); 
 	ROUGHNESS = 1.0;
 	SPECULAR = 0.0;
 }

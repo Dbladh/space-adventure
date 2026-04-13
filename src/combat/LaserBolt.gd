@@ -15,21 +15,19 @@ var mesh_node: MeshInstance3D
 
 func _ready() -> void:
 	# BUILD THE LASER ROD GEOMETRY PROCEDURALLY
-	# A low-poly elongated capsule using CapsuleMesh for a sleek energy bolt look
+	# ACE: Increased thickness (3.5) for high-frequency retro-visibility
 	mesh_node = MeshInstance3D.new()
 	var rod = CapsuleMesh.new()
-	rod.radius = 1.8
-	rod.height = 80.0
+	rod.radius = 3.5
+	rod.height = 120.0
 	mesh_node.mesh = rod
 	mesh_node.rotation_degrees.x = 90.0 # Align the rod along the forward axis (Z)
 	
 	# GLOWING NEON MATERIAL — unshaded so it ignores world lighting and glows independently
 	var mat = StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(0.2, 0.9, 1.0)
-	mat.emission_enabled = true
-	mat.emission = Color(0.2, 0.9, 1.0)
-	mat.emission_energy_multiplier = 8.0
+	mat.emission = Color(1.0, 0.4, 0.1) # FIERY ORANGE-RED
+	mat.emission_energy_multiplier = 14.0 # CRANKED for Retro clarity
 	rod.surface_set_material(0, mat)
 	add_child(mesh_node)
 	

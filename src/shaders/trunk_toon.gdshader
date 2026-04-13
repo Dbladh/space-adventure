@@ -7,6 +7,7 @@ uniform sampler2D normal_map : hint_normal;
 uniform float normal_strength : hint_range(0.0, 5.0) = 1.0;
 uniform float hatching_strength : hint_range(0.0, 1.0) = 0.4;
 uniform float shadow_cut : hint_range(0.0, 1.0) = 0.45;
+uniform sampler2D disp_map;
 
 varying vec3 v_color;
 varying vec3 v_world_pos;
@@ -24,19 +25,23 @@ void vertex() {
 }
 
 void fragment() {
-	vec4 tex = texture(bark_texture, UV * vec2(1.0, 3.5));
+	vec2 uv_scaled = UV * vec2(1.0, 1.2); // Scaled up 3x (Bigger patterns)
+	vec4 tex = texture(bark_texture, uv_scaled);
 	
 	// NORMAL MAPPING: Apply tactile bark depth detail
-	vec3 tex_normal = texture(normal_map, UV * vec2(1.0, 3.5)).xyz * 2.0 - 1.0;
+	vec3 tex_normal = texture(normal_map, uv_scaled).xyz * 2.0 - 1.0;
 	
 	// AUTO-NORMAL Fallback: Derive tactility from bark albedo intensity
 	float h0 = dot(tex.rgb, vec3(0.333));
-	float h1 = dot(texture(bark_texture, (UV + vec2(0.005, 0.0)) * vec2(1.0, 3.5)).rgb, vec3(0.333));
-	float h2 = dot(texture(bark_texture, (UV + vec2(0.0, 0.005)) * vec2(1.0, 3.5)).rgb, vec3(0.333));
+	float h1 = dot(texture(bark_texture, (uv_scaled + vec2(0.005, 0.0))).rgb, vec3(0.333));
+	float h2 = dot(texture(bark_texture, (uv_scaled + vec2(0.0, 0.005))).rgb, vec3(0.333));
 	vec3 auto_norm = normalize(vec3(h0 - h1, h0 - h2, 0.1));
 	
 	tex_normal = normalize(tex_normal + auto_norm);
-	NORMAL = normalize(TANGENT * tex_normal.x + BINORMAL * tex_normal.y + NORMAL * tex_normal.z);
+	
+	// ACE BARK RELIEF: Distort the final normal based on displacement depth
+	float h = texture(disp_map, uv_scaled).r;
+	NORMAL = normalize(TANGENT * tex_normal.x + BINORMAL * tex_normal.y + NORMAL * (tex_normal.z + h * 0.5));
 	
 	// Multi-tone integration: Mix instance color (Brown/Tan/White) with bark texture
 	ALBEDO = mix(v_color, v_color * tex.rgb, 0.7);

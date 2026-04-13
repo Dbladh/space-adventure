@@ -6,6 +6,7 @@ extends Node
 
 @export var threshold: float = 10000.0 # 10km M1 Hardened Ceiling
 var player_node: Node3D
+var world_root: Node3D
 
 func _ready() -> void:
 	self.add_to_group("FloatingOrigin")
@@ -40,10 +41,14 @@ func shift_world() -> void:
 			p.reset_physics_interpolation()
 			p = p.get_parent()
 	
-	# Shift the World Group
-	for node in get_tree().get_nodes_in_group("World"):
-		if node is Node3D:
-			node.global_position -= shift_offset
+	# Shift the WorldRoot (O(1) Efficiency)
+	if is_instance_valid(world_root):
+		world_root.global_position -= shift_offset
+	else:
+		# Fallback: Shift individual group members if root is missing
+		for node in get_tree().get_nodes_in_group("World"):
+			if node is Node3D:
+				node.global_position -= shift_offset
 	
 	# Reset Player to Origin
 	player_node.global_position = Vector3.ZERO

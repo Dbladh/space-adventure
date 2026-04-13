@@ -3,6 +3,7 @@ render_mode diffuse_toon, specular_toon;
 
 uniform sampler2D albedo_tex : source_color;
 uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
+uniform float flash_intensity : hint_range(0.0, 1.0) = 0.0;
 
 varying vec3 v_color;
 varying vec2 v_uv;
@@ -15,14 +16,17 @@ void vertex() {
 void fragment() {
 	// Sample texture for Starhawk hulls, or use pure color for asteroids
 	vec4 tex_col = texture(albedo_tex, v_uv);
-	ALBEDO = v_color * tex_col.rgb; 
+	vec3 base_col = v_color * tex_col.rgb; 
 	
-	// ACE AUTO-NORMAL: Procedurally generate 3D depth from albedo intensity (Sobel-style)
-	// This provides tactile normal-mapping for EVERY texture without requiring extra files.
+	// ACE DAMAGE FLASH: Mix albedo with Crimson Red based on impact intensity
+	ALBEDO = mix(base_col, vec3(1.0, 0.1, 0.0) * 1.5, flash_intensity);
+	
+	// ACE AUTO-NORMAL: Procedurally generate 3D depth from albedo intensity
+	// Adjusted Z-intensity to 0.5 to prevent 'backwards' lighting artifacts.
 	float h0 = dot(tex_col.rgb, vec3(0.333));
 	float h1 = dot(texture(albedo_tex, v_uv + vec2(0.002, 0.0)).rgb, vec3(0.333));
 	float h2 = dot(texture(albedo_tex, v_uv + vec2(0.0, 0.002)).rgb, vec3(0.333));
-	vec3 tangent_norm = normalize(vec3(h0 - h1, h0 - h2, 0.08));
+	vec3 tangent_norm = normalize(vec3(h0 - h1, h0 - h2, 0.5));
 	NORMAL = normalize(TANGENT * tangent_norm.x + BINORMAL * tangent_norm.y + NORMAL * tangent_norm.z);
 }
 

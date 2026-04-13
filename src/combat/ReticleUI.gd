@@ -3,11 +3,26 @@ extends Control
 # High-Performance Combat Visor Script
 # Handles circular reticle rendering with anti-aliased arcs
 
+var is_locked: bool = false :
+	set(v):
+		if is_locked != v:
+			is_locked = v
+			queue_redraw()
+
+var is_hit: bool = false :
+	set(v):
+		if is_hit != v:
+			is_hit = v
+			queue_redraw()
+
 func _draw():
 	# ACE VISOR: Central targeting circle
 	var center = size / 2.0
 	var radius = 28.0
 	var color = Color(0.2, 0.9, 1.0, 0.8) # Electric Cyan
+	
+	if is_locked:
+		color = Color.CRIMSON # High-Intensity Lock
 	
 	# Draw the outer ring
 	draw_arc(center, radius, 0, TAU, 64, color, 1.5, true)
@@ -18,6 +33,17 @@ func _draw():
 	draw_line(center - Vector2(radius + 2, 0), center - Vector2(radius + 2 + pip_len, 0), color, 2.0)
 	draw_line(center + Vector2(0, radius + 2), center + Vector2(0, radius + 2 + pip_len), color, 2.0)
 	draw_line(center - Vector2(0, radius + 2), center - Vector2(0, radius + 2 + pip_len), color, 2.0)
+	
+	# LOCK-ON DIAMOND: Inner diamond appears when targeting
+	if is_locked:
+		var d_size = 8.0
+		var pts = [
+			center + Vector2(0, -d_size),
+			center + Vector2(d_size, 0),
+			center + Vector2(0, d_size),
+			center + Vector2(-d_size, 0)
+		]
+		draw_polyline(pts + [pts[0]], color, 2.0, true)
 	
 	# Center dot
 	draw_circle(center, 1.5, Color.WHITE)

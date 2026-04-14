@@ -1146,21 +1146,22 @@ func _process(delta: float) -> void:
 		var intensity = (reentry_timer / 3.0) * reentry_intensity
 		reentry_v = Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * intensity
 		
-		# VISUAL HEAT GLOW: Animate hull emission based on shake/speed
-		if heat_glow_mat:
-			var speed_mod = clamp(velocity.length() / 8000.0, 0.5, 2.0)
-			var heat = (reentry_timer / 3.0) * speed_mod
-			heat_glow_mat.emission_enabled = heat > 0.05
-			heat_glow_mat.emission = Color(1.0, 0.3 * heat, 0.0) # From Bright Orange to Deep Red
-			heat_glow_mat.emission_energy_multiplier = heat * 12.0
-		
-		# REENTRY HEAT VIGNETTE SYNC
-		if reentry_vignette:
-			var reentry_heat = (reentry_timer / 3.0)
-			var raw_dist = clamp((true_altitude - 18000.0) / (26000.0 - 18000.0), 0.0, 1.0)
-			var alt_heat = 1.0 - abs(raw_dist - 0.5) * 2.0 
-			alt_heat = clamp(alt_heat, 0.0, 1.0)
-			reentry_vignette.material.set_shader_parameter("intensity", max(reentry_heat, alt_heat))
+	# VISUAL HEAT GLOW: Animate hull emission based on shake/speed
+	# ACE HEAT HYGIENE: Ensure this resets to zero even when the timer is inactive
+	var reentry_heat = (reentry_timer / 3.0) if reentry_timer > 0.0 else 0.0
+	if heat_glow_mat:
+		var speed_mod = clamp(velocity.length() / 8000.0, 0.5, 2.0)
+		var heat = reentry_heat * speed_mod
+		heat_glow_mat.emission_enabled = heat > 0.05
+		heat_glow_mat.emission = Color(1.0, 0.3 * heat, 0.0) # From Bright Orange to Deep Red
+		heat_glow_mat.emission_energy_multiplier = heat * 12.0
+	
+	# REENTRY HEAT VIGNETTE SYNC: Tracks both active timer and static altitudeBAND
+	if reentry_vignette:
+		var raw_dist = clamp((true_altitude - 18000.0) / (26000.0 - 18000.0), 0.0, 1.0)
+		var alt_heat = 1.0 - abs(raw_dist - 0.5) * 2.0 
+		alt_heat = clamp(alt_heat, 0.0, 1.0)
+		reentry_vignette.material.set_shader_parameter("intensity", max(reentry_heat, alt_heat))
 			
 		# ACE MUZZLE-VISUAL SYNC: Poll and Fire in _process for interpolated visual alignment
 		# AERO-VORTEX TRAILS: Spawn condensation streaks during reentry (Uncapped 60FPS)

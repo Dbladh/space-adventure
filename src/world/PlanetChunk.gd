@@ -149,25 +149,20 @@ func get_terrain_elevation(sn: Vector3) -> float:
 	var cont_mask: float = smoothstep(-0.1, 0.1, c_n)
 	var abyss_depth: float = SEA_LEVEL - 400.0
 	
-	# MAJOR ISLAND OVERRIDE: Proximity-Boosted Tectonic Landmass (5-15% coverage)
-	var dist_to_pole = sn.distance_to(continent_pole)
-	var proximity = 1.0 - smoothstep(0.0, 1.1, dist_to_pole)
-	var major_mask = smoothstep(0.4, 0.7, c_n + proximity * 0.85)
+	# ACE METROPOLITAN DECENTRALIZATION: Hyper-Localized Culling (10-20 Small Cities)
+	# Using pow^3 to non-linearly squish the hotspots into tiny archipelagos
+	var raw_global = sin(sn.x * 1.5) * cos(sn.y * 1.4 + sn.z * 1.2)
+	var global_mask = pow(max(0.0, raw_global), 3.0) 
+	var n_nodes = pow(max(0.0, sin(sn.x * 12.0) * cos(sn.y * 11.0) * sin(sn.z * 13.0)), 2.0)
+	var major_mask = smoothstep(0.4, 0.6, n_nodes * global_mask) * cont_mask
 	
-	# Force 'Mega-Continent' above sea level and flatten it significantly
+	# Calculate natural terrain height (Continental Land vs Oceanic Abyss)
 	var base_elev = lerp(abyss_depth, local_geo + (SEA_LEVEL + 50.0), cont_mask)
-	var island_elev = SEA_LEVEL + 850.0 + (local_geo * 0.1) 
 	
-	var elev = lerp(base_elev, island_elev, major_mask)
-	
-	# MEGA-CITY: The entire landmass is an urban fortress
-	if major_mask > 0.05:
-		var city_plateau = smoothstep(0.1, 0.45, major_mask)
-		var base_city_h = SEA_LEVEL + 850.0
-		elev = lerp(elev, base_city_h, city_plateau)
-		
-		var is_wall = smoothstep(0.05, 0.15, major_mask) - smoothstep(0.15, 0.25, major_mask)
-		elev += is_wall * 600.0 
+	# ACE METROPOLITAN TERRACING: Snap terrain to flat 140m steps within urban zones
+	# This allows cities to climb mountains 'naturally' while providing level foundations
+	var terrace_h = floor(base_elev / 140.0) * 140.0
+	var elev = lerp(base_elev, terrace_h, major_mask)
 	
 	return elev
 
@@ -270,6 +265,7 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 	m_land.set_shader_parameter("col_grass", pal_grass_col)
 	m_land.set_shader_parameter("col_forest", pal_grass_secondary)
 	m_land.set_shader_parameter("col_rock", pal_mount_col)
+	m_land.set_shader_parameter("continent_pole", continent_pole)
 	
 	# Tri-Planar Micro-Detail
 	m_land.set_shader_parameter("ground_tex", _get_tex("res://assets/textures/ground_texture.png"))
@@ -319,16 +315,17 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 		create_trimesh_collision()
 
 func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
-	# CPU HARDENING: Vegetation only for approach (<= 20km). Cities seen from further (<= 45km).
-	# This limit is strictly enforced to prevent 'Grid Iteration' lag on huge chunks.
-	if scale_factor > 0.045: return 
+	# CPU HARDENING: Infrastructure (Metropolis) visible from ORBIT (<= 2000km).
+	# Nature remains restricted to approach zones (<= 20km).
+	if scale_factor > 2.0: return 
 	var radius_ratio: float = clamp(radius / 1000000.0, 0.3, 1.5)
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []; var g_pts: Array[Transform3D] = []; var c_pts: Array[Transform3D] = []
 	
 	# ACE MESH HARDENING: Use tiered cell sizes to prevent 3.5M+ loop iterations.
-	# High-LOD chunks use fine-detail (0.00008), Mid-LOD chunks use sparse-scatter (0.0008).
 	var base_cell: float = 0.00008
-	if scale_factor > 0.015: base_cell = 0.0008 
+	if scale_factor > 0.15: base_cell = 0.008 # ORBITAL TIER (Upgraded for Multi-City)
+	elif scale_factor > 0.06: base_cell = 0.0006 # ACE DENSITY: (Improved for 1/20th scale)
+	elif scale_factor > 0.015: base_cell = 0.0003 # ACE PRECISION: (Fine-tuned for localized city hubs)
 	
 	var t_cell: float = base_cell / radius_ratio
 	var ts_x = int(floor((offset.x - scale_factor) / t_cell)); var te_x = int(ceil((offset.x + scale_factor) / t_cell))
@@ -353,33 +350,46 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# NATURE THROTTLE: Trees/Rocks only spawn on high-detail chunks with fine grid
 			var nature_ok = scale_factor <= 0.02 and base_cell < 0.0002
 			
-			# MEGA-CITY SYNC: Tectonic Warp for Organic Urban Districts
-			var warp_n = noise.get_noise_3dv(cp * 1.2)
-			var warped_cp = (cp + Vector3(warp_n, warp_n, warp_n) * 0.35).normalized()
-			var dist_to_pole = warped_cp.distance_to(continent_pole)
+			# ACE METROPOLITAN DECENTRALIZATION: Hyper-Localized Culling (10-20 Small Cities)
+			var raw_global = sin(cp.x * 1.5) * cos(cp.y * 1.4 + cp.z * 1.2)
+			var global_mask = pow(max(0.0, raw_global), 3.0) 
+			var n_nodes = pow(max(0.0, sin(cp.x * 12.0) * cos(cp.y * 11.0) * sin(cp.z * 13.0)), 2.0)
 			
-			var c_n = noise.get_noise_3dv(cp * 2.2)
-			var proximity = smoothstep(1.0, 0.4, dist_to_pole)
-			var major_mask = smoothstep(0.48, 0.52, c_n + proximity * 0.9)
+			# ACE AMPHIBIOUS CULLING: Cities only spawn on continental crust
+			var c_n_val = noise.get_noise_3dv(cp * 2.2)
+			var c_mask_val = smoothstep(-0.1, 0.1, c_n_val)
+			var major_mask = smoothstep(0.4, 0.6, n_nodes * global_mask) * c_mask_val
 			
-			if major_mask > 0.5:
-				# TITAN GRID: Expanded districts to accommodate 280m wide monoliths
-				var grid_cycle = 14
-				var road_size = 5
-				var is_road = (abs(x_idx) % grid_cycle < road_size) or (abs(y_idx) % grid_cycle < road_size)
+			if major_mask > 0.15: # CORE-ACTIVATION: Ensure buildings only spawn on solid bedrock
+				# ACE ORGANIC ROAD WARPING: Streets wind naturally over the topography
+				var w_n = sin(cp.x * radius * 0.003 + cp.y * radius * 0.002) * 0.15 + cos(cp.z * radius * 0.0025) * 0.15
+				var w_uv = (cp * 0.004 * radius) + Vector3(w_n, w_n, w_n) # Match shader uv
+				var r_grid = max(float(fposmod(w_uv.x, 1.0) >= 0.96), float(fposmod(w_uv.z, 1.0) >= 0.96))
+				var is_road = r_grid > 0.5
 				
 				if not is_road:
-					# TITAN SPACING: 6-cell interval (approx 600m+) ensures no overlaps for 280m buildings
-					if (abs(x_idx) % 6 == 0) and (abs(y_idx) % 6 == 0):
-						var h = get_terrain_elevation(cp)
-						# Deterministic Density check
-						if (h_v % 1000) < int(180 * DebugSettings.tree_mult):
-							var b_scale = 0.6 + (float((h_v >> 3) % 100) / 100.0) * 1.4
-							var b_xform = _get_object_xform(cp * (radius + h), cp, float(h_v % 100)/100.0, b_scale)
-							c_pts.append(b_xform.rotated_local(Vector3.UP, float(h_v % 360)))
+					# ACE STRUCTURAL VOIDS: High-frequency probability mask creates plazas and parks
+					var spawn_prob = (float(hash(cp * 400.0) % 100) / 100.0)
+					if spawn_prob > 0.35:
+						# TITAN SPACING: Adaptive grid interval ensures consistency across LOD tiers
+						var interval = 6 if base_cell < 0.0002 else 2
+						if (abs(x_idx) % interval == 0) and (abs(y_idx) % interval == 0):
+							var h = get_terrain_elevation(cp)
+							# ACE AMPHIBIOUS CULLING: Strictly prevent buildings in water
+							if h > SEA_LEVEL:
+								# INTELLIGENT DENSITY: Height/Scale resolve based on urban core proximity
+								var density_factor = smoothstep(0.4, 0.7, major_mask)
+								# SKYLINE JITTER: High-variance scaling for a jagged, natural skyline
+								var s_jitter = 0.6 + (float((h_v >> 5) % 100) / 100.0) * 1.8
+								var b_scale = (0.5 + (float((h_v >> 3) % 100) / 100.0) * 0.5) * (1.0 + density_factor * 2.5) * s_jitter
+								
+								# DOCKING JITTER: Break the rigid grid with local offsets
+								var p_jitter = Vector3(float(h_v % 40) - 20.0, 0.0, float((h_v >> 7) % 40) - 20.0)
+								var b_xform = _get_object_xform(cp * (radius + h) + p_jitter, cp, float(h_v % 100)/100.0, b_scale)
+								c_pts.append(b_xform.rotated_local(Vector3.UP, float(h_v % 360)))
 			else:
 				# NATURE ZONE: Follow standard noise rules
-				if nature_ok:
+				if nature_ok and major_mask < 0.1: # ACE EXCLUSION: No nature inside city limits
 					if cluster_n > 0.22:
 						var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
 						if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult):
@@ -408,8 +418,14 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 						var j_x = (float(h_v % 50)/50.0 - 0.5) * 1.8
 						var j_y = (float((h_v >> 4) % 50)/50.0 - 0.5) * 1.8
 						var cp = (face_normal + x_axis * (float(x_idx) + j_x) * g_cell + y_axis * (float(y_idx) + j_y) * g_cell).normalized()
-						# ACE PATCH SYNC: Grass only spawns on the light-green terrain patches (frequency matched to shader)
-						if noise.get_noise_3dv(cp * 3000.0) > 0.35:
+						# ACE TECTONIC GATING: Prevent grass from spawning on the urban continent
+						var g_cn = noise.get_noise_3dv(cp * 2.2)
+						var g_w_cp = (cp + Vector3(noise.get_noise_3dv(cp * 0.5), noise.get_noise_3dv(cp * 0.6 + Vector3(7,7,7)), noise.get_noise_3dv(cp * 0.7 - Vector3(3,3,3))) * 0.35).normalized()
+						var g_dist = g_w_cp.distance_to(continent_pole)
+						var g_prox = 1.0 - smoothstep(0.0, 1.1, g_dist)
+						var g_mask = smoothstep(0.32, 0.48, g_cn + g_prox * 0.85)
+						
+						if g_mask < 0.1 and noise.get_noise_3dv(cp * 3000.0) > 0.35:
 							var h = get_terrain_elevation(cp)
 							if h > -150.0 and (h + sin(cp.x * 12000.0)*300.0) < 1300.0:
 								g_pts.append(_get_grass_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, fmod(float(h_v), 10.0)/10.0))
@@ -819,19 +835,91 @@ void fragment() {
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	if points.is_empty(): return
 	
-	# ACE PBR ASSET POOL: Full suite (Albedo, Normal, Spec, Disp, AO)
-	var tex_paths = [
-		"res://assets/textures/building_texture_1.png", "res://assets/textures/building_texture_2.png",
-		"res://assets/textures/building_texture_3.png", "res://assets/textures/building_texture_4.png"
-	]
-	var roof_t = load("res://assets/textures/building_roof_texture.png")
-	var roof_n = load("res://assets/textures/building_roof_texture_normal.png")
-	var roof_s = load("res://assets/textures/building_roof_texture_specular.png")
-	var roof_d = load("res://assets/textures/building_roof_texture_displacement.png")
-	var roof_a = load("res://assets/textures/building_roof_texture_ambient.png")
+	# ACE ASSET POOL
+	var tex_paths = ["res://assets/textures/building_texture_1.png", "res://assets/textures/building_texture_2.png", "res://assets/textures/building_texture_3.png", "res://assets/textures/building_texture_4.png"]
+	var roof_t = load("res://assets/textures/building_roof_texture.png"); var roof_n = load("res://assets/textures/building_roof_texture_normal.png")
+	var roof_s = load("res://assets/textures/building_roof_texture_specular.png"); var roof_d = load("res://assets/textures/building_roof_texture_displacement.png"); var roof_a = load("res://assets/textures/building_roof_texture_ambient.png")
 	
-	# ACE ARCHITECTURAL DEPTH SHADER: Parallax-recessed windows and AO shadowing
-	var shader = Shader.new()
+	# ACE METROPOLITAN SLAB
+	var f_mm = MultiMesh.new(); f_mm.transform_format = MultiMesh.TRANSFORM_3D
+	var f_mesh = BoxMesh.new(); f_mesh.size = Vector3(6000, 60.0, 6000)
+	f_mm.mesh = f_mesh; f_mm.instance_count = points.size()
+	var f_mat = StandardMaterial3D.new(); f_mat.albedo_color = Color(0.08, 0.08, 0.09); f_mat.roughness = 0.95
+	for i in range(points.size()): f_mm.set_instance_transform(i, points[i].translated_local(Vector3(0, -32, 0)))
+	var f_mmi = MultiMeshInstance3D.new(); f_mmi.multimesh = f_mm; f_mmi.material_override = f_mat; add_child(f_mmi); _flora_nodes.append(f_mmi)
+	f_mmi.visibility_range_end = 2000000.0; f_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	
+	# ACE DISTRICT SHADER: 4-Lane Highways + Sidewalks
+	var road_shader = Shader.new()
+	road_shader.code = """shader_type spatial;
+	uniform vec3 neon_col : source_color = vec3(0.0, 1.0, 1.0);
+	varying vec3 v_local_pos;
+	void vertex() { v_local_pos = VERTEX; }
+	void fragment() {
+		float x_abs = abs(v_local_pos.x);
+		float is_sw = step(120.0, x_abs); // 40m sidewalks on each side of 320m road
+		ALBEDO = mix(vec3(0.05, 0.05, 0.06), vec3(0.18, 0.18, 0.20), is_sw);
+		float lanes = 0.0;
+		for(int i=-2; i<=1; i++) {
+			float lx = float(i) * 45.0 + 22.5;
+			lanes += step(0.95, 1.0 - abs(v_local_pos.x - lx) * 0.2);
+		}
+		lanes *= (1.0 - is_sw);
+		float pulse = step(0.6, fract(v_local_pos.z * 0.03 - TIME * 3.0));
+		EMISSION = neon_col * lanes * pulse * 15.0;
+		ROUGHNESS = 0.8;
+	}"""
+	var r_mat = ShaderMaterial.new(); r_mat.shader = road_shader
+	
+	# ACE INFRASTRUCTURE GEN: Strict Multi-Lane Grid
+	var r_pts: Array[Transform3D] = []; var l_pts: Array[Transform3D] = []; var b_pts: Array[Transform3D] = []
+	var block_size = 560.0 
+	for p in points:
+		for ix in range(-4, 5):
+			for iy in range(-4, 5):
+				var pos = p.origin + p.basis.x * float(ix * block_size) + p.basis.z * float(iy * block_size)
+				var xf = Transform3D(p.basis, pos)
+				# Intentional Grid Framework: Evens are Roads, Odds are Skyscrapers
+				if ix % 2 == 0 or iy % 2 == 0:
+					var road_xf = xf.translated_local(Vector3(0, 1.5, 0))
+					if iy % 2 == 0: r_pts.append(road_xf.rotated_local(Vector3.UP, PI/2.0))
+					if ix % 2 == 0: r_pts.append(road_xf)
+					if ix % 2 == 0 and iy % 2 == 0: # Intersection Signal Monoliths
+						for cx in [-1, 1]:
+							for cz in [-1, 1]: l_pts.append(xf.translated_local(Vector3(cx*160, 20, cz*160)))
+				else:
+					b_pts.append(xf)
+	
+	# Spawning Roads
+	if not r_pts.is_empty():
+		var r_mmi = MultiMeshInstance3D.new(); var r_mm = MultiMesh.new(); r_mm.transform_format = MultiMesh.TRANSFORM_3D
+		r_mm.mesh = BoxMesh.new(); r_mm.mesh.size = Vector3(320, 3, block_size); r_mm.instance_count = r_pts.size()
+		for i in r_pts.size(): r_mm.set_instance_transform(i, r_pts[i])
+		r_mmi.multimesh = r_mm; r_mmi.material_override = r_mat; add_child(r_mmi); _flora_nodes.append(r_mmi)
+		r_mmi.visibility_range_end = 2000000.0; r_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	
+	# Spawning Traffic Lights
+	if not l_pts.is_empty():
+		var l_mmi = MultiMeshInstance3D.new(); var l_mm = MultiMesh.new(); l_mm.transform_format = MultiMesh.TRANSFORM_3D
+		l_mm.mesh = BoxMesh.new(); l_mm.mesh.size = Vector3(15, 60, 15); l_mm.instance_count = l_pts.size()
+		var l_mat = StandardMaterial3D.new(); l_mat.albedo_color = Color(0,0,0); l_mat.emission_enabled = true; l_mat.emission = Color(0, 1, 1); l_mat.emission_energy_multiplier = 12.0
+		for i in l_pts.size(): l_mm.set_instance_transform(i, l_pts[i])
+		l_mmi.multimesh = l_mm; l_mmi.material_override = l_mat; add_child(l_mmi); _flora_nodes.append(l_mmi)
+		l_mmi.visibility_range_end = 2000000.0; l_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	
+	# ACE SPACE-IMPOSTOR LOGIC: Faking the city from orbit
+	if scale_factor > 0.1:
+		var i_mm = MultiMesh.new(); i_mm.transform_format = MultiMesh.TRANSFORM_3D
+		i_mm.mesh = BoxMesh.new(); i_mm.mesh.size = Vector3(4500, 10, 4500)
+		i_mm.instance_count = points.size()
+		for i in points.size(): i_mm.set_instance_transform(i, points[i].translated_local(Vector3(0, -5, 0)))
+		var i_mmi = MultiMeshInstance3D.new(); i_mmi.multimesh = i_mm; i_mmi.material_override = _get_impostor_mat()
+		i_mmi.visibility_range_end = 2000000.0; i_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		add_child(i_mmi); _flora_nodes.append(i_mmi)
+		i_mmi.visibility_range_end = 2000000.0; i_mmi.visibility_range_begin = 45000.0 
+	
+	# ACE SKYSCRAPER PIPELINE
+	var shader = _get_skyscraper_shader()
 	shader.code = """shader_type spatial;
 	uniform sampler2D albedo_tex : source_color;
 	uniform sampler2D normal_tex : hint_normal;
@@ -847,83 +935,62 @@ func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	varying vec3 v_local_pos;
 	varying vec3 v_view_dir;
 	void vertex() {
-		v_normal = NORMAL;
-		v_local_pos = VERTEX;
-		// View Direction in Local Space for Parallax mapping
-		v_view_dir = (inverse(MODELVIEW_MATRIX) * vec4(0.0, 0.0, 1.0, 0.0)).xyz;
+		v_normal = NORMAL; v_local_pos = VERTEX;
+		v_view_dir = normalize(VERTEX - (inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz);
+	}
+	vec3 room_trace(vec2 uv, vec3 view_dir, vec3 grid_size) {
+		vec2 room_uv = fract(uv * grid_size.xy); vec2 room_idx = floor(uv * grid_size.xy);
+		vec3 r_origin = vec3(room_uv * 2.0 - 1.0, 1.0); vec3 inv_dir = 1.0 / view_dir;
+		vec3 t_bot = inv_dir * (vec3(-1.0, -1.0, -1.0) - r_origin);
+		vec3 t_top = inv_dir * (vec3(1.0, 1.0, 1.0) - r_origin);
+		vec3 t_max = max(t_bot, t_top); float t = min(t_max.x, min(t_max.y, t_max.z));
+		vec3 hit = r_origin + view_dir * t;
+		float wall_m = step(0.95, max(abs(hit.x), abs(hit.y)));
+		float light_v = step(0.4, sin(room_idx.x * 17.0 + room_idx.y * 31.0));
+		return vec3(0.04, 0.06, 0.12) + (hit.z < -0.9 ? vec3(0.8, 0.9, 1.0) * wall_m * light_v : vec3(0.0));
 	}
 	void fragment() {
 		float roof_mask = clamp(v_normal.y * 10.0 - 5.0, 0.0, 1.0);
-		float t_scale = 0.035; 
-		
-		// DUAL-SURFACE BASE UVs
-		vec2 s_uv;
+		float t_scale = 0.035; vec2 s_uv;
 		if (abs(v_normal.x) > 0.5) { s_uv = vec2((v_local_pos.z + 140.0) / 280.0, v_local_pos.y * t_scale); }
 		else { s_uv = vec2((v_local_pos.x + 140.0) / 280.0, v_local_pos.y * t_scale); }
 		vec2 r_uv = (v_local_pos.xz + 140.0) / 280.0;
-		
-		// PARALLAX DEPTH: Simulating physical structural recession
-		float side_height = texture(disp_tex, s_uv).r;
-		vec2 p_s_uv = s_uv - v_view_dir.xy * (side_height * 0.02);
-		float roof_height = texture(roof_disp, r_uv).r;
-		vec2 p_r_uv = r_uv - v_view_dir.xz * (roof_height * 0.02);
-		
-		// TEXTURE SAMPLING (WITH PARALLAX OFFSET)
-		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb;
-		vec3 roof_alb = texture(roof_tex, p_r_uv).rgb;
-		vec3 base_alb = mix(side_alb, roof_alb, roof_mask);
-		
-		// AMBIENT OCCLUSION: Detailed self-shadowing
-		float side_ao = texture(ao_tex, p_s_uv).r;
-		float roof_ao_v = texture(roof_ao, p_r_uv).r;
-		float base_ao = mix(side_ao, roof_ao_v, roof_mask);
-		
-		// GROUNDING GRADIENT
-		float height_grad = mix(0.2, 1.0, smoothstep(-240.0, 100.0, v_local_pos.y));
-		ALBEDO = base_alb * height_grad * base_ao;
-		
-		// SPECULAR & METALLIC (REFLECTIVE WINDOWS)
+		float s_h = texture(disp_tex, s_uv).r; vec2 p_s_uv = s_uv - v_view_dir.xy * (s_h * 0.015);
+		float r_h = texture(roof_disp, r_uv).r; vec2 p_r_uv = r_uv - v_view_dir.xz * (r_h * 0.015);
+		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb; vec3 roof_alb = texture(roof_tex, p_r_uv).rgb;
+		vec3 base_alb = mix(side_alb, roof_alb, roof_mask); float luma = dot(base_alb, vec3(0.299, 0.587, 0.114));
+		float is_win = step(0.45, luma) * (1.0 - roof_mask);
+		vec3 interior = room_trace(s_uv, v_view_dir, vec3(20.0, 40.0, 1.0));
+		float b_ao = mix(texture(ao_tex, p_s_uv).r, texture(roof_ao, p_r_uv).r, roof_mask);
+		float h_grad = mix(0.2, 1.0, smoothstep(-240.0, 100.0, v_local_pos.y));
+		ALBEDO = mix(base_alb, base_alb * interior * 2.5, is_win) * h_grad * b_ao;
 		float s_spec = texture(spec_tex, p_s_uv).r;
-		float r_spec = texture(roof_spec, p_r_uv).r;
-		SPECULAR = mix(s_spec, r_spec, roof_mask);
-		METALLIC = mix(s_spec * 0.8, 0.1, roof_mask);
-		ROUGHNESS = mix(0.7 - s_spec * 0.5, 0.8, roof_mask);
-		
-		// NEON EMISSION
-		float luma = dot(base_alb, vec3(0.299, 0.587, 0.114));
-		float neon_mask = step(0.45, luma) * (1.0 - roof_mask);
-		EMISSION = base_alb * neon_mask * 10.0;
-		
-		// NORMAL ENHANCEMENT
+		SPECULAR = mix(s_spec, texture(roof_spec, p_r_uv).r, roof_mask);
+		METALLIC = mix(s_spec * 0.8, 0.1, roof_mask); ROUGHNESS = mix(0.7 - s_spec * 0.5, 0.8, roof_mask);
+		EMISSION = mix(vec3(0.0), base_alb * 10.0 + interior * is_win * 6.0, is_win);
 		NORMAL_MAP = mix(texture(normal_tex, p_s_uv).rgb, texture(roof_norm, p_r_uv).rgb, roof_mask);
-		NORMAL_MAP_DEPTH = 1.35; 
+		NORMAL_MAP_DEPTH = 1.35;
 	}
 	"""
-	
-	var groups: Array[Array] = [[], [], [], []]; for p in points: groups[hash(p.origin) % 4].append(p)
-	
+	var groups: Array[Array] = [[], [], [], []]; for p in b_pts: groups[hash(p.origin) % 4].append(p)
 	for i in range(4):
 		if groups[i].is_empty(): continue
-		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D
+		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true
 		mm.mesh = BoxMesh.new(); mm.mesh.size = Vector3(280, 480, 280)
 		mm.instance_count = groups[i].size()
 		for j in range(groups[i].size()):
-			var xf = groups[i][j]
-			var s_var = 0.7 + (float(hash(xf.origin) % 100) / 100.0) * 0.6
+			var xf = groups[i][j]; var s_var = 0.7 + (float(hash(xf.origin) % 100) / 100.0) * 0.6
 			mm.set_instance_transform(j, xf.scaled_local(Vector3(1.0, s_var, 1.0)))
-		
+			# Persistent seed for shader-side randomization
+			var b_seed = float(hash(xf.origin) % 10000) / 10000.0
+			mm.set_instance_color(j, Color(b_seed, 0.0, 0.0, 1.0))
 		var mat = ShaderMaterial.new(); mat.shader = shader
-		mat.set_shader_parameter("albedo_tex", load(tex_paths[i]))
-		mat.set_shader_parameter("normal_tex", load(tex_paths[i].replace(".png", "_normal.png")))
-		mat.set_shader_parameter("spec_tex", load(tex_paths[i].replace(".png", "_specular.png")))
-		mat.set_shader_parameter("disp_tex", load(tex_paths[i].replace(".png", "_displacement.png")))
-		mat.set_shader_parameter("ao_tex", load(tex_paths[i].replace(".png", "_ambient.png")))
-		mat.set_shader_parameter("roof_tex", roof_t); mat.set_shader_parameter("roof_norm", roof_n)
-		mat.set_shader_parameter("roof_spec", roof_s); mat.set_shader_parameter("roof_disp", roof_d)
-		mat.set_shader_parameter("roof_ao", roof_a)
-		
+		mat.set_shader_parameter("albedo_tex", load(tex_paths[i])); mat.set_shader_parameter("normal_tex", load(tex_paths[i].replace(".png", "_normal.png")))
+		mat.set_shader_parameter("spec_tex", load(tex_paths[i].replace(".png", "_specular.png"))); mat.set_shader_parameter("disp_tex", load(tex_paths[i].replace(".png", "_displacement.png")))
+		mat.set_shader_parameter("ao_tex", load(tex_paths[i].replace(".png", "_ambient.png"))); mat.set_shader_parameter("roof_tex", roof_t); mat.set_shader_parameter("roof_norm", roof_n)
+		mat.set_shader_parameter("roof_spec", roof_s); mat.set_shader_parameter("roof_disp", roof_d); mat.set_shader_parameter("roof_ao", roof_a)
 		var mmi = MultiMeshInstance3D.new(); mmi.multimesh = mm; mmi.material_override = mat
-		mmi.visibility_range_end = 60000.0; mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		mmi.visibility_range_end = 2000000.0; mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		add_child(mmi); _flora_nodes.append(mmi)
   
 
@@ -1226,6 +1293,7 @@ uniform vec3 col_beach;   // Sandy shores just above sea level
 uniform vec3 col_grass;   // Main low-altitude biome color
 uniform vec3 col_forest;  // Mid-altitude transition / secondary tone
 uniform vec3 col_rock;    // High altitude and steep cliff color
+uniform vec3 continent_pole;
 
 float aa_step(float edge, float val) {
 	float delta = fwidth(val) * 1.5; 
@@ -1275,6 +1343,13 @@ void fragment() {
 	float b_warp = sin(v_world_pos.x * 0.0015) * 300.0 + cos(v_world_pos.z * 0.002) * 200.0;
 	float warped_h = v_height + b_warp;
 	
+	// ACE METROPOLITAN DECENTRALIZATION: Hyper-Localized Multi-city distribution
+	float raw_global = max(0.0, sin(v_local_norm.x * 1.5) * cos(v_local_norm.y * 1.4 + v_local_norm.z * 1.2));
+	float global_mask = pow(raw_global, 3.0);
+	float n_base = pow(max(0.0, sin(v_local_norm.x * 12.0) * cos(v_local_norm.y * 11.0) * sin(v_local_norm.z * 13.0)), 2.0);
+	float city_shore_mask = smoothstep(sea_level, sea_level + 150.0, v_height);
+	float city_mask = smoothstep(0.4, 0.6, n_base * global_mask) * city_shore_mask;
+	
 	// Zone boundaries (above sea level)
 	float beach_warp = sin(v_world_pos.x * 0.008) * 15.0 + cos(v_world_pos.z * 0.01) * 10.0;
 	float t_beach_end  = aa_step(sea_level + 120.0 + beach_warp, v_height);   // Beach -> Grass
@@ -1302,7 +1377,28 @@ void fragment() {
 	albedo = mix(albedo, cliff_col, cliff_mask * (1.0 - t_snow));
 	
 	albedo *= detail_level;
+	
+	// Apply Urban Bedrock
+	vec3 city_bedrock = vec3(0.04, 0.04, 0.05);
+	albedo = mix(albedo, city_bedrock, city_mask);
+	
 	ALBEDO = albedo;
+	
+	// ACE ORGANIC ROAD WARPING: Streets wind naturally over the topography
+	float w_n = sin(v_world_pos.x * 0.003 + v_world_pos.y * 0.002) * 0.15 + cos(v_world_pos.z * 0.0025) * 0.15;
+	vec2 g_uv = (v_world_pos.xz * 0.004) + vec2(w_n);
+	float r_grid = step(0.96, fract(g_uv.x)) + step(0.96, fract(g_uv.y));
+	float r_threads = step(0.992, fract(v_world_pos.x * 0.012 + sin(v_world_pos.z*0.015)*0.3)) + step(0.992, fract(v_world_pos.z * 0.012));
+	float r_dots = step(0.9992, fract(sin(dot(v_world_pos.xz ,vec2(12.9898,78.233))) * 43758.5453));
+	
+	// ACE CHROMATIC DISPERSION: 3-tone color selection (Amber, Yellow, Cyan)
+	float c_idx = fract(sin(dot(floor(v_world_pos.xz * 0.0005) ,vec2(12.9898,78.233))) * 43758.5453);
+	vec3 l_col = vec3(1.0, 0.45, 0.1); // Amber
+	if (c_idx > 0.7) l_col = vec3(1.0, 0.85, 0.3); // Yellow/Gold
+	else if (c_idx > 0.4) l_col = vec3(0.2, 0.8, 1.0); // Cyan
+	
+	vec3 city_glow = l_col * (r_grid * 6.0 + r_threads * 12.0 + r_dots * 65.0);
+	EMISSION = mix(vec3(0.0), city_glow, city_mask);
 	
 	// ACE TRI-PLANAR NORMAL MAPPING: Projecting physical surface grit across all axes
 	// We blend the actual Normal Map textures provided by THE GUNSMITH
@@ -1344,6 +1440,116 @@ void light() {
 }
 """
 	return _shared_land_shader
+
+static var _skyscraper_shader: Shader = null
+static func _get_skyscraper_shader() -> Shader:
+	if _skyscraper_shader: return _skyscraper_shader
+	_skyscraper_shader = Shader.new()
+	_skyscraper_shader.code = """shader_type spatial;
+	uniform sampler2D albedo_tex : source_color;
+	uniform sampler2D normal_tex : hint_normal;
+	uniform sampler2D spec_tex : source_color;
+	uniform sampler2D disp_tex : source_color;
+	uniform sampler2D ao_tex : source_color;
+	uniform sampler2D roof_tex : source_color;
+	uniform sampler2D roof_norm : hint_normal;
+	uniform sampler2D roof_spec : source_color;
+	uniform sampler2D roof_disp : source_color;
+	uniform sampler2D roof_ao : source_color;
+	varying vec3 v_normal;
+	varying vec3 v_local_pos;
+	varying vec3 v_view_dir;
+	void vertex() {
+		v_normal = NORMAL; v_local_pos = VERTEX;
+		v_view_dir = normalize(VERTEX - (inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz);
+	}
+	vec3 room_trace(vec2 uv, vec3 view_dir, vec3 grid_size) {
+		vec2 room_uv = fract(uv * grid_size.xy); vec2 room_idx = floor(uv * grid_size.xy);
+		vec3 r_origin = vec3(room_uv * 2.0 - 1.0, 1.0); vec3 inv_dir = 1.0 / view_dir;
+		vec3 t_bot = inv_dir * (vec3(-1.0, -1.0, -1.0) - r_origin);
+		vec3 t_top = inv_dir * (vec3(1.0, 1.0, 1.0) - r_origin);
+		vec3 t_max = max(t_bot, t_top); float t = min(t_max.x, min(t_max.y, t_max.z));
+		vec3 hit = r_origin + view_dir * t;
+		float wall_m = step(0.95, max(abs(hit.x), abs(hit.y)));
+		float light_v = step(0.4, sin(room_idx.x * 17.0 + room_idx.y * 31.0 + b_seed * 100.0));
+		
+		// ACE CHROMATIC PALETTE: Favors Warm Urban Yellow/Orange
+		float c_id = fract(sin(room_idx.x * 13.0 + room_idx.y * 47.0 + b_seed * 43.1) * 43758.5453);
+		vec3 win_col = vec3(1.0, 0.65, 0.1); // Amber
+		if (c_id > 0.85) win_col = vec3(1.0, 0.9, 0.4); // Bright Yellow
+		else if (c_id > 0.75) win_col = vec3(0.3, 0.7, 1.0); // Cyan/Blue
+		else if (c_id > 0.72) win_col = vec3(1.0, 0.1, 0.1); // Red
+		else if (c_id > 0.69) win_col = vec3(0.1, 1.0, 0.3); // Green
+		
+		return vec3(0.04, 0.06, 0.12) + (hit.z < -0.9 ? win_col * wall_m * light_v : vec3(0.0));
+	}
+	void fragment() {
+		float roof_mask = clamp(v_normal.y * 10.0 - 5.0, 0.0, 1.0);
+		float t_scale = 0.035; vec2 s_uv;
+		if (abs(v_normal.x) > 0.5) { s_uv = vec2((v_local_pos.z + 140.0) / 280.0, v_local_pos.y * t_scale); }
+		else { s_uv = vec2((v_local_pos.x + 140.0) / 280.0, v_local_pos.y * t_scale); }
+		vec2 r_uv = (v_local_pos.xz + 140.0) / 280.0;
+		float s_h = texture(disp_tex, s_uv).r; vec2 p_s_uv = s_uv - v_view_dir.xy * (s_h * 0.015);
+		float r_h = texture(roof_disp, r_uv).r; vec2 p_r_uv = r_uv - v_view_dir.xz * (r_h * 0.015);
+		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb; vec3 roof_alb = texture(roof_tex, p_r_uv).rgb;
+		vec3 base_alb = mix(side_alb, roof_alb, roof_mask); float luma = dot(base_alb, vec3(0.299, 0.587, 0.114));
+		float is_win = step(0.45, luma) * (1.0 - roof_mask);
+		vec3 interior = room_trace(s_uv, v_view_dir, vec3(20.0, 40.0, 1.0));
+		float b_ao = mix(texture(ao_tex, p_s_uv).r, texture(roof_ao, p_r_uv).r, roof_mask);
+		float h_grad = mix(0.2, 1.0, smoothstep(-240.0, 100.0, v_local_pos.y));
+		ALBEDO = mix(base_alb, base_alb * interior * 2.5, is_win) * h_grad * b_ao;
+		float s_spec = texture(spec_tex, p_s_uv).r;
+		SPECULAR = mix(s_spec, texture(roof_spec, p_r_uv).r, roof_mask);
+		METALLIC = mix(s_spec * 0.8, 0.1, roof_mask); ROUGHNESS = mix(0.7 - s_spec * 0.5, 0.8, roof_mask);
+		EMISSION = mix(vec3(0.0), base_alb * 10.0 + interior * is_win * 6.0, is_win);
+		NORMAL_MAP = mix(texture(normal_tex, p_s_uv).rgb, texture(roof_norm, p_r_uv).rgb, roof_mask);
+		NORMAL_MAP_DEPTH = 1.35;
+	}
+	"""
+	return _skyscraper_shader
+
+static var _road_shader: Shader = null
+static func _get_road_shader() -> Shader:
+	if _road_shader: return _road_shader
+	_road_shader = Shader.new()
+	_road_shader.code = """shader_type spatial;
+	uniform vec3 neon_col : source_color = vec3(1.0, 0.45, 0.1);
+	varying vec3 v_local_pos;
+	void vertex() { v_local_pos = VERTEX; }
+	void fragment() {
+		float x_abs = abs(v_local_pos.x);
+		float is_sw = step(120.0, x_abs); // 40m sidewalks on each side of 320m road
+		ALBEDO = mix(vec3(0.05, 0.05, 0.06), vec3(0.18, 0.18, 0.20), is_sw);
+		float lanes = 0.0;
+		for(int i=-2; i<=1; i++) {
+			float lx = float(i) * 45.0 + 22.5;
+			lanes += step(0.95, 1.0 - abs(v_local_pos.x - lx) * 0.2);
+		}
+		lanes *= (1.0 - is_sw);
+		float pulse = step(0.95, fract(v_local_pos.z * 0.002 - TIME * 0.8)) * 0.7 + 0.3;
+		EMISSION = mix(vec3(0.0), neon_col * 8.0 * pulse, lanes);
+		ROUGHNESS = 0.4; METALLIC = 0.1;
+	}
+	"""
+	return _road_shader
+
+static var _impostor_mat: ShaderMaterial = null
+static func _get_impostor_mat() -> ShaderMaterial:
+	if _impostor_mat: return _impostor_mat
+	_impostor_mat = ShaderMaterial.new(); var s = Shader.new()
+	s.code = """shader_type spatial;
+	void fragment() {
+		ALBEDO = vec3(0.04);
+		float grid = step(0.96, fract(UV.x * 12.0)) + step(0.96, fract(UV.y * 12.0));
+		float dots = step(0.99, fract(sin(dot(UV ,vec2(12.9898,78.233))) * 43758.5453));
+		// Chromatic variance on impostors
+		float c_idx = fract(sin(dot(floor(UV * 2.5) ,vec2(12.9898,78.233))) * 43758.5453);
+		vec3 l_col = vec3(1.0, 0.45, 0.1); 
+		if (c_idx > 0.7) l_col = vec3(1.0, 0.85, 0.3);
+		else if (c_idx > 0.4) l_col = vec3(0.2, 0.8, 1.0);
+		EMISSION = l_col * (grid * 8.0 + dots * 45.0);
+	}"""
+	_impostor_mat.shader = s; return _impostor_mat
 
 static var _shared_water_shader: Shader = null
 static func _get_shared_water_shader() -> Shader:

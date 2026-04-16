@@ -6,7 +6,7 @@ extends Node3D
 
 @export var belt_seed: int = 9999
 @export var mmi_count: int = 14000 
-@export var phys_count: int = 1500  
+@export var phys_count: int = 500  
 @export var inner_radius: float = 1400000.0
 @export var outer_radius: float = 2000000.0
 @export var thickness: float = 20000.0 
@@ -28,6 +28,10 @@ const PHYSICS_LOD_DIST: float = 80000.0 # 80km - asteroids beyond this lose coll
 const HIDE_LOD_DIST: float = 800000.0  # 800km - individual rocks hide and let MMI take over
 const STELLAR_CUTOFF: float = 4000000.0 # 4,000km - Transition to deep space hibernation
 
+var _spawn_idx: int = 0
+var _is_spawning_phys: bool = true
+var _rng: RandomNumberGenerator
+
 func _ready() -> void:
 	rock_mesh_low = _build_faceted_rock_mesh(4) # Pyramid / Minimal
 	rock_mesh_med = _build_faceted_rock_mesh(8) # Standard
@@ -39,8 +43,8 @@ func _ready() -> void:
 	if players.size() > 0: player = players[0]
 
 func _spawn_deterministic_belt() -> void:
-	var rng = RandomNumberGenerator.new()
-	rng.seed = belt_seed
+	_rng = RandomNumberGenerator.new()
+	_rng.seed = belt_seed
 	
 	# SHARED MATERIALS
 	var mmi_mat = ShaderMaterial.new(); mmi_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
@@ -76,48 +80,31 @@ func _spawn_deterministic_belt() -> void:
 	mmi_phys_high.visibility_range_end = 12000.0
 	add_child(mmi_phys_high)
 
-	# POPULATE SEEDS
+	# POPULATE SEEDS (Tier 1: Background Only)
 	for i in range(mmi_count):
-		var angle = rng.randf() * TAU
-		var dist = rng.randf_range(inner_radius, outer_radius)
-		var h = pow(rng.randf_range(-1.0, 1.0), 3.0) * thickness 
-		var xform = Transform3D().rotated(Vector3(rng.randf(), rng.randf(), rng.randf()).normalized(), rng.randf() * TAU)
-		xform = xform.scaled(Vector3.ONE * (5.0 + pow(rng.randf(), 2.0) * 120.0))
+		var angle = _rng.randf() * TAU
+		var dist = _rng.randf_range(inner_radius, outer_radius)
+		var h = pow(_rng.randf_range(-1.0, 1.0), 3.0) * thickness 
+		var xform = Transform3D().rotated(Vector3(_rng.randf(), _rng.randf(), _rng.randf()).normalized(), _rng.randf() * TAU)
+		xform = xform.scaled(Vector3.ONE * (5.0 + pow(_rng.randf(), 2.0) * 120.0))
 		xform.origin = Vector3(cos(angle) * dist, h, sin(angle) * dist)
 		mmi_back.multimesh.set_instance_transform(i, xform)
-		var inst_col = Color.from_hsv(0, 0, rng.randf_range(0.2, 0.4))
-		if rng.randf() > 0.45: inst_col = Color.from_hsv(rng.randf_range(0.04, 0.08), 0.4, rng.randf_range(0.3, 0.5))
+		var inst_col = Color.from_hsv(0, 0, _rng.randf_range(0.2, 0.4))
+		if _rng.randf() > 0.45: inst_col = Color.from_hsv(_rng.randf_range(0.04, 0.08), 0.4, _rng.randf_range(0.3, 0.5))
 		mmi_back.multimesh.set_instance_color(i, inst_col)
 	
-	for i in range(phys_count):
-		var angle = rng.randf() * TAU
-		var dist = rng.randf_range(inner_radius, outer_radius)
-		var h = pow(rng.randf_range(-1.0, 1.0), 2.0) * (thickness * 0.8)
-		var asteroid = StaticBody3D.new()
-		asteroid.position = Vector3(cos(angle) * dist, h, sin(angle) * dist)
-		asteroid.rotation = Vector3(rng.randf() * TAU, rng.randf() * TAU, rng.randf() * TAU)
-		var s_roll = rng.randf()
-		var scale_val = 25.0 + pow(s_roll, 4.0) * 1600.0
-		asteroid.scale = Vector3(scale_val, scale_val, scale_val)
-		
-		# INITIAL HIDE (Zero scale)
-		mmi_phys_med.multimesh.set_instance_transform(i, Transform3D().scaled(Vector3.ZERO))
-		mmi_phys_high.multimesh.set_instance_transform(i, Transform3D().scaled(Vector3.ZERO))
-
-		var collision = CollisionShape3D.new()
-		var shape = SphereShape3D.new(); shape.radius = 6.0; collision.shape = shape
-		asteroid.add_child(collision)
-		
-		var hc_script = load("res://src/combat/HealthComponent.gd")
-		if hc_script:
-			var hc = Node.new(); hc.set_script(hc_script); hc.name = "HealthComponent"; hc.set("max_health", 100.0); asteroid.add_child(hc)
-		
-		add_child(asteroid); asteroid.add_to_group("Targets"); asteroid.add_to_group("Destructible"); asteroids.append(asteroid); coll_nodes.append(collision)
+	# ACE: We defer the Tiers 2 & 3 (1,500 physical rocks) to _process
+	# to prevent the multi-second 'Spawn Freeze' reported by THE ARCHITECT.
+	
 
 var proc_idx: int = 0
 const BATCH_SIZE: int = 32
 
 func _process(delta: float) -> void:
+	if _is_spawning_phys:
+		_process_physical_spawning()
+		return
+
 	if not player: 
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0: player = found[0]
@@ -168,6 +155,39 @@ func _process(delta: float) -> void:
 		var should_collide = dist_sq < PHYSICS_LOD_DIST * PHYSICS_LOD_DIST
 		if coll.disabled != !should_collide:
 			coll.disabled = !should_collide
+
+func _process_physical_spawning() -> void:
+	# ACE: Spawn 50 rocks per frame to eliminate the startup freeze
+	var batch = 50
+	var hc_script = load("res://src/combat/HealthComponent.gd")
+	for i in range(batch):
+		if _spawn_idx >= phys_count:
+			_is_spawning_phys = false
+			return
+		
+		var angle = _rng.randf() * TAU
+		var dist = _rng.randf_range(inner_radius, outer_radius)
+		var h = pow(_rng.randf_range(-1.0, 1.0), 2.0) * (thickness * 0.8)
+		var asteroid = StaticBody3D.new()
+		asteroid.position = Vector3(cos(angle) * dist, h, sin(angle) * dist)
+		asteroid.rotation = Vector3(_rng.randf() * TAU, _rng.randf() * TAU, _rng.randf() * TAU)
+		var s_roll = _rng.randf()
+		var scale_val = 25.0 + pow(s_roll, 4.0) * 1600.0
+		asteroid.scale = Vector3(scale_val, scale_val, scale_val)
+		
+		# INITIAL HIDE (Zero scale)
+		mmi_phys_med.multimesh.set_instance_transform(_spawn_idx, Transform3D().scaled(Vector3.ZERO))
+		mmi_phys_high.multimesh.set_instance_transform(_spawn_idx, Transform3D().scaled(Vector3.ZERO))
+
+		var collision = CollisionShape3D.new()
+		var shape = SphereShape3D.new(); shape.radius = 6.0; collision.shape = shape
+		asteroid.add_child(collision)
+		
+		if hc_script:
+			var hc = Node.new(); hc.set_script(hc_script); hc.name = "HealthComponent"; hc.set("max_health", 100.0); asteroid.add_child(hc)
+		
+		add_child(asteroid); asteroid.add_to_group("Targets"); asteroid.add_to_group("Destructible"); asteroids.append(asteroid); coll_nodes.append(collision)
+		_spawn_idx += 1
 
 func _build_faceted_rock_mesh(sides: int) -> ArrayMesh:
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)

@@ -17,6 +17,8 @@ var planet_seed: int = 0
 var scatter_grass: bool = false
 var archetype: String = "LUSH"
 var continent_pole: Vector3 = Vector3.UP # ACE: Synchronized continent anchor
+var face: Node3D
+var planet: Node
 
 # DYNAMIC PROCEDURAL PLANET PALETTE
 static var _tex_cache := {}
@@ -44,14 +46,15 @@ var _t_pts: Array[Transform3D] = []
 var _r_pts: Array[Transform3D] = []
 var _g_pts: Array[Transform3D] = []
 var _c_pts: Array[Transform3D] = []
+var _m_pts: Array = [] # Pairs: [Transform3D, String (Type)]
 
 signal generation_completed()
 var _task_id: int = -1
 
 # STELLAR VISIBILITY POLICY: Unified across all planetary props
-const PROP_LOD_HIGH_END: float = 2500.0  # Tightened High-Detail radius
-const PROP_LOD_PROXY_END: float = 12000.0 # Aggressive absolute cutoff 
-const PROP_LOD_FADE: float = 500.0       
+const PROP_LOD_HIGH_END: float = 1200.0  # Tightened High-Detail radius
+const PROP_LOD_PROXY_END: float = 6500.0  # Aggressive absolute cutoff for retro performance
+const PROP_LOD_FADE: float = 300.0       
 
 func start_generation() -> void:
 	self.visible = false
@@ -65,7 +68,8 @@ func _start_async_generation() -> void:
 
 func _threaded_generation_task() -> void:
 	_calculate_multi_surface_mesh_thread_safe()
-	call_deferred("_finalize_generation_on_main")
+	if face and face.planet:
+		face.planet.finalize_queue.append(self)
 
 func _exit_tree() -> void:
 	if _task_id != -1:
@@ -73,9 +77,7 @@ func _exit_tree() -> void:
 
 func sleep_and_reset() -> void:
 	# ACE MEMORY POOLING: Safely suspend thread and purge visual data without freeing the object
-	if _task_id != -1:
-		WorkerThreadPool.wait_for_task_completion(_task_id)
-		_task_id = -1
+	# We no longer block the main thread here. PlanetGen will handle 'zombie' chunks.
 	_is_generating = false
 	visible = false
 	mesh = null
@@ -85,12 +87,23 @@ func sleep_and_reset() -> void:
 	_mesh_data_water.clear()
 	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear()
 	
-	# Purge all botanical MultiMesh instances and collisions IMMEDIATELY
-	# ACE POOLING HARDENING: Use .free() instead of .queue_free() to ensure
-	# a clean slate if the chunk is reused in the same frame.
+	# Purge all botanical MultiMesh instances and collisions ASYNCHRONOUSLY
+	# Moving them to death_row prevents the main thread from locking up 
+	# when thousands of nodes are freed at once during a transit exit.
 	for n in get_children():
 		remove_child(n)
-		n.free()
+		if face and face.planet:
+			face.planet.death_row.append(n)
+		else:
+			n.free()
+
+func is_busy() -> bool:
+	if _task_id == -1: return false
+	if WorkerThreadPool.is_task_completed(_task_id):
+		WorkerThreadPool.wait_for_task_completion(_task_id)
+		_task_id = -1
+		return false
+	return true
 
 func _on_rebuild_req() -> void:
 	# ACE CACHE FLUSHING: Invalidate static LOD meshes to force re-generation with new geometry
@@ -240,8 +253,9 @@ func _finalize_generation_on_main() -> void:
 	if not _r_pts.is_empty(): _spawn_rock(_r_pts)
 	if not _g_pts.is_empty(): _spawn_grass(_g_pts)
 	if not _c_pts.is_empty(): _spawn_city_buildings(_c_pts)
+	if not _m_pts.is_empty(): _spawn_minerals(_m_pts)
 	
-	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear()
+	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear(); _m_pts.clear()
 	_is_generating = false
 	_task_id = -1
 	
@@ -309,10 +323,22 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 	else:
 		self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		
-	# DECOUPLED COLLISION: High-detail chunks (under 2km across) always get collision.
-	# Since these only spawn near the player, we maintain O(1) physics overhead.
+	# DECOUPLED COLLISION: High-detail chunks (under 2km across) get collision.
+	# ACE PERFORMANCE: Only materialize physics if the player is in 'Hazard Proximity' (< 3km alt)
+	# This eliminates main-thread stalls when searching for targets from safe altitudes.
 	if scale_factor <= 0.0015:
-		create_trimesh_collision()
+		var p_ref = get_tree().get_first_node_in_group("Player")
+		var is_near = false
+		if p_ref:
+			var d = p_ref.global_position.distance_to(global_position)
+			if d < 10000.0: is_near = true # Within 10km of chunk center
+		
+		if is_near:
+			var planet = get_parent().get_parent()
+			if planet and "collision_queue" in planet:
+				planet.collision_queue.append(self)
+			else:
+				create_trimesh_collision()
 
 func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	# CPU HARDENING: Infrastructure (Metropolis) visible from ORBIT (<= 2000km).
@@ -320,6 +346,7 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	if scale_factor > 2.0: return 
 	var radius_ratio: float = clamp(radius / 1000000.0, 0.3, 1.5)
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []; var g_pts: Array[Transform3D] = []; var c_pts: Array[Transform3D] = []
+	var m_pts: Array = []
 	
 	# ACE MESH HARDENING: Use tiered cell sizes to prevent 3.5M+ loop iterations.
 	var base_cell: float = 0.00008
@@ -402,6 +429,21 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 							var h = get_terrain_elevation(cp)
 							if h > -150.0:
 								r_pts.append(_get_rock_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
+						
+						# ACE MINERAL GENESIS: Higher density for better looter-shooter flow
+						elif (h_v % 10000) < 45:
+							var h = get_terrain_elevation(cp)
+							if h > -100.0:
+								var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
+								var r_pick = h_v % 100
+								var type = "Copper"
+								if r_pick > 99: type = "Diamond"
+								elif r_pick > 90: type = "Platinum"
+								elif r_pick > 75: type = "Gold"
+								elif r_pick > 45: type = "Silver"
+								
+								var xf = _get_object_xform(cp * (radius + h), cp, detail_n, 1.0)
+								m_pts.append([xf, type])
 
 	
 	if scale_factor <= 0.00055:
@@ -431,7 +473,7 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 								g_pts.append(_get_grass_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, fmod(float(h_v), 10.0)/10.0))
 	
 	# BUFFER DATA FOR MAIN THREAD COMMIT
-	_t_pts = t_pts; _r_pts = r_pts; _g_pts = g_pts; _c_pts = c_pts
+	_t_pts = t_pts; _r_pts = r_pts; _g_pts = g_pts; _c_pts = c_pts; _m_pts = m_pts
 
 func _get_object_xform(pos: Vector3, up: Vector3, noise_val: float, b_scale: float) -> Transform3D:
 	var t_bas = Basis(); t_bas.y = up; t_bas.x = up.cross(Vector3.RIGHT).normalized()
@@ -746,7 +788,7 @@ func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
 	p.visibility_aabb = AABB(Vector3(-50,-150,-50), Vector3(100,300,100))
 	
 	# ACE PERFORMANCE GATING: Only render particles near the ship
-	p.visibility_range_end = 400.0; p.visibility_range_end_margin = 100.0
+	p.visibility_range_end = 250.0; p.visibility_range_end_margin = 80.0
 	p.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
 	add_child(p)
@@ -828,17 +870,18 @@ void fragment() {
 	var mmi_h = MultiMeshInstance3D.new(); mmi_h.multimesh = mm; mmi_h.material_override = ShaderMaterial.new(); mmi_h.material_override.shader = shader; 
 	
 	# POP-IN POLICY: Grass waits until 1.5km to avoid horizon noise
-	mmi_h.visibility_range_end = 1500.0; mmi_h.visibility_range_end_margin = 300.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 200.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
 	add_child(mmi_h); _flora_nodes.append(mmi_h)
 	
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	if points.is_empty(): return
 	
-	# ACE ASSET POOL
-	var tex_paths = ["res://assets/textures/building_texture_1.png", "res://assets/textures/building_texture_2.png", "res://assets/textures/building_texture_3.png", "res://assets/textures/building_texture_4.png"]
-	var roof_t = load("res://assets/textures/building_roof_texture.png"); var roof_n = load("res://assets/textures/building_roof_texture_normal.png")
-	var roof_s = load("res://assets/textures/building_roof_texture_specular.png"); var roof_d = load("res://assets/textures/building_roof_texture_displacement.png"); var roof_a = load("res://assets/textures/building_roof_texture_ambient.png")
+	# ACE ASSET CACHE: Pre-load all metropolitan logic once per session
+	if _skyscraper_shader == null: _init_skyscraper_assets()
+	
+	var roof_t = _roof_assets["t"]; var roof_n = _roof_assets["n"]
+	var roof_s = _roof_assets["s"]; var roof_d = _roof_assets["d"]; var roof_a = _roof_assets["a"]
 	
 	# ACE METROPOLITAN SLAB
 	var f_mm = MultiMesh.new(); f_mm.transform_format = MultiMesh.TRANSFORM_3D
@@ -871,41 +914,8 @@ func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	}"""
 	var r_mat = ShaderMaterial.new(); r_mat.shader = road_shader
 	
-	# ACE INFRASTRUCTURE GEN: Strict Multi-Lane Grid
-	var r_pts: Array[Transform3D] = []; var l_pts: Array[Transform3D] = []; var b_pts: Array[Transform3D] = []
-	var block_size = 560.0 
-	for p in points:
-		for ix in range(-4, 5):
-			for iy in range(-4, 5):
-				var pos = p.origin + p.basis.x * float(ix * block_size) + p.basis.z * float(iy * block_size)
-				var xf = Transform3D(p.basis, pos)
-				# Intentional Grid Framework: Evens are Roads, Odds are Skyscrapers
-				if ix % 2 == 0 or iy % 2 == 0:
-					var road_xf = xf.translated_local(Vector3(0, 1.5, 0))
-					if iy % 2 == 0: r_pts.append(road_xf.rotated_local(Vector3.UP, PI/2.0))
-					if ix % 2 == 0: r_pts.append(road_xf)
-					if ix % 2 == 0 and iy % 2 == 0: # Intersection Signal Monoliths
-						for cx in [-1, 1]:
-							for cz in [-1, 1]: l_pts.append(xf.translated_local(Vector3(cx*160, 20, cz*160)))
-				else:
-					b_pts.append(xf)
-	
-	# Spawning Roads
-	if not r_pts.is_empty():
-		var r_mmi = MultiMeshInstance3D.new(); var r_mm = MultiMesh.new(); r_mm.transform_format = MultiMesh.TRANSFORM_3D
-		r_mm.mesh = BoxMesh.new(); r_mm.mesh.size = Vector3(320, 3, block_size); r_mm.instance_count = r_pts.size()
-		for i in r_pts.size(): r_mm.set_instance_transform(i, r_pts[i])
-		r_mmi.multimesh = r_mm; r_mmi.material_override = r_mat; add_child(r_mmi); _flora_nodes.append(r_mmi)
-		r_mmi.visibility_range_end = 2000000.0; r_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	
-	# Spawning Traffic Lights
-	if not l_pts.is_empty():
-		var l_mmi = MultiMeshInstance3D.new(); var l_mm = MultiMesh.new(); l_mm.transform_format = MultiMesh.TRANSFORM_3D
-		l_mm.mesh = BoxMesh.new(); l_mm.mesh.size = Vector3(15, 60, 15); l_mm.instance_count = l_pts.size()
-		var l_mat = StandardMaterial3D.new(); l_mat.albedo_color = Color(0,0,0); l_mat.emission_enabled = true; l_mat.emission = Color(0, 1, 1); l_mat.emission_energy_multiplier = 12.0
-		for i in l_pts.size(): l_mm.set_instance_transform(i, l_pts[i])
-		l_mmi.multimesh = l_mm; l_mmi.material_override = l_mat; add_child(l_mmi); _flora_nodes.append(l_mmi)
-		l_mmi.visibility_range_end = 2000000.0; l_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	# CITY GENERATION DEACTIVATED BY ARCHITECT
+	pass
 	
 	# ACE SPACE-IMPOSTOR LOGIC: Faking the city from orbit
 	if scale_factor > 0.1:
@@ -914,84 +924,11 @@ func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 		i_mm.instance_count = points.size()
 		for i in points.size(): i_mm.set_instance_transform(i, points[i].translated_local(Vector3(0, -5, 0)))
 		var i_mmi = MultiMeshInstance3D.new(); i_mmi.multimesh = i_mm; i_mmi.material_override = _get_impostor_mat()
-		i_mmi.visibility_range_end = 2000000.0; i_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		i_mmi.visibility_range_end = 2000000.0; i_mmi.visibility_range_begin = 33000.0; i_mmi.visibility_range_begin_margin = 10000.0; i_mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		add_child(i_mmi); _flora_nodes.append(i_mmi)
-		i_mmi.visibility_range_end = 2000000.0; i_mmi.visibility_range_begin = 45000.0 
 	
-	# ACE SKYSCRAPER PIPELINE
-	var shader = _get_skyscraper_shader()
-	shader.code = """shader_type spatial;
-	uniform sampler2D albedo_tex : source_color;
-	uniform sampler2D normal_tex : hint_normal;
-	uniform sampler2D spec_tex : source_color;
-	uniform sampler2D disp_tex : source_color;
-	uniform sampler2D ao_tex : source_color;
-	uniform sampler2D roof_tex : source_color;
-	uniform sampler2D roof_norm : hint_normal;
-	uniform sampler2D roof_spec : source_color;
-	uniform sampler2D roof_disp : source_color;
-	uniform sampler2D roof_ao : source_color;
-	varying vec3 v_normal;
-	varying vec3 v_local_pos;
-	varying vec3 v_view_dir;
-	void vertex() {
-		v_normal = NORMAL; v_local_pos = VERTEX;
-		v_view_dir = normalize(VERTEX - (inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz);
-	}
-	vec3 room_trace(vec2 uv, vec3 view_dir, vec3 grid_size) {
-		vec2 room_uv = fract(uv * grid_size.xy); vec2 room_idx = floor(uv * grid_size.xy);
-		vec3 r_origin = vec3(room_uv * 2.0 - 1.0, 1.0); vec3 inv_dir = 1.0 / view_dir;
-		vec3 t_bot = inv_dir * (vec3(-1.0, -1.0, -1.0) - r_origin);
-		vec3 t_top = inv_dir * (vec3(1.0, 1.0, 1.0) - r_origin);
-		vec3 t_max = max(t_bot, t_top); float t = min(t_max.x, min(t_max.y, t_max.z));
-		vec3 hit = r_origin + view_dir * t;
-		float wall_m = step(0.95, max(abs(hit.x), abs(hit.y)));
-		float light_v = step(0.4, sin(room_idx.x * 17.0 + room_idx.y * 31.0));
-		return vec3(0.04, 0.06, 0.12) + (hit.z < -0.9 ? vec3(0.8, 0.9, 1.0) * wall_m * light_v : vec3(0.0));
-	}
-	void fragment() {
-		float roof_mask = clamp(v_normal.y * 10.0 - 5.0, 0.0, 1.0);
-		float t_scale = 0.035; vec2 s_uv;
-		if (abs(v_normal.x) > 0.5) { s_uv = vec2((v_local_pos.z + 140.0) / 280.0, v_local_pos.y * t_scale); }
-		else { s_uv = vec2((v_local_pos.x + 140.0) / 280.0, v_local_pos.y * t_scale); }
-		vec2 r_uv = (v_local_pos.xz + 140.0) / 280.0;
-		float s_h = texture(disp_tex, s_uv).r; vec2 p_s_uv = s_uv - v_view_dir.xy * (s_h * 0.015);
-		float r_h = texture(roof_disp, r_uv).r; vec2 p_r_uv = r_uv - v_view_dir.xz * (r_h * 0.015);
-		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb; vec3 roof_alb = texture(roof_tex, p_r_uv).rgb;
-		vec3 base_alb = mix(side_alb, roof_alb, roof_mask); float luma = dot(base_alb, vec3(0.299, 0.587, 0.114));
-		float is_win = step(0.45, luma) * (1.0 - roof_mask);
-		vec3 interior = room_trace(s_uv, v_view_dir, vec3(20.0, 40.0, 1.0));
-		float b_ao = mix(texture(ao_tex, p_s_uv).r, texture(roof_ao, p_r_uv).r, roof_mask);
-		float h_grad = mix(0.2, 1.0, smoothstep(-240.0, 100.0, v_local_pos.y));
-		ALBEDO = mix(base_alb, base_alb * interior * 2.5, is_win) * h_grad * b_ao;
-		float s_spec = texture(spec_tex, p_s_uv).r;
-		SPECULAR = mix(s_spec, texture(roof_spec, p_r_uv).r, roof_mask);
-		METALLIC = mix(s_spec * 0.8, 0.1, roof_mask); ROUGHNESS = mix(0.7 - s_spec * 0.5, 0.8, roof_mask);
-		EMISSION = mix(vec3(0.0), base_alb * 10.0 + interior * is_win * 6.0, is_win);
-		NORMAL_MAP = mix(texture(normal_tex, p_s_uv).rgb, texture(roof_norm, p_r_uv).rgb, roof_mask);
-		NORMAL_MAP_DEPTH = 1.35;
-	}
-	"""
-	var groups: Array[Array] = [[], [], [], []]; for p in b_pts: groups[hash(p.origin) % 4].append(p)
-	for i in range(4):
-		if groups[i].is_empty(): continue
-		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true
-		mm.mesh = BoxMesh.new(); mm.mesh.size = Vector3(280, 480, 280)
-		mm.instance_count = groups[i].size()
-		for j in range(groups[i].size()):
-			var xf = groups[i][j]; var s_var = 0.7 + (float(hash(xf.origin) % 100) / 100.0) * 0.6
-			mm.set_instance_transform(j, xf.scaled_local(Vector3(1.0, s_var, 1.0)))
-			# Persistent seed for shader-side randomization
-			var b_seed = float(hash(xf.origin) % 10000) / 10000.0
-			mm.set_instance_color(j, Color(b_seed, 0.0, 0.0, 1.0))
-		var mat = ShaderMaterial.new(); mat.shader = shader
-		mat.set_shader_parameter("albedo_tex", load(tex_paths[i])); mat.set_shader_parameter("normal_tex", load(tex_paths[i].replace(".png", "_normal.png")))
-		mat.set_shader_parameter("spec_tex", load(tex_paths[i].replace(".png", "_specular.png"))); mat.set_shader_parameter("disp_tex", load(tex_paths[i].replace(".png", "_displacement.png")))
-		mat.set_shader_parameter("ao_tex", load(tex_paths[i].replace(".png", "_ambient.png"))); mat.set_shader_parameter("roof_tex", roof_t); mat.set_shader_parameter("roof_norm", roof_n)
-		mat.set_shader_parameter("roof_spec", roof_s); mat.set_shader_parameter("roof_disp", roof_d); mat.set_shader_parameter("roof_ao", roof_a)
-		var mmi = MultiMeshInstance3D.new(); mmi.multimesh = mm; mmi.material_override = mat
-		mmi.visibility_range_end = 2000000.0; mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-		add_child(mmi); _flora_nodes.append(mmi)
+	# CITY GENERATION DEACTIVATED BY ARCHITECT
+	pass
   
 
 func _get_rock_xform(pos: Vector3, up: Vector3, noise_val: float, b_scale: float) -> Transform3D:
@@ -1378,9 +1315,8 @@ void fragment() {
 	
 	albedo *= detail_level;
 	
-	// Apply Urban Bedrock
-	vec3 city_bedrock = vec3(0.04, 0.04, 0.05);
-	albedo = mix(albedo, city_bedrock, city_mask);
+	// Urban Bedrock Deactivated
+	city_mask = 0.0;
 	
 	ALBEDO = albedo;
 	
@@ -1398,7 +1334,7 @@ void fragment() {
 	else if (c_idx > 0.4) l_col = vec3(0.2, 0.8, 1.0); // Cyan
 	
 	vec3 city_glow = l_col * (r_grid * 6.0 + r_threads * 12.0 + r_dots * 65.0);
-	EMISSION = mix(vec3(0.0), city_glow, city_mask);
+	EMISSION = vec3(0.0);
 	
 	// ACE TRI-PLANAR NORMAL MAPPING: Projecting physical surface grit across all axes
 	// We blend the actual Normal Map textures provided by THE GUNSMITH
@@ -1442,28 +1378,36 @@ void light() {
 	return _shared_land_shader
 
 static var _skyscraper_shader: Shader = null
-static func _get_skyscraper_shader() -> Shader:
-	if _skyscraper_shader: return _skyscraper_shader
+static var _sky_mats: Array[ShaderMaterial] = []
+static var _facade_texs: Array[Texture2D] = []
+static var _roof_assets: Dictionary = {}
+
+static func _init_skyscraper_assets() -> void:
+	if _skyscraper_shader: return
+	
+	# SHADER CACHE
 	_skyscraper_shader = Shader.new()
 	_skyscraper_shader.code = """shader_type spatial;
-	uniform sampler2D albedo_tex : source_color;
-	uniform sampler2D normal_tex : hint_normal;
-	uniform sampler2D spec_tex : source_color;
-	uniform sampler2D disp_tex : source_color;
-	uniform sampler2D ao_tex : source_color;
-	uniform sampler2D roof_tex : source_color;
-	uniform sampler2D roof_norm : hint_normal;
-	uniform sampler2D roof_spec : source_color;
-	uniform sampler2D roof_disp : source_color;
-	uniform sampler2D roof_ao : source_color;
+	uniform sampler2D albedo_tex : source_color, filter_nearest;
+	uniform sampler2D normal_tex : hint_normal, filter_nearest;
+	uniform sampler2D spec_tex : source_color, filter_nearest;
+	uniform sampler2D disp_tex : source_color, filter_nearest;
+	uniform sampler2D ao_tex : source_color, filter_nearest;
+	uniform sampler2D roof_tex : source_color, filter_nearest;
+	uniform sampler2D roof_norm : hint_normal, filter_nearest;
+	uniform sampler2D roof_spec : source_color, filter_nearest;
+	uniform sampler2D roof_disp : source_color, filter_nearest;
+	uniform sampler2D roof_ao : source_color, filter_nearest;
 	varying vec3 v_normal;
 	varying vec3 v_local_pos;
 	varying vec3 v_view_dir;
+	varying float v_seed;
 	void vertex() {
 		v_normal = NORMAL; v_local_pos = VERTEX;
+		v_seed = COLOR.r;
 		v_view_dir = normalize(VERTEX - (inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz);
 	}
-	vec3 room_trace(vec2 uv, vec3 view_dir, vec3 grid_size) {
+	vec3 room_trace(vec2 uv, vec3 view_dir, vec3 grid_size, float s_seed) {
 		vec2 room_uv = fract(uv * grid_size.xy); vec2 room_idx = floor(uv * grid_size.xy);
 		vec3 r_origin = vec3(room_uv * 2.0 - 1.0, 1.0); vec3 inv_dir = 1.0 / view_dir;
 		vec3 t_bot = inv_dir * (vec3(-1.0, -1.0, -1.0) - r_origin);
@@ -1471,10 +1415,9 @@ static func _get_skyscraper_shader() -> Shader:
 		vec3 t_max = max(t_bot, t_top); float t = min(t_max.x, min(t_max.y, t_max.z));
 		vec3 hit = r_origin + view_dir * t;
 		float wall_m = step(0.95, max(abs(hit.x), abs(hit.y)));
-		float light_v = step(0.4, sin(room_idx.x * 17.0 + room_idx.y * 31.0 + b_seed * 100.0));
+		float light_v = step(0.4, sin(room_idx.x * 17.0 + room_idx.y * 31.0 + s_seed * 100.0));
 		
-		// ACE CHROMATIC PALETTE: Favors Warm Urban Yellow/Orange
-		float c_id = fract(sin(room_idx.x * 13.0 + room_idx.y * 47.0 + b_seed * 43.1) * 43758.5453);
+		float c_id = fract(sin(room_idx.x * 13.0 + room_idx.y * 47.0 + s_seed * 43.1) * 43758.5453);
 		vec3 win_col = vec3(1.0, 0.65, 0.1); // Amber
 		if (c_id > 0.85) win_col = vec3(1.0, 0.9, 0.4); // Bright Yellow
 		else if (c_id > 0.75) win_col = vec3(0.3, 0.7, 1.0); // Cyan/Blue
@@ -1494,7 +1437,12 @@ static func _get_skyscraper_shader() -> Shader:
 		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb; vec3 roof_alb = texture(roof_tex, p_r_uv).rgb;
 		vec3 base_alb = mix(side_alb, roof_alb, roof_mask); float luma = dot(base_alb, vec3(0.299, 0.587, 0.114));
 		float is_win = step(0.45, luma) * (1.0 - roof_mask);
-		vec3 interior = room_trace(s_uv, v_view_dir, vec3(20.0, 40.0, 1.0));
+		
+		float dist = length(VERTEX); // Fragment VERTEX is in view-space
+		vec3 interior = vec3(0.04, 0.06, 0.12);
+		if (dist < 4500.0) {
+			interior = room_trace(s_uv, v_view_dir, vec3(20.0, 40.0, 1.0), v_seed);
+		}
 		float b_ao = mix(texture(ao_tex, p_s_uv).r, texture(roof_ao, p_r_uv).r, roof_mask);
 		float h_grad = mix(0.2, 1.0, smoothstep(-240.0, 100.0, v_local_pos.y));
 		ALBEDO = mix(base_alb, base_alb * interior * 2.5, is_win) * h_grad * b_ao;
@@ -1506,7 +1454,29 @@ static func _get_skyscraper_shader() -> Shader:
 		NORMAL_MAP_DEPTH = 1.35;
 	}
 	"""
-	return _skyscraper_shader
+	# ACE ASSET HARDENING: Bulk-loading textures to prevent I/O micro-stutters
+	_roof_assets = {
+		"t": load("res://assets/textures/building_roof_texture.png"),
+		"n": load("res://assets/textures/building_roof_texture_normal.png"),
+		"s": load("res://assets/textures/building_roof_texture_specular.png"),
+		"d": load("res://assets/textures/building_roof_texture_displacement.png"),
+		"a": load("res://assets/textures/building_roof_texture_ambient.png")
+	}
+
+	for i in range(1, 7):
+		var p = "res://assets/textures/building_texture_%d.png" % i
+		var m = ShaderMaterial.new(); m.shader = _skyscraper_shader
+		m.set_shader_parameter("albedo_tex", load(p))
+		m.set_shader_parameter("normal_tex", load(p.replace(".png", "_normal.png")))
+		m.set_shader_parameter("spec_tex", load(p.replace(".png", "_specular.png")))
+		m.set_shader_parameter("disp_tex", load(p.replace(".png", "_displacement.png")))
+		m.set_shader_parameter("ao_tex", load(p.replace(".png", "_ambient.png")))
+		m.set_shader_parameter("roof_tex", _roof_assets["t"])
+		m.set_shader_parameter("roof_norm", _roof_assets["n"])
+		m.set_shader_parameter("roof_spec", _roof_assets["s"])
+		m.set_shader_parameter("roof_disp", _roof_assets["d"])
+		m.set_shader_parameter("roof_ao", _roof_assets["a"])
+		_sky_mats.append(m)
 
 static var _road_shader: Shader = null
 static func _get_road_shader() -> Shader:
@@ -1747,6 +1717,18 @@ void light() {
 }
 """
 	return _shared_water_shader
+
+func _spawn_minerals(data: Array) -> void:
+	var m_script = load("res://src/world/MineableResource.gd")
+	if not m_script: return
+	for item in data:
+		var xf: Transform3D = item[0]
+		var type: String = item[1]
+		var res = StaticBody3D.new()
+		res.set_script(m_script)
+		res.set("resource_type", type)
+		add_child(res)
+		res.global_transform = xf
 
 static var c_r: ArrayMesh
 static var c_t_l: ArrayMesh

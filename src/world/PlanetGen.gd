@@ -40,11 +40,22 @@ var continent_pole: Vector3 = Vector3.UP # ACE: Deterministic anchor for the maj
 # NMS OPTIMIZATION: Throttle chunk streaming to prevent CPU micro-stutters!
 # One split per frame keeps mesh generation within frame budget.
 var split_queue: Array[QuadTreeNode] = []
-const MAX_SPLITS_PER_FRAME: int = 2
-const PROXIMITY_CUTOFF: float = 5000000.0 # 5,000km - Transition to Impostor mode for astronomical efficiency
+const MAX_SPLITS_PER_FRAME: int = 1
+const PROXIMITY_CUTOFF: float = 8000000.0 # ACE: Increased for mission-critical persistence
 var impostor: Node3D = null
 var faces_hidden: bool = false
 var _lod_face_idx: int = 0 # ACE PERFORMANCE: Load-balanced face updates
+
+# ACE POOLING: Chunks that are still generating in the background go here
+# instead of the main pool to avoid blocking the main thread.
+var zombie_pool: Array[MeshInstance3D] = []
+var finalize_queue: Array = []
+var death_row: Array[Node] = []
+# ACE PHYSICS: Queue for trimesh collision generation to prevent spikes
+var collision_queue: Array[MeshInstance3D] = []
+const MAX_COLLISIONS_PER_FRAME: int = 2
+var MAX_FINALIZE_PER_FRAME: int = 1
+const MAX_DEATHS_PER_FRAME: int = 60
 
 
 
@@ -279,6 +290,8 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	c_inst.material_override.set_shader_parameter("sun_dir", sun_dir)
 	# SYNC ATMOSPHERE: Pass the generated horizon color for distant silhouette optimization
 	c_inst.material_override.set_shader_parameter("horizon_col", sky_horizon_color)
+	# ACE VISIBILITY SYNC: Atmospheric layers must vanish when the Impostor takes over.
+	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
 	
 	# 2. PLANETARY RINGS (50% chance per planet - flat, layered Saturn-style disc)
@@ -315,6 +328,8 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		r_inst.material_override.render_priority = 1 # Deep space sort
 		r_inst.rotation_degrees = Vector3(rng.randf_range(10.0, 35.0), rng.randf_range(0, 360), 0.0)
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
+		# ACE VISIBILITY SYNC
+		r_inst.visibility_range_end = PROXIMITY_CUTOFF; r_inst.visibility_range_end_margin = 100000.0; r_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		add_child(r_inst)
 
 	# 3. POLAR AURORAS: Shimmering ribbons of light at the high latitudes
@@ -366,6 +381,8 @@ func _spawn_polar_auroras(base_color: Color) -> void:
 	var a_col = base_color.lightened(0.2)
 	a_col.s += 0.2; a_col.v += 0.3
 	a_inst.material_override.set_shader_parameter("aura_col", a_col)
+	# ACE VISIBILITY SYNC
+	a_inst.visibility_range_end = PROXIMITY_CUTOFF; a_inst.visibility_range_end_margin = 100000.0; a_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(a_inst)
 
 
@@ -628,14 +645,31 @@ func _process(_delta: float) -> void:
 		return
 	
 	# CELESTIAL DISTANCE LOD: Hibernation Mode
-	# We switch off the entire QuadTree generator if the planet is too far.
 	var dist_to_player = player.global_position.distance_to(global_position)
+	
+	# FRUSTUM HIBERNATION: Disabled if inside the planetary sphere of influence
+	var cam = get_viewport().get_camera_3d()
+	var should_hibernate = false
+	var safety_dist = planet_radius * 3.5
+	if cam and dist_to_player > safety_dist: 
+		var to_planet = (global_position - cam.global_position).normalized()
+		var cam_fwd = -cam.global_transform.basis.z
+		var dot = cam_fwd.dot(to_planet)
+		
+		# ACE HYSTERESIS: Wider margins to ensure horizons don't pop
+		if faces_hidden: should_hibernate = dot < -0.3 # Show earlier
+		else: should_hibernate = dot < -0.8 # Hide later
+	
+	var should_hide_faces = should_hibernate
+	if faces_hidden != should_hide_faces:
+		for face in faces: face.visible = !should_hide_faces
+		_ensure_impostor_active(should_hide_faces)
+		faces_hidden = should_hide_faces
+	
+	# MEMORY RECLAMATION (Reaper): Push nodes to Death Row only when strictly out of range.
 	if dist_to_player > PROXIMITY_CUTOFF:
 		if not faces_hidden:
-			# ACE RECLAMATION: Fully purge high-res memory when leaving orbit.
-			# This prevents the 3 FPS 'Transit Stutter' by clearing all QuadTree nodes.
 			for face in faces: 
-				face.visible = false
 				if face.root_node: face.root_node.dispose()
 			_ensure_impostor_active(true)
 			faces_hidden = true
@@ -649,17 +683,49 @@ func _process(_delta: float) -> void:
 				if face.root_node: face.root_node.ensure_chunk()
 			_ensure_impostor_active(false)
 			faces_hidden = false
+			# ACE SEAMLESS HANDOVER: Trigger immediate regeneration to minimize pop
+			for face in faces: if face.root_node: face.root_node.ensure_chunk()
 	
 	# ACE PERFORMANCE HARDENING: Frame-Slice the QuadTree update
 	# Instead of checking all 6 faces every frame, we cycle through them.
-	# This ensures zero micro-stutter during high-speed low-altitude flight.
 	_lod_face_idx = (_lod_face_idx + 1) % faces.size()
-	faces[_lod_face_idx].update_lod(player.global_position)
+	
+	var face_to_update = faces[_lod_face_idx]
+	if face_to_update.visible and dist_to_player < planet_radius * 2.5:
+		face_to_update.update_lod(player.global_position)
 	
 	# High-performance splitting: one mesh commit per frame
 	for i in range(min(split_queue.size(), MAX_SPLITS_PER_FRAME)):
 		var node = split_queue.pop_front()
 		if node: node.execute_split()
+
+	# ACE RECLAMATION: Process Zombie Pool
+	var z_batch = min(zombie_pool.size(), 10) # ACE: Limit zombie checks per frame
+	for i in range(z_batch):
+		var z = zombie_pool.pop_front()
+		if z.is_busy():
+			zombie_pool.append(z)
+		else:
+			chunk_pool.append(z)
+	
+	# ACE FINALIZATION: Aggressive scaling to prevent 'Black Holes' during high-speed flight
+	# If the queue fills up, we commit more meshes per frame to stay ahead of the ship.
+	MAX_FINALIZE_PER_FRAME = 1 + (finalize_queue.size() / 3)
+	for i in range(min(finalize_queue.size(), MAX_FINALIZE_PER_FRAME)):
+		var chunk = finalize_queue.pop_front()
+		if is_instance_valid(chunk):
+			chunk._finalize_generation_on_main()
+			
+	# ACE REAPER: Asynchronous destruction of urban nodes
+	for i in range(min(death_row.size(), MAX_DEATHS_PER_FRAME)):
+		var d = death_row.pop_back()
+		if is_instance_valid(d): d.free()
+	
+	# ACE PHYSICS: Process Collision Queue
+	for i in range(min(collision_queue.size(), MAX_COLLISIONS_PER_FRAME)):
+		var c = collision_queue.pop_front()
+		if is_instance_valid(c):
+			c.create_trimesh_collision()
 
 func get_terrain_elevation(sn: Vector3) -> float:
 	if not noise: return 0.0
@@ -712,14 +778,9 @@ func get_terrain_elevation(sn: Vector3) -> float:
 	var island_elev = S_LVL + 850.0 + (local_geo * 0.1) 
 	var elev = lerp(base_elev, island_elev, major_mask)
 	
-	# MEGA-CITY: The entire landmass is an urban fortress
-	if major_mask > 0.05:
-		var city_plateau = smoothstep(0.1, 0.45, major_mask)
-		var base_city_h = S_LVL + 850.0
-		elev = lerp(elev, base_city_h, city_plateau)
-		
-		var is_wall = smoothstep(0.05, 0.15, major_mask) - smoothstep(0.15, 0.25, major_mask)
-		elev += is_wall * 600.0 
+	# MEGA-CITY: Force absolute flatness for metropolitan foundations
+	if major_mask > 0.15: # ACE SYNC: Binary Plateau Trigger
+		elev = S_LVL + 850.0
 	
 	return elev
 
@@ -732,6 +793,8 @@ func _ensure_impostor_active(active: bool) -> void:
 			# Pass the ACTUAL terrain palette colors (not sky!) so impostor matches what you see up close
 			impostor.set("planet_color", pal_grass_col)
 			impostor.set("planet_color_b", pal_mount_col)
+			impostor.set("water_col", pal_water_base) # ACE ATMOSPHERIC SYNC
+			impostor.set("horizon_col", sky_horizon_color) # ACE: Atmospheric Sync
 			impostor.set("continent_pole", continent_pole) # ACE SYNC
 			add_child(impostor); impostor.global_position = global_position
 		impostor.visible = true
@@ -835,6 +898,8 @@ class QuadTreeNode:
 			if chunk.get_parent() != face:
 				chunk.reparent(face)
 			
+		chunk.face = face
+		chunk.planet = face.planet
 		chunk.noise = face.planet.noise
 		chunk.radius = face.planet.planet_radius
 		chunk.terrain_strength = face.planet.terrain_strength
@@ -869,10 +934,14 @@ class QuadTreeNode:
 		if chunk: 
 			# Push back to pool instead of destroying memory
 			chunk.sleep_and_reset()
-			face.planet.chunk_pool.append(chunk)
+			if chunk.is_busy():
+				face.planet.zombie_pool.append(chunk)
+			else:
+				face.planet.chunk_pool.append(chunk)
 			chunk = null
 			
 	func dispose() -> void:
+		if lod == 0: return # ACE: Base chunks never die
 		remove_chunk()
 		for child in children: child.dispose()
 		children.clear()

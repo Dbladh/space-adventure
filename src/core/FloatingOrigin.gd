@@ -4,7 +4,7 @@ extends Node
 # FloatingOrigin.gd (10km M1-Harden Edition)
 # Managed by THE ARCHITECT.
 
-@export var threshold: float = 10000.0 # 10km M1 Hardened Ceiling
+@export var threshold: float = 100000.0 # 100km M1 Hardened Ceiling
 var player_node: Node3D
 var world_root: Node3D
 

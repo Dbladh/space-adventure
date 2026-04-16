@@ -7,9 +7,11 @@ extends Node3D
 var diag_label: Label
 var retro_node: CanvasLayer = null
 var hud_visible: bool = true
+var diag_visible: bool = false
 var hud_layer: CanvasLayer
 var _player_ref: Node = null   # Cached — avoids get_nodes_in_group() every frame
 var _hud_tick: int = 0         # HUD update throttle counter
+var map_node: Control = null
 
 # ATMOSPHERIC REFERENCES
 var main_env: WorldEnvironment
@@ -17,6 +19,7 @@ var main_sun: DirectionalLight3D
 var main_sky_mat: ShaderMaterial
 var planet_ref: Node3D
 var world_root: Node3D  # O(1) World Shifting Root
+var benchmark_manager: Node = null
 var solar_time: float = 0.0
 
 func _ready() -> void:
@@ -25,6 +28,14 @@ func _ready() -> void:
 	# CELESTIAL HEADROOM: Increase engine ceiling to 60fps to provide the budget
 	# needed for 30fps quantization without stuttering.
 	Engine.max_fps = 60
+	
+	# ECONOMY GENESIS: The Architect's Vault
+	var econ_script = load("res://src/core/EconomyManager.gd")
+	if econ_script:
+		var econ = econ_script.new()
+		econ.name = "EconomyManager"
+		add_child(econ)
+		Engine.set_meta("EconomyManager", econ)
 	
 	# 1. ATOMIC PURGE
 	_purge_ghost_entities()
@@ -55,6 +66,13 @@ func _ready() -> void:
 	
 	# 8. TITAN DEVELOPER TOOLS (The Slider Sync)
 	_setup_debug_developer_suite()
+	
+	# 9. SHADOWGLASS SIGNATURE: Default to Retro Mode
+	_toggle_retro_vfx()
+	
+	# 10. BENCHMARK UTILITY
+	benchmark_manager = load("res://src/tests/BenchmarkManager.gd").new()
+	add_child(benchmark_manager)
 
 func _purge_ghost_entities() -> void:
 	for child in get_children():
@@ -114,8 +132,12 @@ func _setup_stellar_horizon() -> void:
 	env.environment = sky_env
 	add_child(env); move_child(env, 0); main_env = env
 	
-	get_viewport().scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
-	get_viewport().scaling_3d_scale = 0.75 
+	var vp = get_viewport()
+	# ACE EXTREME RETRO SCALING: 25% internal resolution (Super-Chunky)
+	# This drastically reduces fragment shader pressure while leaning into the aesthetic.
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = 0.25
+	vp.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
 
 func _setup_hardened_solar_genesis() -> void:
 	var sun = DirectionalLight3D.new()
@@ -126,20 +148,18 @@ func _setup_hardened_solar_genesis() -> void:
 	sun.light_energy = 0.90
 	sun.shadow_enabled = true
 	
-	# ACE SHADOW LOD: 4-Split CSM (Cascaded Shadow Maps) for proximity fidelity
-	# High quality near player, low fidelity for distant horizon silhouettes
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
-	sun.directional_shadow_blend_splits = true
-	sun.directional_shadow_split_1 = 0.05 # Near focus (High Detail)
-	sun.directional_shadow_split_2 = 0.15
-	sun.directional_shadow_split_3 = 0.45 # Far focus
+	# ACE RETRO SHADOWS: 2-Split CSM for pure performance
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.directional_shadow_blend_splits = false # Sharp splits for that retro feel
+	sun.directional_shadow_split_1 = 0.15
+	sun.directional_shadow_split_2 = 0.45
 	
-	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_MEDIUM)
-	sun.set("shadow_blur", 3.5) # Noticeably softer shadow edges on the terrain cliffs
-	sun.shadow_bias = 0.12
-	sun.shadow_normal_bias = 4.0 
+	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_LOW)
+	sun.set("shadow_blur", 4.5) # Crunchier, distinct retro shadow edges
+	sun.shadow_bias = 0.15
+	sun.shadow_normal_bias = 5.0 
 	
-	sun.directional_shadow_max_distance = 8000.0 
+	sun.directional_shadow_max_distance = 3500.0 
 	sun.add_to_group("World")
 	add_child(sun)
 	main_sun = sun
@@ -162,7 +182,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(planet)
 		# Varn: 1.5Mkm forward (–Z) — the home world directly ahead at game start
 		planet.global_position = Vector3(0, 0, -1500000.0)
-		planet.add_to_group("World")
+		planet.add_to_group("Planet")
 		planet_ref = planet
 
 		# PLANET 2 — Tethys (seed 2002)
@@ -173,6 +193,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(moon)
 		moon.global_position = Vector3(2500000.0, 400000.0, -1800000.0)
 		moon.add_to_group("World")
+		moon.add_to_group("Planet")
 
 		# PLANET 3 — Keth (seed 3003)
 		var planet3 = Node3D.new(); planet3.set_script(planet_gen_script)
@@ -182,6 +203,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(planet3)
 		planet3.global_position = Vector3(-3500000.0, -800000.0, 2800000.0)
 		planet3.add_to_group("World")
+		planet3.add_to_group("Planet")
 
 		# PLANET 4 — Ido (seed 4004)
 		var planet4 = Node3D.new(); planet4.set_script(planet_gen_script)
@@ -191,6 +213,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(planet4)
 		planet4.global_position = Vector3(1800000.0, 300000.0, 450000.0)
 		planet4.add_to_group("World")
+		planet4.add_to_group("Planet")
 
 		# --- OUTER SYSTEM (Compressed) ---
 
@@ -202,6 +225,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(planet5)
 		planet5.global_position = Vector3(-5000000.0, 1500000.0, -6800000.0)
 		planet5.add_to_group("World")
+		planet5.add_to_group("Planet")
 
 		# PLANET 6 — Xylos (seed 6006)
 		var planet6 = Node3D.new(); planet6.set_script(planet_gen_script)
@@ -211,6 +235,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(planet6)
 		planet6.global_position = Vector3(8500000.0, -2200000.0, 5200000.0)
 		planet6.add_to_group("World")
+		planet6.add_to_group("Planet")
 
 		# PLANET 7 — Beryll (seed 7007)
 		var planet7 = Node3D.new(); planet7.set_script(planet_gen_script)
@@ -220,6 +245,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(planet7)
 		planet7.global_position = Vector3(-12000000.0, 3500000.0, 11500000.0)
 		planet7.add_to_group("World")
+		planet7.add_to_group("Planet")
 
 		# PLANET 8 — Null-9 (seed 8008)
 		var planet8 = Node3D.new(); planet8.set_script(planet_gen_script)
@@ -229,6 +255,7 @@ func _setup_titan_planetary() -> void:
 		world_root.add_child(planet8)
 		planet8.global_position = Vector3(4000000.0, -8500000.0, -19500000.0)
 		planet8.add_to_group("World")
+		planet8.add_to_group("Planet")
 
 func _setup_asteroid_belt() -> void:
 	var belt_script = load("res://src/world/AsteroidBelt.gd")
@@ -245,6 +272,34 @@ func _setup_asteroid_belt() -> void:
 		world_root.add_child(belt)
 		belt.global_position = planet_ref.global_position
 		belt.add_to_group("World")
+		
+	# DEEP SPACE SALVAGE: Rare minerals floating in the void
+	_setup_deep_space_minerals()
+
+func _setup_deep_space_minerals() -> void:
+	var m_script = load("res://src/world/MineableResource.gd")
+	if not m_script: return
+	
+	var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
+	var rng = RandomNumberGenerator.new(); rng.seed = 77777 # The Salvage Seed
+	
+	# Space resources are RARE compared to planet surfaces
+	for i in range(250):
+		var mineral = StaticBody3D.new(); mineral.set_script(m_script)
+		var type_idx = 0
+		var r = rng.randf()
+		if r > 0.98: type_idx = 4 # Diamond (2%)
+		elif r > 0.90: type_idx = 3 # Platinum (8%)
+		elif r > 0.75: type_idx = 2 # Gold (15%)
+		elif r > 0.5: type_idx = 1 # Silver (25%)
+		else: type_idx = 0 # Copper (50%)
+		
+		mineral.set("resource_type", types[type_idx])
+		world_root.add_child(mineral)
+		
+		# Scatter in the inner system
+		var pos = Vector3(rng.randf_range(-1,1), rng.randf_range(-0.3, 0.3), rng.randf_range(-1,1)).normalized()
+		mineral.global_position = pos * rng.randf_range(2000000.0, 15000000.0)
 
 func _setup_hardened_diag_hud() -> void:
 	hud_layer = CanvasLayer.new()
@@ -254,6 +309,32 @@ func _setup_hardened_diag_hud() -> void:
 	diag_label.add_theme_font_size_override("font_size", 20)
 	diag_label.add_theme_color_override("font_color", Color.CHARTREUSE)
 	hud_layer.add_child(diag_label)
+	diag_label.visible = diag_visible
+	
+	# ACE ECONOMY: Real-time Credit Display
+	var creds = Label.new(); creds.name = "CreditLabel"
+	creds.text = "$0"
+	creds.add_theme_font_size_override("font_size", 72) # ACE: 2x Scale Upgrade
+	creds.add_theme_color_override("font_color", Color.GOLD)
+	hud_layer.add_child(creds)
+	# Position directly below the Health Bar (Top Center)
+	creds.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 0)
+	creds.position.y = 80.0 # Just below the health bar (40 + 24 + gap)
+	creds.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	
+	if Engine.has_meta("EconomyManager"):
+		var econ = Engine.get_meta("EconomyManager")
+		econ.currency_changed.connect(func(n): creds.text = "$" + str(n))
+	
+	# ACE NAVIGATION: Inject the tactical galaxy map into the HUD
+	var map_script = load("res://src/ui/GalaxyMapUI.gd")
+	if map_script:
+		map_node = Control.new()
+		map_node.set_script(map_script)
+		map_node.custom_minimum_size = Vector2(480, 480) # 2x Upgrade
+		hud_layer.add_child(map_node)
+		_reset_map_to_corner()
+	
 	add_child(hud_layer)
 
 func _spawn_ace_pilot(pos: Vector3) -> void:
@@ -312,15 +393,22 @@ func _process(_delta: float) -> void:
 			if dist < 80.0: act += " | [E] TO EMBARK"
 			else: act += " | SHIP OUT OF RANGE"
 			
+	var q_f = 0; var q_d = 0; var q_z = 0
+	var planets = get_tree().get_nodes_in_group("Planet")
+	for pl in planets:
+		if "finalize_queue" in pl: q_f += pl.finalize_queue.size()
+		if "death_row" in pl: q_d += pl.death_row.size()
+		if "zombie_pool" in pl: q_z += pl.zombie_pool.size()
+
 	diag_label.text = (
 		"STARHAWK INTERCEPTOR | TITAN TELEMETRY (F3)\n" +
 		"-----------------------------------------\n" +
 		"ALTITUDE: %dkm | SPEED: %dkm/s\n" +
-		"FPS: %d (%.2fms)\n" +
+		"FPS: %d (%.2fms) | QUEUES: F:%d D:%d Z:%d\n" +
 		"GPU DRAWS: %d | OBJS: %d\n" +
 		"VRAM: %dMB | RAM: %dMB\n" +
 		"VISOR: [V] | MOUSE: [ESC]%s"
-	) % [alt, floor(speed/1000.0), fps, m_time, draws, objs, vram, ram, act]
+	) % [alt, floor(speed/1000.0), fps, m_time, q_f, q_d, q_z, draws, objs, vram, ram, act]
 	
 	# SOLAR ORBIT: FROZEN FOR CINEMATIC STABILITY
 	# This creates a static, iconic high-contrast lighting environment.
@@ -379,17 +467,47 @@ func _update_shadow_distance(p: Node) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
 		if event.keycode == KEY_V: _toggle_retro_vfx()
-		if event.keycode == KEY_F3 or event.keycode == KEY_H: _toggle_hud()
+		if event.keycode == KEY_F3: _toggle_diag()
+		if event.keycode == KEY_H: _toggle_hud()
+		if event.keycode == KEY_ENTER: _toggle_map_fullscreen()
 		if event.keycode == KEY_F4: _toggle_debug_suite()
+		if event.keycode == KEY_R: get_tree().reload_current_scene()
+		if event.keycode == KEY_B: 
+			if benchmark_manager: benchmark_manager.start_automated_test(_player_ref)
 
 func _toggle_hud() -> void:
 	hud_visible = !hud_visible
 	hud_layer.visible = hud_visible
 
+func _toggle_diag() -> void:
+	diag_visible = !diag_visible
+	if diag_label: diag_label.visible = diag_visible
+
+func _toggle_map_fullscreen() -> void:
+	if not map_node: return
+	map_node.is_fullscreen = !map_node.is_fullscreen
+	if map_node.is_fullscreen:
+		map_node.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE, 60)
+		map_node.custom_minimum_size = Vector2(800, 800)
+		map_node.anchor_left = 0.5; map_node.anchor_top = 0.5; map_node.anchor_right = 0.5; map_node.anchor_bottom = 0.5
+		map_node.offset_left = -400; map_node.offset_top = -400
+		map_node.offset_right = 400; map_node.offset_bottom = 400
+	else:
+		map_node.custom_minimum_size = Vector2(480, 480)
+		_reset_map_to_corner()
+
+func _reset_map_to_corner() -> void:
+	if not map_node: return
+	map_node.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	map_node.offset_left = -510 # (480 + 30)
+	map_node.offset_top = -510
+	map_node.offset_right = -30
+	map_node.offset_bottom = -30
+
 func _toggle_retro_vfx() -> void:
 	if retro_node: retro_node.queue_free(); retro_node = null
 	else:
-		retro_node = CanvasLayer.new(); retro_node.layer = -1
+		retro_node = CanvasLayer.new(); retro_node.layer = 110
 		var rect = ColorRect.new(); rect.set_anchors_preset(Control.PRESET_FULL_RECT)
 		rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var smat = ShaderMaterial.new(); smat.shader = load("res://src/world/retro_vfx.gdshader")

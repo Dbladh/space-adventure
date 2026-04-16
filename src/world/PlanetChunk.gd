@@ -387,7 +387,11 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			var c_mask_val = smoothstep(-0.1, 0.1, c_n_val)
 			var major_mask = smoothstep(0.4, 0.6, n_nodes * global_mask) * c_mask_val
 			
-			if major_mask > 0.15: # CORE-ACTIVATION: Ensure buildings only spawn on solid bedrock
+			# ACE STRUCTURAL HIERARCHY: Separation of Urban and Wilderness systems
+			if major_mask > 0.4:
+				# -----------------------------------
+				# CITY ZONE: Infrastructure & Architecture
+				# -----------------------------------
 				# ACE ORGANIC ROAD WARPING: Streets wind naturally over the topography
 				var w_n = sin(cp.x * radius * 0.003 + cp.y * radius * 0.002) * 0.15 + cos(cp.z * radius * 0.0025) * 0.15
 				var w_uv = (cp * 0.004 * radius) + Vector3(w_n, w_n, w_n) # Match shader uv
@@ -415,35 +419,38 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 								var b_xform = _get_object_xform(cp * (radius + h) + p_jitter, cp, float(h_v % 100)/100.0, b_scale)
 								c_pts.append(b_xform.rotated_local(Vector3.UP, float(h_v % 360)))
 			else:
-				# NATURE ZONE: Follow standard noise rules
-				if nature_ok and major_mask < 0.1: # ACE EXCLUSION: No nature inside city limits
+				# -----------------------------------
+				# WILDERNESS ZONE: Minerals & Nature
+				# -----------------------------------
+				# 1. MINERAL PRIORITY: Colossal Rarity (1/10th of previous)
+				if (h_v % 10000) < 3:
+					var h = get_terrain_elevation(cp)
+					if h > -100.0:
+						var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
+						var r_pick = h_v % 100
+						var type = "Copper"
+						if r_pick > 99: type = "Diamond"
+						elif r_pick > 90: type = "Platinum"
+						elif r_pick > 75: type = "Gold"
+						elif r_pick > 45: type = "Silver"
+						
+						# ACE: Small offset (5.0) since octahedron is now tip-anchored
+						var xf = _get_object_xform(cp * (radius + h + 5.0), cp, detail_n, 1.0)
+						m_pts.append([xf, type])
+				else:
+					# 2. NATURE FALLBACK: Standard Biome Scattering
 					if cluster_n > 0.22:
 						var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
 						if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult):
-							var h = get_terrain_elevation(cp)
-							if h > -150.0 and (h + sin(cp.x * 12000.0)*300.0) < 1450.0:
-								var xform = _get_object_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
+							var h_t = get_terrain_elevation(cp)
+							if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
+								var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
 								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
-					elif cluster_n < -0.20: # Expanded rock biome threshold from -0.28
-						if (h_v % 1000) < int(200 * DebugSettings.rock_mult): # 3.3x Density Upgrade (was 60)
-							var h = get_terrain_elevation(cp)
-							if h > -150.0:
-								r_pts.append(_get_rock_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
-						
-						# ACE MINERAL GENESIS: Higher density for better looter-shooter flow
-						elif (h_v % 10000) < 45:
-							var h = get_terrain_elevation(cp)
-							if h > -100.0:
-								var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
-								var r_pick = h_v % 100
-								var type = "Copper"
-								if r_pick > 99: type = "Diamond"
-								elif r_pick > 90: type = "Platinum"
-								elif r_pick > 75: type = "Gold"
-								elif r_pick > 45: type = "Silver"
-								
-								var xf = _get_object_xform(cp * (radius + h), cp, detail_n, 1.0)
-								m_pts.append([xf, type])
+					elif cluster_n < -0.20:
+						if (h_v % 1000) < int(200 * DebugSettings.rock_mult):
+							var h_r = get_terrain_elevation(cp)
+							if h_r > -150.0:
+								r_pts.append(_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
 
 	
 	if scale_factor <= 0.00055:
@@ -1728,7 +1735,8 @@ func _spawn_minerals(data: Array) -> void:
 		res.set_script(m_script)
 		res.set("resource_type", type)
 		add_child(res)
-		res.global_transform = xf
+		# ACE: Use local transform relative to the chunk node
+		res.transform = xf
 
 static var c_r: ArrayMesh
 static var c_t_l: ArrayMesh

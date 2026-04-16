@@ -5,19 +5,28 @@ extends StaticBody3D
 # A deterministic, low-poly mineral deposit that responds to projectile impacts.
 
 @export var resource_type: String = "Copper"
-var health: float = 1.0 # 1 hit for Copper/Silver, more for rare types
+var health: float = 3.0 # 3-12 hits depending on type
+var max_health: float = 3.0 # ACE: Healthbar scaling
+var flash_timer: float = 0.0 # ACE: Damage feedback persistence
+var health_bar: ProgressBar = null 
+var hud_sprite: Sprite3D = null # ACE: Distance-culled HUD element
 
 func _ready() -> void:
-	# ACE SCALING: Adjust health based on rarity
+	add_to_group("Mineable") # ACE: Absolute identification for projectiles
+	# ACE SCALING: Balanced Mining Integrity – Just a few shots
 	match resource_type:
-		"Platinum": health = 3.0
-		"Diamond": health = 5.0
-		_: health = 1.0
+		"Silver": health = 5.0
+		"Gold": health = 8.0
+		"Platinum": health = 10.0
+		"Diamond": health = 12.0
+		_: health = 3.0
+	max_health = health
 	
 	_generate_low_poly_node()
+	_setup_tactical_hud()
 
 func _generate_low_poly_node() -> void:
-	# ACE GEOMETRY: Procedural jagged crystal using SurfaceTool
+	# ACE GEOMETRY: Procedural 'Rupee' Octahedron (Anchored at Tip)
 	var st = SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	
@@ -25,81 +34,182 @@ func _generate_low_poly_node() -> void:
 	rng.seed = hash(str(global_position) + resource_type)
 	
 	var col = _get_resource_color()
-	var size = rng.randf_range(3.5, 7.5) # ACE: 2x Size Upgrade for visibility
-	if resource_type == "Diamond": size *= 0.8
+	var size = rng.randf_range(80.0, 160.0) # (80m - 160m)
+	if resource_type == "Diamond": size *= 1.4
 	
-	# Create a jagged dodecahedron-ish shape
-	var verts: Array[Vector3] = []
-	for i in range(8):
-		var v = Vector3(rng.randf_range(-1,1), rng.randf_range(-1,1), rng.randf_range(-1,1)).normalized() * size
-		verts.append(v)
+	# ACE: Octahedron anchored so bottom tip is at origin (0,0,0)
+	var v_top = Vector3(0, size * 5.0, 0)
+	var v_bot = Vector3(0, 0, 0)
+	var v_mid = [
+		Vector3(size, size * 2.5, 0),
+		Vector3(0, size * 2.5, size),
+		Vector3(-size, size * 2.5, 0),
+		Vector3(0, size * 2.5, -size)
+	]
+	
+	# Build 8 triangular faces
+	for i in range(4):
+		var m1 = v_mid[i]
+		var m2 = v_mid[(i + 1) % 4]
 		
-	# Simple convex hull-ish triangulation
-	for i in range(verts.size()):
-		for j in range(i + 1, verts.size()):
-			for k in range(j + 1, verts.size()):
-				# ACE: Every face must be flat-shaded per project rules
-				var a = verts[i]; var b = verts[j]; var c = verts[k]
-				var n = (b-a).cross(c-a).normalized()
-				st.set_color(col)
-				st.set_normal(n); st.add_vertex(a)
-				st.set_normal(n); st.add_vertex(b)
-				st.set_normal(n); st.add_vertex(c)
+		# Top Pyramid
+		var n_up = (m1 - v_top).cross(m2 - v_top).normalized()
+		st.set_normal(n_up); st.set_color(col); st.add_vertex(v_top)
+		st.set_normal(n_up); st.set_color(col); st.add_vertex(m1)
+		st.set_normal(n_up); st.set_color(col); st.add_vertex(m2)
+		
+		# Bottom Pyramid
+		var n_down = (m2 - v_bot).cross(m1 - v_bot).normalized()
+		st.set_normal(n_down); st.set_color(col); st.add_vertex(v_bot)
+		st.set_normal(n_down); st.set_color(col); st.add_vertex(m2)
+		st.set_normal(n_down); st.set_color(col); st.add_vertex(m1)
 
 	var mesh_inst = MeshInstance3D.new()
 	mesh_inst.mesh = st.commit()
 	
-	# ACE EMISSION: High-intensity neon glow for the looter-shooter pilot
+	# ACE MATERIAL: 'Shiny Coin' Metallic Pass
 	var mat = StandardMaterial3D.new()
 	mat.albedo_color = col
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX
-	if resource_type in ["Gold", "Platinum", "Diamond"]:
-		mat.emission_enabled = true
-		mat.emission = col * 4.5 # Pumping energy to cut through darkness
-		
-		# ACE: Add a physical light source for 'Night Discovery'
-		var light = OmniLight3D.new()
-		light.light_color = col
-		light.light_energy = 2.5
-		light.omni_range = size * 4.0
-		add_child(light)
+	mat.metallic = 1.0 # ACE: Pure metallic reflection
+	mat.roughness = 0.02 # ACE: Mirror-like finish for sky reflection
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	
+	mat.emission_enabled = true
+	mat.emission = col * 1.5
+	mat.emission_energy_multiplier = 0.6 # ACE: Lower base for higher glint contrast
+	
+	# ACE: Add a physical light source for 'Discovery'
+	var light = OmniLight3D.new()
+	light.light_color = col
+	light.light_energy = 0.7
+	light.omni_range = size * 3.5
+	add_child(light)
 		
 	mesh_inst.material_override = mat
 	add_child(mesh_inst)
+	set_process(true)
 	
-	# ADD COLLIDER
+	# ADD TALL COLLIDER (Full height of the spire)
 	var shape = CollisionShape3D.new()
-	var box = BoxShape3D.new(); box.size = Vector3(size, size, size) * 2.0
-	shape.shape = box
+	var cyl = CylinderShape3D.new()
+	cyl.height = size * 5.0 # ACE: Match true octahedron height
+	cyl.radius = size * 1.1 # ACE: Slight buffer for projectile detection
+	shape.shape = cyl
+	# ACE: Offset the collider so the bottom of the cylinder is at the tip (Y=2.5*size)
+	shape.position = Vector3(0, size * 2.5, 0)
 	add_child(shape)
 
 func _get_resource_color() -> Color:
 	match resource_type:
-		"Copper": return Color(0.72, 0.45, 0.2)
-		"Silver": return Color(0.75, 0.75, 0.75)
-		"Gold": return Color(1.0, 0.84, 0.0)
-		"Platinum": return Color(0.9, 0.9, 1.0)
-		"Diamond": return Color(0.4, 0.8, 1.0)
+		"Copper": return Color(0.48, 0.18, 0.08) # ACE: Deep Burnished Copper (High Contrast)
+		"Silver": return Color(0.7, 0.7, 0.75)
+		"Gold": return Color(1.0, 0.6, 0.0) # Richer Gold
+		"Platinum": return Color(0.85, 0.85, 0.95)
+		"Diamond": return Color(0.3, 0.8, 1.0)
 	return Color.GRAY
 
 func take_damage(_amount: float) -> void:
+	# print("[MINERAL] Hit Detected! Health: ", health - 1.0)
+	flash_timer = 0.2 # ACE: Trigger a 0.2s high-energy flash
+	
 	health -= 1.0
-	# ACE FEEDBACK: Subtle vibration on hit?
+	if health_bar:
+		health_bar.value = health
+		# ACE: Fade in healthbar on first hit if needed (already visible)
+	
 	if health <= 0:
+		# print("[MINERAL] SHATTERED! Spawning Loot.")
 		_on_mined()
-	else:
-		# Flash or recoil
-		pass
+
+func _process(_delta: float) -> void:
+	# ACE: Extreme Glint for high-contrast 'Discovery'
+	var pulse = sin(Time.get_ticks_msec() * 0.0035)
+	var glint = pow(max(0.0, pulse), 50.0) # Even Sharper
+	
+	if has_node("MeshInstance3D") or get_child_count() > 0:
+		var mesh_inst = get_child(0)
+		if mesh_inst is MeshInstance3D and mesh_inst.material_override:
+			if flash_timer > 0:
+				# ACE: Damage flash takes priority over shimmmery glint
+				mesh_inst.material_override.emission_energy_multiplier = 45.0
+				flash_timer -= _delta
+			else:
+				# ACE: normal shimmery glint
+				mesh_inst.material_override.emission_energy_multiplier = 0.2 + (glint * 40.0)
+			
+	if hud_sprite:
+		var cam = get_viewport().get_camera_3d()
+		if cam:
+			var dist = global_position.distance_to(cam.global_position)
+			# ACE: Tactical HUD Alpha Fade (10km range)
+			var hud_range = 10000.0
+			hud_sprite.visible = dist < hud_range
+			hud_sprite.modulate.a = clamp(1.0 - (dist / hud_range), 0.0, 1.0)
+			
+	# Subtle local spin for tactical consistency
+	rotate_object_local(Vector3.UP, _delta * 0.4)
 
 func _on_mined() -> void:
-	# NOTIFY ECONOMY
-	if Engine.has_meta("EconomyManager"):
-		var econ = Engine.get_meta("EconomyManager")
-		econ.add_resource(resource_type, 1)
-	elif get_tree().root.has_node("EconomyManager"):
-		get_tree().root.get_node("EconomyManager").add_resource(resource_type, 1)
-		
-	# SPAWN FX (Explosion bits)
-	# ... implementation omitted for brevity ...
+	# ACE: Spawn satisfying 'Shatter' particles that fly toward player
+	var gem_script = load("res://src/world/LootGem.gd")
+	if not gem_script: return
 	
+	# Rare types yield more shards!
+	var count = 5
+	match resource_type:
+		"Silver": count = 8
+		"Gold": count = 15
+		"Platinum": count = 25
+		"Diamond": count = 40
+	
+	for i in range(count):
+		var gem = Node3D.new()
+		gem.set_script(gem_script)
+		gem.set("col", _get_resource_color().lerp(Color.WHITE, 0.4))
+		gem.set("value", 300 if count < 10 else 150)
+		get_tree().root.add_child(gem)
+		# Spawn at monolith center with small offset
+		gem.global_position = global_position + Vector3(0, 15.0, 0)
+		
 	queue_free()
+
+func _setup_tactical_hud() -> void:
+	# ACE: High-Fidelity Tactical Healthbar Assembly
+	var view = SubViewport.new()
+	view.size = Vector2(256, 30)
+	view.transparent_bg = true
+	add_child(view)
+	
+	health_bar = ProgressBar.new()
+	health_bar.size = Vector2(256, 30)
+	health_bar.max_value = max_health
+	health_bar.value = health
+	health_bar.show_percentage = false
+	
+	# ACE: Cyberpunk Styling
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0.1, 0.8, 0.1, 0.9) # Neon Green
+	sb.set_border_width_all(2)
+	sb.border_color = Color(1, 1, 1, 0.5)
+	health_bar.add_theme_stylebox_override("fill", sb)
+	
+	var bg = StyleBoxFlat.new()
+	bg.bg_color = Color(0, 0, 0, 0.5)
+	health_bar.add_theme_stylebox_override("background", bg)
+	
+	view.add_child(health_bar)
+	
+	# Create Sprite3D to hold the viewport UI
+	hud_sprite = Sprite3D.new()
+	hud_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	hud_sprite.fixed_size = false # ACE: Allow natural scaling with distance
+	hud_sprite.pixel_size = 0.05 # ACE: Balanced pixel scale (12.8m HUD)
+	hud_sprite.position = Vector3(0, 300.0, 0)
+	hud_sprite.visible = false
+	add_child(hud_sprite)
+	
+	# ACE: Link Viewport to Sprite (Requires a Frame Wait for Render initialization)
+	await get_tree().process_frame
+	hud_sprite.texture = view.get_texture()
+	
+	health_bar.value = health

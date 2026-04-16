@@ -66,6 +66,18 @@ func _on_body_entered(body: Node) -> void:
 	if body.is_in_group("Destructible"): destructible = true
 	if body.is_in_group("Player"): return # NEVER destroy the player
 	
+	# ACE PROJECTILE LOGIC: Priority on group 'Mineable' for absolute loot collection
+	var target = body
+	if not (target.is_in_group("Mineable") or target.has_method("take_damage")):
+		if target.get_parent() and (target.get_parent().is_in_group("Mineable") or target.get_parent().has_method("take_damage")):
+			target = target.get_parent()
+	
+	if target.is_in_group("Mineable") or target.has_method("take_damage"):
+		target.take_damage(1.0)
+		_trigger_explosion(body)
+		queue_free()
+		return
+		
 	if destructible:
 		_trigger_explosion(body)
 		body.queue_free()

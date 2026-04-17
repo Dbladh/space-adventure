@@ -6,7 +6,7 @@ extends Control
 signal throttle_changed(value: float)
 signal fire_pressed(pressed: bool)
 
-var throttle: float = 0.0
+var throttle: float = 0.5 # Start in the middle
 var l_touch_idx: int = -1
 var l_start_y: float = 0.0
 
@@ -30,7 +30,10 @@ func _draw() -> void:
 	# Active Handle
 	var handle_y = lerp(bar_bot, bar_top, throttle)
 	draw_circle(Vector2(bar_x, handle_y), 35.0, Color.SPRING_GREEN)
-	draw_string(ThemeDB.fallback_font, Vector2(bar_x + 60, handle_y + 10), "THRUST: %d%%" % (throttle * 100), HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
+	var speed_label = "NEUTRAL"
+	if throttle > 0.52: speed_label = "FWD: %d%%" % ((throttle - 0.5) * 200.0)
+	elif throttle < 0.48: speed_label = "REV: %d%%" % ((0.5 - throttle) * 200.0)
+	draw_string(ThemeDB.fallback_font, Vector2(bar_x + 60, handle_y + 10), speed_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 
 	# Firing Area Hint (Right Side)
 	draw_string(ThemeDB.fallback_font, Vector2(v_size.x - 250, v_size.y - 120), "TAP RIGHT TO FIRE", HORIZONTAL_ALIGNMENT_CENTER, -1, 20, Color(1,0,0,0.5))

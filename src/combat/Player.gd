@@ -18,14 +18,15 @@ var true_altitude: float = 300000.0
 var mouse_locked: bool = true
 
 # MOBILE SIMPLIFIED INPUT
-var mobile_throttle: float = 0.4 # ACE: Default to cruise speed at startup
+var mobile_throttle: float = 0.5 # ACE: 0.5 is Neutral (Stopped)
 var mobile_fire: bool = false
 var mobile_interact: bool = false
 
 # GYRO STEERING (Star Fox Style)
 @export var gyro_enabled: bool = true
 @export var gyro_sensitivity: float = 1.9 # ACE: Lowered for absolute gravity stability
-var _gyro_offset: Vector3 = Vector3.ZERO
+var _gyro_neutral_z: float = 0.0 # ACE Calibration
+var _is_calibrated: bool = false
 
 var in_ship: bool = true
 var parked_ship: Node3D = null
@@ -606,13 +607,17 @@ func _process_ace_flight(delta: float) -> void:
 	if gyro_enabled:
 		var grav = Input.get_gravity()
 		
+		# ACE AUTO-CALIBRATION: Capture first stable reading as Neutral
+		if not _is_calibrated and grav.length() > 1.0:
+			_gyro_neutral_z = grav.z
+			_is_calibrated = true
+		
 		# Pro-Calibrated Mapping for Star Fox Tilt
 		# Gravity.x handles Yaw (Side-to-side tilt)
-		# Gravity.z handles Pitch (Forward-back tilt)
-		# ACE DEADZONE: Ignore subtle tilts to prevent drift/spinning
-		const TILT_DEAD = 1.5
+		# Gravity.z handles Pitch (Relative to captured neutral)
+		const TILT_DEAD = 1.2
 		var tx = grav.x if abs(grav.x) > TILT_DEAD else 0.0
-		var tz = grav.z if abs(grav.z) > TILT_DEAD else 0.0
+		var tz = (grav.z - _gyro_neutral_z) if abs(grav.z - _gyro_neutral_z) > TILT_DEAD else 0.0
 		
 		var t_yaw = clamp(tx / 6.0, -1.0, 1.0) * gyro_sensitivity
 		var t_pitch = clamp(-tz / 6.0, -1.0, 1.0) * gyro_sensitivity
@@ -671,11 +676,16 @@ func _process_ace_flight(delta: float) -> void:
 		and Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER)
 	
 	var thrust_mapped = max(raw_thrust, 1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0)
-	# ACE: Absolute Throttle Override for Mobile
-	if mobile_throttle > 0.01: 
-		thrust_mapped = mobile_throttle
-	
 	var reverse_mapped = max(raw_reverse, 1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
+
+	# ACE: BI-DIRECTIONAL MOBILE THROTTLE
+	# 0.5 is Neutral. >0.5 is Forward. <0.5 is Reverse.
+	if mobile_throttle > 0.52:
+		thrust_mapped = (mobile_throttle - 0.5) * 2.0
+		# ACE: Hyperdrive Trigger at 98% slider
+		if mobile_throttle > 0.98: thrust_mapped = 5.0 
+	elif mobile_throttle < 0.48:
+		reverse_mapped = (0.5 - mobile_throttle) * 2.0
 
 	if target_planet:
 		var raw_dist = global_position.distance_to(target_planet.global_position)

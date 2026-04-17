@@ -357,7 +357,8 @@ func _setup_hardened_diag_hud() -> void:
 	hud_layer = CanvasLayer.new()
 	hud_layer.layer = 100 
 	diag_label = Label.new()
-	diag_label.position = Vector2(20, 20)
+	# ACE: Safe Area Padding for iPhone 15 (Dynamic Island fallback)
+	diag_label.position = Vector2(80, 40)
 	diag_label.add_theme_font_size_override("font_size", 20)
 	diag_label.add_theme_color_override("font_color", Color.CHARTREUSE)
 	hud_layer.add_child(diag_label)
@@ -371,7 +372,7 @@ func _setup_hardened_diag_hud() -> void:
 	hud_layer.add_child(creds)
 	# Position directly below the Health Bar (Top Center)
 	creds.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 0)
-	creds.position.y = 80.0 # Just below the health bar (40 + 24 + gap)
+	creds.position.y = 120.0 # Lowered to avoid Dynamic Island
 	creds.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	
 	if Engine.has_meta("EconomyManager"):

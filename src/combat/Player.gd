@@ -17,6 +17,16 @@ var target_planet: Node3D
 var true_altitude: float = 300000.0
 var mouse_locked: bool = true
 
+# MOBILE SIMPLIFIED INPUT
+var mobile_throttle: float = 0.4 # ACE: Default to cruise speed at startup
+var mobile_fire: bool = false
+var mobile_interact: bool = false
+
+# GYRO STEERING (Star Fox Style)
+@export var gyro_enabled: bool = true
+@export var gyro_sensitivity: float = 4.5
+var _gyro_offset: Vector3 = Vector3.ZERO
+
 var in_ship: bool = true
 var parked_ship: Node3D = null
 var coll_node: CollisionShape3D
@@ -202,7 +212,15 @@ func _setup_combat_hud() -> void:
 		arrow.custom_minimum_size = Vector2(40, 40)
 		arrow.set_script(load("res://src/combat/TargetLockUI.gd"))
 		hud.add_child(arrow); arrow.hide()
-		hud_threat_arrows.append(arrow)
+	# ACE: MOBILE CONTROLS OVERLAY
+	var mobile_ui_script = load("res://src/ui/MobileControlsUI.gd")
+	if mobile_ui_script:
+		var mc = Control.new()
+		mc.set_script(mobile_ui_script)
+		mc.mouse_filter = Control.MOUSE_FILTER_PASS
+		hud.add_child(mc)
+		mc.throttle_changed.connect(func(val): mobile_throttle = val)
+		mc.fire_pressed.connect(func(p): mobile_fire = p)
 
 
 
@@ -393,7 +411,7 @@ func _setup_player_hud() -> void:
 	health_bar_bg.color = Color(0.1, 0.1, 0.1, 0.8)
 	health_bar_bg.custom_minimum_size = Vector2(bar_w, bar_h)
 	health_bar_bg.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
-	health_bar_bg.position.y = 40.0; health_bar_bg.position.x -= bar_w/2.0
+	health_bar_bg.position.y = 80.0; health_bar_bg.position.x -= bar_w/2.0
 	hud.add_child(health_bar_bg)
 	
 	health_bar_fill = ColorRect.new()
@@ -458,7 +476,7 @@ func _physics_process(delta: float) -> void:
 	
 	# FIRE HEARTBEAT: Tick-down combat timers
 	fire_cooldown -= delta
-	var cur_fire = Input.is_key_pressed(KEY_F)
+	var cur_fire = Input.is_key_pressed(KEY_F) or mobile_fire
 	var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
 	
 	# PLANETARY PROXIMITY THROTTLE: Only scan for planets every 15 frames
@@ -584,11 +602,30 @@ func _process_ace_flight(delta: float) -> void:
 	var yaw = yaw_stick
 	var pitch = pitch_stick
 	
+	# MOTION STEERING: High-Authority Gravity Vector
+	if gyro_enabled:
+		var grav = Input.get_gravity()
+		
+		# Pro-Calibrated Mapping for Star Fox Tilt
+		# Gravity.x handles Yaw (Side-to-side tilt)
+		# Gravity.z handles Pitch (Forward-back tilt)
+		var t_yaw = grav.x / 9.8 * gyro_sensitivity * 0.5
+		var t_pitch = -grav.z / 9.8 * gyro_sensitivity * 0.5
+		
+		yaw -= t_yaw
+		pitch -= t_pitch
+		
+		# ACE: Force tilt as primary steering on ALL mobile devices
+		if abs(yaw_stick) < 0.1 and abs(pitch_stick) < 0.1:
+			yaw = -t_yaw * 3.0
+			pitch = -t_pitch * 3.0
+
 	if Input.is_key_pressed(KEY_A): yaw = 1.0
 	if Input.is_key_pressed(KEY_D): yaw = -1.0
 	if Input.is_key_pressed(KEY_W): pitch = 1.0 
 	if Input.is_key_pressed(KEY_S): pitch = -1.0
 	
+
 	var roll_input: float = 0.0
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER): roll_input += 1.0
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER): roll_input -= 1.0
@@ -629,6 +666,10 @@ func _process_ace_flight(delta: float) -> void:
 		and Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER)
 	
 	var thrust_mapped = max(raw_thrust, 1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0)
+	# ACE: Absolute Throttle Override for Mobile
+	if mobile_throttle > 0.01: 
+		thrust_mapped = mobile_throttle
+	
 	var reverse_mapped = max(raw_reverse, 1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
 
 	if target_planet:

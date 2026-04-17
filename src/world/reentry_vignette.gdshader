@@ -12,10 +12,15 @@ void fragment() {
 	float vignette = smoothstep(0.4, 0.9, dist);
 	
 	// 2. HEAT DISTORTION (Subtle UV wobble)
-	vec2 distortion = vec2(
+	// ACE: Distortion is expensive on Mobile (fetches screen texture)
+	// We only enable it on Desktop for maximum atmospheric performance.
+	vec2 distortion = vec2(0.0);
+	#if !defined(MOBILE)
+	distortion = vec2(
 		sin(TIME * 5.0 + SCREEN_UV.y * 10.0),
 		cos(TIME * 5.2 + SCREEN_UV.x * 12.0)
 	) * 0.005 * intensity;
+	#endif
 	vec4 distorted_color = texture(SCREEN_TEXTURE, SCREEN_UV + distortion);
 	
 	// 3. COLOR BLEND: From deep red to bright orange

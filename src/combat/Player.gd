@@ -222,6 +222,8 @@ func _setup_combat_hud() -> void:
 		hud.add_child(mc)
 		mc.throttle_changed.connect(func(val): mobile_throttle = val)
 		mc.fire_pressed.connect(func(p): mobile_fire = p)
+		mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
+		mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
 
 
@@ -654,8 +656,27 @@ func _process_ace_flight(delta: float) -> void:
 		rotate(basis.y.normalized(), yaw * rotation_speed * delta)
 	
 	# 3. ROLL: Full Manual Authority (ACE Drift Purge)
-	# Removed the NMS-style auto-leveler to allow for persistent banking
 	rotate(basis.z.normalized(), roll_input * roll_speed * delta)
+	
+	# ACE: PLANETARY HORIZON ALIGNMENT (Gravity Lock)
+	# As we enter the 26km barrier, the ship naturally seeks the horizon.
+	if is_in_atmo:
+		# Alignment strength peaks at surface, fades out as we reach orbit (26km)
+		var align_strength = clamp(1.0 - (true_altitude / 26000.0), 0.0, 1.0)
+		
+		# Only auto-level if the player isn't actively rolling or in a barrel roll
+		if abs(roll_input) < 0.1 and barrel_roll_t <= 0.0:
+			var current_up = global_transform.basis.y
+			var current_fwd = -global_transform.basis.z
+			
+			# Construct an 'Artificial Horizon' basis
+			var target_right = world_up.cross(current_fwd).normalized()
+			if target_right.length() < 0.1: target_right = global_transform.basis.x # Singularity handling
+			var target_fwd = target_right.cross(world_up).normalized()
+			var target_basis = Basis(target_right, world_up, -target_fwd)
+			
+			# ACE: Gentle restorative torque (2.5 factor for stable 'Star Fox' feel)
+			global_transform.basis = global_transform.basis.slerp(target_basis.orthonormalized(), 2.5 * align_strength * delta)
 	
 	# PHYSICS HARDENING: Orthonormalize basis to prevent floating-point stretching
 	# At massive scales, tiny precision errors in rotation accumulate into a 'Flipped Hull'.

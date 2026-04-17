@@ -1,5 +1,5 @@
-
 extends Node3D
+class_name Main
 
 # Main.gd (Performance Telemetry Edition)
 # Managed by THE ARCHITECT.
@@ -22,7 +22,9 @@ var planet_ref: Node3D
 var world_root: Node3D  # O(1) World Shifting Root
 var benchmark_manager: Node = null
 var _mineral_spawn_queue: Array = []
+static var instance: Node = null
 var player_node: Node3D
+var _pause_overlay: ColorRect = null
 var _is_loading: bool = true
 var _load_overlay: ColorRect = null
 var _load_label: Label = null
@@ -38,6 +40,8 @@ static func _get_tex(path: String) -> Texture2D:
 	return _get_res(path) as Texture2D
 
 func _ready() -> void:
+	instance = self
+	process_mode = PROCESS_MODE_ALWAYS
 	print("--- [DIAGNOSTIC] EXECUTING TITAN GENESIS BOOT SEQUENCE ---")
 	_setup_titan_splash()
 	
@@ -384,10 +388,24 @@ func _setup_hardened_diag_hud() -> void:
 	if map_script:
 		map_node = Control.new()
 		map_node.set_script(map_script)
-		map_node.custom_minimum_size = Vector2(480, 480) # 2x Upgrade
+		map_node.custom_minimum_size = Vector2(480, 480) 
 		hud_layer.add_child(map_node)
 		_reset_map_to_corner()
+		map_node.hide() # ACE: Hidden during normal play
 	
+	_pause_overlay = ColorRect.new()
+	_pause_overlay.color = Color(0,0,0,0.6)
+	_pause_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_pause_overlay.process_mode = PROCESS_MODE_ALWAYS
+	hud_layer.add_child(_pause_overlay)
+	_pause_overlay.hide()
+	
+	var pl = Label.new()
+	pl.text = "PAUSED - STRATEGIC OVERVIEW"
+	pl.add_theme_font_size_override("font_size", 48)
+	pl.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 60)
+	_pause_overlay.add_child(pl)
+
 	add_child(hud_layer)
 
 func _spawn_ace_pilot(pos: Vector3) -> void:
@@ -562,8 +580,37 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.keycode == KEY_ENTER: _toggle_map_fullscreen()
 		if event.keycode == KEY_F4: _toggle_debug_suite()
 		if event.keycode == KEY_R: get_tree().reload_current_scene()
+		if event.keycode == KEY_ESCAPE: toggle_pause()
 		if event.keycode == KEY_B: 
 			if benchmark_manager: benchmark_manager.start_automated_test(_player_ref)
+
+func toggle_pause() -> void:
+	if _is_loading: return
+	get_tree().paused = !get_tree().paused
+	
+	if get_tree().paused:
+		_pause_overlay.show()
+		_toggle_map_fullscreen_to(true)
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	else:
+		_pause_overlay.hide()
+		_toggle_map_fullscreen_to(false)
+		map_node.hide()
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _toggle_map_fullscreen_to(active: bool) -> void:
+	if not map_node: return
+	map_node.visible = active
+	map_node.is_fullscreen = active
+	if active:
+		map_node.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE, 60)
+		map_node.custom_minimum_size = Vector2(800, 800)
+		map_node.anchor_left = 0.5; map_node.anchor_top = 0.5; map_node.anchor_right = 0.5; map_node.anchor_bottom = 0.5
+		map_node.offset_left = -400; map_node.offset_top = -300
+		map_node.offset_right = 400; map_node.offset_bottom = 500
+	else:
+		map_node.custom_minimum_size = Vector2(480, 480)
+		_reset_map_to_corner()
 
 func _toggle_hud() -> void:
 	hud_visible = !hud_visible

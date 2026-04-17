@@ -12,6 +12,7 @@ var base_map_size: Vector2 = Vector2(480, 480)
 var max_range: float = 6250000.0 # ACE: 4x Total Zoom (6,250 km tactical range)
 
 func _ready() -> void:
+	process_mode = PROCESS_MODE_ALWAYS
 	custom_minimum_size = base_map_size
 	size = base_map_size
 	set_process(true)

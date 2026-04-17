@@ -70,15 +70,22 @@ func _spawn_deterministic_belt() -> void:
 	mmi_phys_med.multimesh = MultiMesh.new(); mmi_phys_med.multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	mmi_phys_med.multimesh.instance_count = phys_count; mmi_phys_med.multimesh.mesh = rock_mesh_med
 	mmi_phys_med.material_override = phys_mat
-	mmi_phys_med.visibility_range_begin = 12000.0; mmi_phys_med.visibility_range_end = 450000.0
+	# ACE: We disable engine culling/ranges for the hero pool to allow our manual LOD to take priority
+	mmi_phys_med.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mmi_phys_med)
 	
 	mmi_phys_high = MultiMeshInstance3D.new()
 	mmi_phys_high.multimesh = MultiMesh.new(); mmi_phys_high.multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	mmi_phys_high.multimesh.instance_count = phys_count; mmi_phys_high.multimesh.mesh = rock_mesh_high
 	mmi_phys_high.material_override = phys_mat
-	mmi_phys_high.visibility_range_end = 12000.0
 	add_child(mmi_phys_high)
+
+	# ACE: Set massive custom AABBs to prevent Godot from culling the MMIs when the 
+	# player is millions of kilometers from the belt origin.
+	var big_aabb = AABB(Vector3(-2e6, -5e4, -2e6), Vector3(4e6, 1e5, 4e6))
+	mmi_back.custom_aabb = big_aabb
+	mmi_phys_med.custom_aabb = big_aabb
+	mmi_phys_high.custom_aabb = big_aabb
 
 	# POPULATE SEEDS (Tier 1: Background Only)
 	for i in range(mmi_count):
@@ -124,37 +131,31 @@ func _process(delta: float) -> void:
 	if dist_to_planet > STELLAR_CUTOFF:
 		return
 	
-	# OPTIMIZATION 3: TIME-SLICED LOD (BATCH_SIZE Rocks per frame)
-	# Processing 1,500 distance checks per frame in GDScript is expensive.
-	# We now spread the workload across ~46 frames (Under 1ms total overhead).
-	for k in range(BATCH_SIZE):
+	# PERFORMANCE: Increase batch size for 500 rocks (0.3ms budget)
+	var final_batch = 125 
+	for k in range(final_batch):
 		proc_idx = (proc_idx + 1) % asteroids.size()
 		var a = asteroids[proc_idx]
-		if not is_instance_valid(a):
-			mmi_phys_med.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
-			mmi_phys_high.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
-			continue 
+		if not is_instance_valid(a): continue 
 		
 		var dist_sq = a.global_position.distance_squared_to(p_pos)
 		var coll = coll_nodes[proc_idx]
 		
-		if dist_sq > HIDE_LOD_DIST * HIDE_LOD_DIST:
-			if not coll.disabled:
-				mmi_phys_med.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
-				mmi_phys_high.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
-				coll.disabled = true
-			continue
-		
-		if coll.disabled:
-			# SHOW: Restore transforms for both LODs (Visibility Range handles swapping)
-			mmi_phys_med.multimesh.set_instance_transform(proc_idx, a.transform)
-			mmi_phys_high.multimesh.set_instance_transform(proc_idx, a.transform)
-			coll.disabled = false
-		
-		# PHYSICS LOD
-		var should_collide = dist_sq < PHYSICS_LOD_DIST * PHYSICS_LOD_DIST
-		if coll.disabled != !should_collide:
-			coll.disabled = !should_collide
+		# MANUAL LOD STATE MACHINE
+		if dist_sq < HIDE_LOD_DIST * HIDE_LOD_DIST:
+			# SHOW LOGIC: Swapping between Med/High based on 12km threshold
+			var use_high = dist_sq < 12000.0 * 12000.0
+			
+			mmi_phys_high.multimesh.set_instance_transform(proc_idx, a.transform if use_high else Transform3D().scaled(Vector3.ZERO))
+			mmi_phys_med.multimesh.set_instance_transform(proc_idx, a.transform if not use_high else Transform3D().scaled(Vector3.ZERO))
+			
+			# PHYSICS LOD: Enable collision only within 80km
+			coll.disabled = dist_sq > PHYSICS_LOD_DIST * PHYSICS_LOD_DIST
+		else:
+			# HIDE LOGIC: Too far to matter
+			mmi_phys_med.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
+			mmi_phys_high.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
+			coll.disabled = true
 
 func _process_physical_spawning() -> void:
 	# ACE: Spawn 50 rocks per frame to eliminate the startup freeze

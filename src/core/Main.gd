@@ -11,6 +11,7 @@ var diag_visible: bool = false
 var hud_layer: CanvasLayer
 var _player_ref: Node = null   # Cached — avoids get_nodes_in_group() every frame
 var _hud_tick: int = 0         # HUD update throttle counter
+var _env_tick: int = 0         # Environmental update throttle
 var map_node: Control = null
 
 # ATMOSPHERIC REFERENCES
@@ -20,11 +21,27 @@ var main_sky_mat: ShaderMaterial
 var planet_ref: Node3D
 var world_root: Node3D  # O(1) World Shifting Root
 var benchmark_manager: Node = null
-var solar_time: float = 0.0
+var _mineral_spawn_queue: Array = []
+var player_node: Node3D
+var _is_loading: bool = true
+var _load_overlay: ColorRect = null
+var _load_label: Label = null
+var _load_progress: float = 0.0
+var _is_finishing: bool = false
+var _boot_timer: float = 0.5 # Mandatory settle time
+
+static var _r_cache: Dictionary = {}
+static func _get_res(path: String) -> Resource:
+	if not _r_cache.has(path): _r_cache[path] = load(path)
+	return _r_cache[path]
+static func _get_tex(path: String) -> Texture2D:
+	return _get_res(path) as Texture2D
 
 func _ready() -> void:
-	print("--- [DIAGNOSTIC] EXECUTING PERFORMANCE TELEMETRY SYNC ---")
+	print("--- [DIAGNOSTIC] EXECUTING TITAN GENESIS BOOT SEQUENCE ---")
+	_setup_titan_splash()
 	
+	# ... existing initialization ...
 	# CELESTIAL HEADROOM: Increase engine ceiling to 60fps to provide the budget
 	# needed for 30fps quantization without stuttering.
 	Engine.max_fps = 60
@@ -139,27 +156,65 @@ func _setup_stellar_horizon() -> void:
 	vp.scaling_3d_scale = 0.25
 	vp.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
 
+func _setup_titan_splash() -> void:
+	_load_overlay = ColorRect.new()
+	_load_overlay.color = Color("#080808")
+	_load_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	
+	var canvas = CanvasLayer.new()
+	canvas.layer = 120 # Above HUD
+	canvas.add_child(_load_overlay)
+	
+	_load_label = Label.new()
+	_load_label.text = "TITAN UNIVERSAL GENESIS - BOOTING..."
+	_load_label.add_theme_font_size_override("font_size", 32)
+	_load_label.add_theme_color_override("font_color", Color.CHARTREUSE)
+	_load_overlay.add_child(_load_label)
+	_load_label.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	
+	add_child(canvas)
+
+func _finish_loading() -> void:
+	if _is_finishing: return
+	_is_finishing = true
+	
+	print("--- ARCHITECT: Universe is Ready ---")
+	
+	# Release Player IMMEDIATELY so interaction feels snappy
+	if player_node:
+		player_node.set_physics_process(true)
+		player_node.set_process(true)
+		if player_node.has_method("prewarm_vfx"):
+			player_node.prewarm_vfx()
+	
+	var t = create_tween()
+	t.tween_property(_load_overlay, "modulate:a", 0.0, 1.0).set_trans(Tween.TRANS_SINE).set_delay(0.2)
+	t.tween_callback(func():
+		_is_loading = false
+		_load_overlay.get_parent().queue_free()
+	)
+
 func _setup_hardened_solar_genesis() -> void:
+	# ACE: Force the minimalist 'Shadowglass' environment
+	var env = Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.06, 0.06, 0.08) # Stark Charcoal Void
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.1, 0.1, 0.1)
+	
+	var world_env = WorldEnvironment.new()
+	world_env.environment = env
+	add_child(world_env)
+	
 	var sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-45, 45, 0) 
-	
-	# WARM SUNLIGHT: Slightly reduced to balance the brighter ambient fill
 	sun.light_color = Color("#FFF0CE")
-	sun.light_energy = 0.90
+	sun.light_energy = 1.4
 	sun.shadow_enabled = true
-	
-	# ACE RETRO SHADOWS: 2-Split CSM for pure performance
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 	sun.directional_shadow_blend_splits = false # Sharp splits for that retro feel
-	sun.directional_shadow_split_1 = 0.15
-	sun.directional_shadow_split_2 = 0.45
+	sun.directional_shadow_max_distance = 6500.0 
 	
-	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_LOW)
-	sun.set("shadow_blur", 4.5) # Crunchier, distinct retro shadow edges
-	sun.shadow_bias = 0.15
-	sun.shadow_normal_bias = 5.0 
-	
-	sun.directional_shadow_max_distance = 3500.0 
 	sun.add_to_group("World")
 	add_child(sun)
 	main_sun = sun
@@ -277,29 +332,26 @@ func _setup_asteroid_belt() -> void:
 	_setup_deep_space_minerals()
 
 func _setup_deep_space_minerals() -> void:
-	var m_script = load("res://src/world/MineableResource.gd")
+	var m_script = _get_res("res://src/world/MineableResource.gd")
 	if not m_script: return
 	
 	var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
-	var rng = RandomNumberGenerator.new(); rng.seed = 77777 # The Salvage Seed
+	var rng = RandomNumberGenerator.new(); rng.seed = 77777 
 	
-	# Space resources are RARE compared to planet surfaces
+	# ACE: We queue these for staggered spawning to prevent Physics Server lock-up
 	for i in range(250):
-		var mineral = StaticBody3D.new(); mineral.set_script(m_script)
 		var type_idx = 0
 		var r = rng.randf()
-		if r > 0.98: type_idx = 4 # Diamond (2%)
-		elif r > 0.90: type_idx = 3 # Platinum (8%)
-		elif r > 0.75: type_idx = 2 # Gold (15%)
-		elif r > 0.5: type_idx = 1 # Silver (25%)
-		else: type_idx = 0 # Copper (50%)
-		
-		mineral.set("resource_type", types[type_idx])
-		world_root.add_child(mineral)
+		if r > 0.98: type_idx = 4
+		elif r > 0.90: type_idx = 3
+		elif r > 0.75: type_idx = 2
+		elif r > 0.5: type_idx = 1
+		else: type_idx = 0
 		
 		# Scatter in the inner system
 		var pos = Vector3(rng.randf_range(-1,1), rng.randf_range(-0.3, 0.3), rng.randf_range(-1,1)).normalized()
-		mineral.global_position = pos * rng.randf_range(2000000.0, 15000000.0)
+		var g_pos = pos * rng.randf_range(2000000.0, 15000000.0)
+		_mineral_spawn_queue.append({"type": types[type_idx], "pos": g_pos, "script": m_script})
 
 func _setup_hardened_diag_hud() -> void:
 	hud_layer = CanvasLayer.new()
@@ -342,6 +394,7 @@ func _spawn_ace_pilot(pos: Vector3) -> void:
 	if player_scene:
 		var player = player_scene.instantiate()
 		player.name = "AcePlayer"; add_child(player)
+		player_node = player
 		player.global_position = pos
 		var origin = get_tree().get_first_node_in_group("FloatingOrigin")
 		if origin: 
@@ -349,19 +402,55 @@ func _spawn_ace_pilot(pos: Vector3) -> void:
 			origin.world_root = world_root
 
 func _process(_delta: float) -> void:
-	# Cache player reference — group scans are expensive; only search once
+	# ACE TITAN INITIALIZATION: Track time immediately
+	if _boot_timer > 0:
+		_boot_timer -= _delta
+		return
+		
+	# ACE: Spawn minerals and check readiness BEFORE any early-returns
+	var batch_size = 50 if _is_loading else 15
+	for i in range(min(_mineral_spawn_queue.size(), batch_size)):
+		var data = _mineral_spawn_queue.pop_front()
+		var mineral = StaticBody3D.new()
+		mineral.set_script(data.script)
+		mineral.set("resource_type", data.type)
+		world_root.add_child(mineral)
+		mineral.global_position = data.pos
+	
+	# Check if all planets have finished their staggered initialization
+	var all_ready = _mineral_spawn_queue.is_empty()
+	var planets = get_tree().get_nodes_in_group("Planet")
+	for pl in planets:
+		if pl.get("_prewarm_count") < 20:
+			all_ready = false
+			break
+	
+	if _is_loading:
+		if all_ready:
+			_finish_loading()
+		else:
+			_load_label.text = "CALIBRATING QUANTUM FIELD: %d%%" % (100 - _mineral_spawn_queue.size() * 100 / 250)
+		return # Stay focused on loading
+
+	# HUD & TELEMETRY LOGIC (Runs only after loading is done)
 	if not _player_ref or not is_instance_valid(_player_ref):
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0: _player_ref = found[0]
 		else: return
+	
 	var p = _player_ref
 	
-	# ASTROMETRY & ATMOSPHERIC TRANSITION (every frame — needed for smooth sky blend)
-	var alt_m = 100000.0
+	# ACE: Always calculate altitude for HUD telemetry
+	var alt_m: float = 100000.0
 	if "target_planet" in p and p.target_planet: 
 		alt_m = p.true_altitude
-	_update_atmospheric_transition(p)
-	_update_shadow_distance(p)
+
+	# 1. OPTIMIZED TELEMETRY: Throttle the heavy environmental updates to 15Hz
+	_env_tick += 1
+	if _env_tick >= 4:
+		_env_tick = 0
+		_update_atmospheric_transition(p)
+		_update_shadow_distance(p)
 	
 	if not hud_visible or not diag_label: return
 	
@@ -394,7 +483,7 @@ func _process(_delta: float) -> void:
 			else: act += " | SHIP OUT OF RANGE"
 			
 	var q_f = 0; var q_d = 0; var q_z = 0
-	var planets = get_tree().get_nodes_in_group("Planet")
+	# ACE TELEMETRY SYNC: Reuse planets from genesis check
 	for pl in planets:
 		if "finalize_queue" in pl: q_f += pl.finalize_queue.size()
 		if "death_row" in pl: q_d += pl.death_row.size()
@@ -431,7 +520,7 @@ func _update_atmospheric_transition(p: Node) -> void:
 	var lighting_ratio = raw_ratio * raw_ratio * (3.0 - 2.0 * raw_ratio) # Real altitude ratio for lighting
 	
 	if main_sky_mat:
-		main_sky_mat.set_shader_parameter("space_blend", 1.0) # Always space — clouds are the sky now
+		main_sky_mat.set_shader_parameter("space_blend", lighting_ratio)
 	
 	if main_env and main_env.environment:
 		var sky_env = main_env.environment

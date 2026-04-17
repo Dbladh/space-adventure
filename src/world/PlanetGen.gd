@@ -51,11 +51,20 @@ var _lod_face_idx: int = 0 # ACE PERFORMANCE: Load-balanced face updates
 var zombie_pool: Array[MeshInstance3D] = []
 var finalize_queue: Array = []
 var death_row: Array[Node] = []
+var prop_spawn_queue: Array = [] # ACE: Throttled Prop batches
 # ACE PHYSICS: Queue for trimesh collision generation to prevent spikes
 var collision_queue: Array[MeshInstance3D] = []
 const MAX_COLLISIONS_PER_FRAME: int = 2
 var MAX_FINALIZE_PER_FRAME: int = 1
 const MAX_DEATHS_PER_FRAME: int = 60
+var _prewarm_count: int = 0
+
+func _prewarm_one_chunk() -> void:
+	var pc = PlanetChunkScript.new()
+	pc.setup(self)
+	pc.hide()
+	zombie_pool.append(pc)
+	add_child(pc)
 
 
 
@@ -77,6 +86,7 @@ func _ready() -> void:
 	
 	# PROCEDURAL ATMOSPHERE: Unique Sky per Planet!
 	# The user requested specific vivid colors: Blue, Red, Orange, Yellow, Green.
+	
 	var rng = RandomNumberGenerator.new()
 	rng.seed = (int(planet_radius) ^ int(terrain_strength * 100.0) ^ (planet_seed * 2654435761)) & 0x7FFFFFFF
 	
@@ -177,10 +187,9 @@ func _ready() -> void:
 		var face = QuadTreeFace.new(self, normal)
 		faces.append(face)
 		add_child(face)
+	# ACE: Inject majestic cloud belts and celestial rings — visible against the charcoal void
 	self.add_to_group("Planet")
 	self.add_to_group("World")
-	
-	# ACE: Inject majestic cloud belts and celestial rings based on the generated palette
 	_spawn_majestic_clouds_and_rings(rng, base_hue)
 	# ACE: Scatter colossal Hero Landmarks as navigation anchors across the planet surface
 	_spawn_hero_landmarks(rng)
@@ -223,11 +232,10 @@ func get_terrain_height_at(pos: Vector3) -> float:
 	return planet_radius + total_h
 
 func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: float) -> void:
-	# 1. PUFFY CLOUD BELTS: A massive celestial sphere wrapping the planet at 35km altitude
+	# 1. PUFFY CLOUD BELTS: Massive celestial sphere at 35km altitude
 	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 35000.0; c_mesh.height = c_mesh.radius * 2.0; c_mesh.radial_segments = 64; c_mesh.rings = 32
 	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 	uniform vec3 sun_dir;
-	uniform vec3 horizon_col;
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
@@ -242,8 +250,6 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		float n = sin(p.x)*cos(p.y) + sin(p.y)*cos(p.z) + sin(p.z)*cos(p.x);
 		p = vec3(p.y - p.z, p.z - p.x, p.x - p.y) * 2.3 + p * 1.5;
 		n += 0.5 * (sin(p.x)*cos(p.y) + sin(p.y)*cos(p.z) + sin(p.z)*cos(p.x));
-		p = vec3(p.y - p.z, p.z - p.x, p.x - p.y) * 2.1 + p * 1.5;
-		n += 0.25 * (sin(p.x)*cos(p.y) + sin(p.y)*cos(p.z) + sin(p.z)*cos(p.x));
 		return n * 0.57;
 	}
 	
@@ -258,136 +264,68 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		float proximity = smoothstep(50.0, 12000.0, cam_dist);
 		float active_threshold = mix(-0.2, 0.45, proximity);
 
-		// TERMINATOR GLOW: Warm amber rim scattering on the day/night boundary
 		float dot_nl = dot(v_normal, sun_dir);
-		float fresnel = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
-		
-		// Terminator mask: 1.0 at sunlight, fades to 0.0 at night. 
-		// We want a 'Golden Hour' peak exactly at the terminator (dot_nl around 0.0)
-		float terminator = smoothstep(-0.2, 0.2, dot_nl); // 1.0 in day, 0.0 in night
-		float glow_mask = exp(-pow(dot_nl * 3.5, 2.0)); // Gaussian spike at the terminator
-		vec3 sunset_col = vec3(1.0, 0.45, 0.15) * 1.8; // Intense Amber
+		float terminator = smoothstep(-0.2, 0.2, dot_nl); 
 		vec3 day_col = vec3(1.0); // Clean White
 		
 		if (cloud_mask > active_threshold) {
-			ALBEDO = mix(day_col, sunset_col, glow_mask);
-			// Lit-side scattering: thicker clouds facing the sun
-			ALPHA = smoothstep(12000.0, 500000.0, cam_dist) * 0.95 * mix(0.4, 1.0, terminator);
+			ALBEDO = day_col;
+			// Keep clouds visible from surface (inside the sphere)
+			ALPHA = 0.95 * mix(0.4, 1.0, terminator);
 		} else { 
-			// DYNAMIC ATMOSPHERE RING: Show a halo glow even where there are no clouds!
-			ALBEDO = sunset_col;
-			// Rim glow peeking around the edges of the planet
-			ALPHA = fresnel * glow_mask * smoothstep(12000.0, 500000.0, cam_dist) * 0.8;
+			ALPHA = 0.0;
 		}
 		
 		// CELESTIAL HIBERNATION: Fully transparent if extremely distant
 		if (cam_dist > 4000000.0) ALPHA = 0.0;
 	}"""
 	var c_inst = MeshInstance3D.new(); c_inst.mesh = c_mesh; c_inst.material_override = ShaderMaterial.new(); c_inst.material_override.shader = c_shader
-	# ACE DEPTH SORT: Ensure atmosphere layers have unique priorities to kill Z-fighting
 	c_inst.material_override.render_priority = 5
 	var sun_dir = Vector3(0.5, 0.5, 0.707).normalized()
 	c_inst.material_override.set_shader_parameter("sun_dir", sun_dir)
-	# SYNC ATMOSPHERE: Pass the generated horizon color for distant silhouette optimization
-	c_inst.material_override.set_shader_parameter("horizon_col", sky_horizon_color)
-	# ACE VISIBILITY SYNC: Atmospheric layers must vanish when the Impostor takes over.
 	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
 	
-	# 2. PLANETARY RINGS (50% chance per planet - flat, layered Saturn-style disc)
+	# 2. PLANETARY RINGS (50% chance per planet)
 	if rng.randf() > 0.5:
 		var r_mesh = TorusMesh.new(); r_mesh.inner_radius = planet_radius + 150000.0; r_mesh.outer_radius = planet_radius + 400000.0; r_mesh.rings = 128; r_mesh.ring_segments = 4
 		var r_shader = Shader.new(); r_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 		uniform vec3 ring_col_a;
-		uniform vec3 ring_col_b;
 		varying vec3 v_local_pos;
 		void vertex() { v_local_pos = VERTEX; }
-		
-		float ring_noise(float d) {
-			return sin(d * 0.00041) * 0.5 + sin(d * 0.00097) * 0.3 + sin(d * 0.00213) * 0.2;
-		}
-		
 		void fragment() {
-			float radial_dist = length(vec2(v_local_pos.x, v_local_pos.z));
-			float n = ring_noise(radial_dist) * 8000.0;
-			float warped_dist = radial_dist + n;
-			float band1 = step(0.5, fract(warped_dist * 0.000048));
-			float band2 = step(0.3, fract(warped_dist * 0.000140 + 0.5));
-			float band3 = step(0.7, fract(warped_dist * 0.000021));
-			float combined = band1 * band3 + band2 * (1.0 - band3) * 0.6;
-			if (combined > 0.0) {
-				ALBEDO = mix(ring_col_a, ring_col_b, band1);
-				ALPHA = combined * 0.92;
-			} else { ALPHA = 0.0; }
+			float d = length(vec2(v_local_pos.x, v_local_pos.z));
+			float band = step(0.5, fract(d * 0.000048));
+			if (band > 0.0) { ALBEDO = ring_col_a; ALPHA = 0.8; }
+			else { ALPHA = 0.0; }
 		}"""
-		var r_inst = MeshInstance3D.new(); r_inst.mesh = r_mesh
-		var r_mat = ShaderMaterial.new(); r_mat.shader = r_shader
-		r_mat.set_shader_parameter("ring_col_a", Color.from_hsv(base_hue, 0.50, 0.95))
-		r_mat.set_shader_parameter("ring_col_b", Color.from_hsv(base_hue, 0.25, 0.80))
-		r_inst.material_override = r_mat
-		r_inst.material_override.render_priority = 1 # Deep space sort
+		var r_inst = MeshInstance3D.new(); r_inst.mesh = r_mesh; r_inst.material_override = ShaderMaterial.new(); r_inst.material_override.shader = r_shader
+		r_inst.material_override.set_shader_parameter("ring_col_a", Color.WHITE)
 		r_inst.rotation_degrees = Vector3(rng.randf_range(10.0, 35.0), rng.randf_range(0, 360), 0.0)
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
-		# ACE VISIBILITY SYNC
-		r_inst.visibility_range_end = PROXIMITY_CUTOFF; r_inst.visibility_range_end_margin = 100000.0; r_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-		add_child(r_inst)
+		r_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(r_inst)
 
-	# 3. POLAR AURORAS: Shimmering ribbons of light at the high latitudes
+	# 3. POLAR AURORAS
 	_spawn_polar_auroras(pal_grass_col)
 
 func _spawn_polar_auroras(base_color: Color) -> void:
-	# Aurora sphere is slightly larger than the cloud layer (45km alt)
 	var a_mesh = SphereMesh.new(); a_mesh.radius = planet_radius + 45000.0; a_mesh.height = a_mesh.radius * 2.0; a_mesh.radial_segments = 48; a_mesh.rings = 24
 	var a_shader = Shader.new(); a_shader.code = """shader_type spatial; render_mode unshaded, blend_add, depth_draw_always, cull_disabled;
 	uniform vec3 aura_col;
 	varying vec3 v_local_pos;
-	varying vec3 v_world_pos;
-	
-	void vertex() {
-		v_local_pos = VERTEX;
-		// STOP MOTION: 8fps wave shimmer
-		float t = floor(TIME * 8.0) / 8.0;
-		VERTEX += NORMAL * sin(t * 2.0 + VERTEX.x * 0.001) * 200.0;
-		v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	}
-	
+	void vertex() { v_local_pos = VERTEX; }
 	void fragment() {
-		vec3 vn = normalize(v_local_pos);
-		// POLAR MASK: Only top/bottom 30% of the planet
-		float polar = smoothstep(0.68, 0.92, abs(vn.y));
-		
+		float polar = smoothstep(0.68, 0.92, abs(normalize(v_local_pos).y));
 		if (polar <= 0.01) { discard; }
-		
-		// STOP MOTION: 8fps ribbons
-		float angle = atan(vn.x, vn.z);
-		float t = floor(TIME * 8.0) / 8.0 * 0.45;
-		
-		float ribbons = sin(angle * 12.0 + t) * 0.5 + 0.5;
-		ribbons += sin(angle * 35.0 - t * 1.5) * 0.25 + 0.25;
-		ribbons += sin(angle * 8.0 + t * 0.3) * 0.4;
-		
-		// Vertical Falloff (curtain look): stronger at base, wispy at top
-		float vertical = 1.0 - pow(abs(vn.y) - 0.7, 0.5) * 2.0;
-		
-		float final_mask = clamp(ribbons * polar * vertical, 0.0, 1.0);
-		
-		ALBEDO = aura_col * (1.0 + ribbons * 0.5); // Multi-tonal glow
-		ALPHA = final_mask * 0.65 * smoothstep(15000.0, 800000.0, length(CAMERA_POSITION_WORLD - v_world_pos));
+		ALBEDO = aura_col; ALPHA = polar * 0.65;
 	}"""
 	var a_inst = MeshInstance3D.new(); a_inst.mesh = a_mesh; a_inst.material_override = ShaderMaterial.new(); a_inst.material_override.shader = a_shader
-	# Aurora is rendered on top of clouds but below rings
-	a_inst.material_override.render_priority = 6
-	# Aurora is a bright, ethereal version of the planetary hue
-	var a_col = base_color.lightened(0.2)
-	a_col.s += 0.2; a_col.v += 0.3
-	a_inst.material_override.set_shader_parameter("aura_col", a_col)
-	# ACE VISIBILITY SYNC
-	a_inst.visibility_range_end = PROXIMITY_CUTOFF; a_inst.visibility_range_end_margin = 100000.0; a_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	add_child(a_inst)
-
+	a_inst.material_override.set_shader_parameter("aura_col", base_color.lightened(0.5))
+	a_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(a_inst)
 
 # ===========================================================================
 # HERO LANDMARK SYSTEM — THE PROCEDURALIST
+# ===========================================================================
 # Scatters 4-6 colossal navigation anchors per planet. Each landmark type is
 # built from raw triangle geometry using SurfaceTool with flat shading,
 # making them look like they grew organically from the planet's geology.
@@ -639,6 +577,11 @@ func _add_tri_flat(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, col: Col
 	st.set_normal(face_n); st.add_vertex(c)
 
 func _process(_delta: float) -> void:
+	# ACE: Staggered Pool Pre-warm logic — must run at TOP to bypass hibernation returns
+	if _prewarm_count < 20:
+		_prewarm_one_chunk()
+		_prewarm_count += 1
+
 	if not player:
 		var players = get_tree().get_nodes_in_group("Player")
 		if players.size() > 0: player = players[0]
@@ -698,7 +641,7 @@ func _process(_delta: float) -> void:
 	for i in range(min(split_queue.size(), MAX_SPLITS_PER_FRAME)):
 		var node = split_queue.pop_front()
 		if node: node.execute_split()
-
+	
 	# ACE RECLAMATION: Process Zombie Pool
 	var z_batch = min(zombie_pool.size(), 10) # ACE: Limit zombie checks per frame
 	for i in range(z_batch):
@@ -708,24 +651,49 @@ func _process(_delta: float) -> void:
 		else:
 			chunk_pool.append(z)
 	
-	# ACE FINALIZATION: Aggressive scaling to prevent 'Black Holes' during high-speed flight
-	# If the queue fills up, we commit more meshes per frame to stay ahead of the ship.
-	MAX_FINALIZE_PER_FRAME = 1 + (finalize_queue.size() / 3)
+	# ACE FINALIZATION: Predictable Generation Cycles
+	# STRICT BUDGET: Exactly 1 chunk per frame to prevent instantiation spikes.
+	MAX_FINALIZE_PER_FRAME = 1 
 	for i in range(min(finalize_queue.size(), MAX_FINALIZE_PER_FRAME)):
 		var chunk = finalize_queue.pop_front()
 		if is_instance_valid(chunk):
 			chunk._finalize_generation_on_main()
 			
+	# ACE PROP THROTTLE: Spread node instantiation across multiple frames
+	for i in range(min(prop_spawn_queue.size(), 5)):
+		var task = prop_spawn_queue.pop_front()
+		var node = task[0]
+		var method = task[1]
+		var data = task[2]
+		if is_instance_valid(node) and node.has_method(method):
+			node.call(method, data)
+
 	# ACE REAPER: Asynchronous destruction of urban nodes
 	for i in range(min(death_row.size(), MAX_DEATHS_PER_FRAME)):
 		var d = death_row.pop_back()
 		if is_instance_valid(d): d.free()
 	
-	# ACE PHYSICS: Process Collision Queue
 	for i in range(min(collision_queue.size(), MAX_COLLISIONS_PER_FRAME)):
 		var c = collision_queue.pop_front()
 		if is_instance_valid(c):
-			c.create_trimesh_collision()
+			# ACE PERMANENT FIX: Use the background-baked Collision Shape
+			# Instead of create_trimesh_collision() (which is a sync main-thread choke)
+			if "_collision_shape" in c and c._collision_shape:
+				var body = StaticBody3D.new()
+				c.add_child(body)
+				var shape_node = CollisionShape3D.new()
+				shape_node.shape = c._collision_shape
+				body.add_child(shape_node)
+				
+func _prewarm_procedural_pool(count: int) -> void:
+	for i in range(count):
+		var c = PlanetChunkScript.new()
+		chunk_pool.append(c)
+
+func queue_chunk_for_finalization(chunk: Node) -> void:
+	# ACE: Thread-safe handover to the main finalization queue
+	if not finalize_queue.has(chunk):
+		finalize_queue.append(chunk)
 
 func get_terrain_elevation(sn: Vector3) -> float:
 	if not noise: return 0.0
@@ -763,24 +731,13 @@ func get_terrain_elevation(sn: Vector3) -> float:
 	var S_LVL: float = -120.0
 	var abyss_depth: float = S_LVL - 400.0
 	
-	# TECTONIC WARP: Domain warping to break the circular continent shape
-	var warp_n = noise.get_noise_3dv(sn * 1.2)
-	var warped_sn = (sn + Vector3(warp_n, warp_n, warp_n) * 0.35).normalized()
-	var dist_to_pole = warped_sn.distance_to(continent_pole)
+	# ORGANIC MASK: Restore standard continent mask for orbital visibility.
+	var major_mask = smoothstep(-0.1, 0.1, c_n)
 	
-	# ORGANIC MASK: Combine warped proximity with fractal noise for jagged coastlines
-	var proximity = smoothstep(1.0, 0.4, dist_to_pole)
-	# major_mask is now an organic emergence from the tectonic noise field
-	var major_mask = smoothstep(0.48, 0.52, c_n + proximity * 0.9)
-	
-	# Force 'Mega-Continent' above sea level and flatten it significantly
+	# Force 'Mega-Continent' above sea level
 	var base_elev = lerp(abyss_depth, local_geo + (S_LVL + 50.0), cont_mask)
 	var island_elev = S_LVL + 850.0 + (local_geo * 0.1) 
 	var elev = lerp(base_elev, island_elev, major_mask)
-	
-	# MEGA-CITY: Force absolute flatness for metropolitan foundations
-	if major_mask > 0.15: # ACE SYNC: Binary Plateau Trigger
-		elev = S_LVL + 850.0
 	
 	return elev
 
@@ -895,8 +852,11 @@ class QuadTreeNode:
 			face.add_child(chunk)
 		else:
 			chunk = face.planet.chunk_pool.pop_back()
-			if chunk.get_parent() != face:
-				chunk.reparent(face)
+			if chunk.get_parent():
+				if chunk.get_parent() != face:
+					chunk.reparent(face)
+			else:
+				face.add_child(chunk)
 			
 		chunk.face = face
 		chunk.planet = face.planet

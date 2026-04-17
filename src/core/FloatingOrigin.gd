@@ -4,9 +4,10 @@ extends Node
 # FloatingOrigin.gd (10km M1-Harden Edition)
 # Managed by THE ARCHITECT.
 
-@export var threshold: float = 100000.0 # 100km M1 Hardened Ceiling
+@export var threshold: float = 500000.0 # 500km M1 Hardened Ceiling (Higher for Hyperdrive)
 var player_node: Node3D
 var world_root: Node3D
+var _shift_tick: int = 0
 
 func _ready() -> void:
 	self.add_to_group("FloatingOrigin")
@@ -19,6 +20,11 @@ func _physics_process(_delta: float) -> void:
 			return
 		else:
 			return
+
+	# Performance: Only check distance every 5 physics frames
+	_shift_tick += 1
+	if _shift_tick < 5: return
+	_shift_tick = 0
 
 	if player_node.global_position.length() > threshold:
 		shift_world()

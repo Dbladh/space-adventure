@@ -21,12 +21,23 @@ var face: Node3D
 var planet: Node
 
 # DYNAMIC PROCEDURAL PLANET PALETTE
-static var _tex_cache := {}
+static var _res_cache := {}
+static func _get_res(path: String) -> Resource:
+	if not _res_cache.has(path): _res_cache[path] = load(path)
+	return _res_cache[path]
+
 static func _get_tex(path: String) -> Texture2D:
-	if not _tex_cache.has(path): _tex_cache[path] = load(path)
-	return _tex_cache[path]
+	return _get_res(path) as Texture2D
 
 static var _mat_cache := {}
+static var _mesh_cache := {}
+
+static func _get_box_mesh(size: Vector3) -> BoxMesh:
+	var key = "box_%s" % size
+	if not _mesh_cache.has(key):
+		var b = BoxMesh.new(); b.size = size
+		_mesh_cache[key] = b
+	return _mesh_cache[key]
 var pal_forest_h: float = 0.3
 var pal_forest_col: Color = Color("#33AA33")
 var pal_grass_col: Color = Color("#44BB44")
@@ -42,6 +53,7 @@ var _flora_nodes: Array[Node] = []
 var _is_generating: bool = false
 var _mesh_data_land: Array = []
 var _mesh_data_water: Array = []
+var _collision_shape: ConcavePolygonShape3D
 var _t_pts: Array[Transform3D] = []
 var _r_pts: Array[Transform3D] = []
 var _g_pts: Array[Transform3D] = []
@@ -69,7 +81,8 @@ func _start_async_generation() -> void:
 func _threaded_generation_task() -> void:
 	_calculate_multi_surface_mesh_thread_safe()
 	if face and face.planet:
-		face.planet.finalize_queue.append(self)
+		# ACE: Thread-safe handover via deferred call to the main thread
+		face.planet.call_deferred("queue_chunk_for_finalization", self)
 
 func _exit_tree() -> void:
 	if _task_id != -1:
@@ -170,23 +183,33 @@ func get_terrain_elevation(sn: Vector3) -> float:
 	var major_mask = smoothstep(0.4, 0.6, n_nodes * global_mask) * cont_mask
 	
 	# Calculate natural terrain height (Continental Land vs Oceanic Abyss)
-	var base_elev = lerp(abyss_depth, local_geo + (SEA_LEVEL + 50.0), cont_mask)
-	
-	# ACE METROPOLITAN TERRACING: Snap terrain to flat 140m steps within urban zones
-	# This allows cities to climb mountains 'naturally' while providing level foundations
-	var terrace_h = floor(base_elev / 140.0) * 140.0
-	var elev = lerp(base_elev, terrace_h, major_mask)
-	
+	var elev = lerp(abyss_depth, local_geo + (SEA_LEVEL + 50.0), cont_mask)
 	return elev
 
 func get_water_point(sn: Vector3) -> Vector3:
 	return sn * (radius + SEA_LEVEL)
 
 func _calculate_multi_surface_mesh_thread_safe() -> void:
-	# ACE VERTEX BUFFERING: Replaced expensive 'SurfaceTool' objects with raw PackedArrays.
-	# Pre-allocating exact array sizes prevents background memory fragmentation.
+	# ACE VERTEX REUSE: Pre-generate the elevated grid to avoid redundant noise calls.
+	# This reduction (75% on average) is the single biggest win for background CPU budget.
+	var grid_res = resolution + 1
+	var points: PackedVector3Array = PackedVector3Array()
+	var heights: PackedFloat32Array = PackedFloat32Array()
+	points.resize(grid_res * grid_res)
+	heights.resize(grid_res * grid_res)
+	
+	for gy in range(grid_res):
+		for gx in range(grid_res):
+			var sn = _get_sn(gx, gy)
+			var h = get_terrain_elevation(sn)
+			var idx = gy * grid_res + gx
+			points[idx] = sn * (radius + max(h, SEA_LEVEL - 50.0))
+			heights[idx] = h
+			
 	var l_verts: PackedVector3Array = PackedVector3Array()
+	var l_norms: PackedVector3Array = PackedVector3Array()
 	l_verts.resize(resolution * resolution * 6)
+	l_norms.resize(resolution * resolution * 6)
 	var l_idx: int = 0
 	
 	var w_verts: PackedVector3Array = PackedVector3Array()
@@ -196,19 +219,30 @@ func _calculate_multi_surface_mesh_thread_safe() -> void:
 	
 	for y in range(resolution):
 		for x in range(resolution):
-			var sn1 = _get_sn(x, y); var sn2 = _get_sn(x + 1, y)
-			var sn3 = _get_sn(x, y + 1); var sn4 = _get_sn(x + 1, y + 1)
-			var h1 = get_terrain_elevation(sn1); var h2 = get_terrain_elevation(sn2)
-			var h3 = get_terrain_elevation(sn3); var h4 = get_terrain_elevation(sn4)
-			var floor_depth = SEA_LEVEL - 50.0
-			var p1 = sn1 * (radius + max(h1, floor_depth)); var p2 = sn2 * (radius + max(h2, floor_depth))
-			var p3 = sn3 * (radius + max(h3, floor_depth)); var p4 = sn4 * (radius + max(h4, floor_depth))
+			# Index the pre-calculated grid
+			var i1 = y * grid_res + x;         var i2 = y * grid_res + (x + 1)
+			var i3 = (y + 1) * grid_res + x;   var i4 = (y + 1) * grid_res + (x + 1)
 			
-			l_verts[l_idx] = p1; l_verts[l_idx+1] = p3; l_verts[l_idx+2] = p2; l_idx += 3
-			l_verts[l_idx] = p3; l_verts[l_idx+1] = p4; l_verts[l_idx+2] = p2; l_idx += 3
+			var p1 = points[i1]; var p2 = points[i2]
+			var p3 = points[i3]; var p4 = points[i4]
+			var h1 = heights[i1]; var h2 = heights[i2]
+			var h3 = heights[i3]; var h4 = heights[i4]
+			
+			# ACE FACETED NORMALS: Calculate the cross-product per triangle to maintain the retro aesthetic
+			var n1 = (p3 - p1).cross(p2 - p1).normalized()
+			l_verts[l_idx] = p1; l_norms[l_idx] = n1; l_idx += 1
+			l_verts[l_idx] = p3; l_norms[l_idx] = n1; l_idx += 1
+			l_verts[l_idx] = p2; l_norms[l_idx] = n1; l_idx += 1
+			
+			var n2 = (p4 - p3).cross(p2 - p3).normalized()
+			l_verts[l_idx] = p3; l_norms[l_idx] = n2; l_idx += 1
+			l_verts[l_idx] = p4; l_norms[l_idx] = n2; l_idx += 1
+			l_verts[l_idx] = p2; l_norms[l_idx] = n2; l_idx += 1
 			
 			if min(min(h1, h2), min(h3, h4)) <= SEA_LEVEL + 30.0:
 				has_water = true
+				var sn1 = _get_sn(x, y); var sn2 = _get_sn(x + 1, y)
+				var sn3 = _get_sn(x, y + 1); var sn4 = _get_sn(x + 1, y + 1)
 				var w1 = get_water_point(sn1); var w2 = get_water_point(sn2)
 				var w3 = get_water_point(sn3); var w4 = get_water_point(sn4)
 				var sp = [1.0 - clamp((SEA_LEVEL - h1) / 150.0, 0.0, 1.0), 1.0 - clamp((SEA_LEVEL - h2) / 150.0, 0.0, 1.0), 1.0 - clamp((SEA_LEVEL - h3) / 150.0, 0.0, 1.0), 1.0 - clamp((SEA_LEVEL - h4) / 150.0, 0.0, 1.0)]
@@ -216,17 +250,25 @@ func _calculate_multi_surface_mesh_thread_safe() -> void:
 				w_verts.push_back(w1); w_cols.push_back(Color(sp[0], 0, 0, 1))
 				w_verts.push_back(w3); w_cols.push_back(Color(sp[2], 0, 0, 1))
 				w_verts.push_back(w2); w_cols.push_back(Color(sp[1], 0, 0, 1))
-				var n1 = (w3 - w1).cross(w2 - w1).normalized()
-				w_norms.push_back(n1); w_norms.push_back(n1); w_norms.push_back(n1)
+				var wn1 = (w3 - w1).cross(w2 - w1).normalized()
+				w_norms.push_back(wn1); w_norms.push_back(wn1); w_norms.push_back(wn1)
 				
 				w_verts.push_back(w3); w_cols.push_back(Color(sp[2], 0, 0, 1))
 				w_verts.push_back(w4); w_cols.push_back(Color(sp[3], 0, 0, 1))
 				w_verts.push_back(w2); w_cols.push_back(Color(sp[1], 0, 0, 1))
-				var n2 = (w4 - w3).cross(w2 - w3).normalized()
-				w_norms.push_back(n2); w_norms.push_back(n2); w_norms.push_back(n2)
+				var wn2 = (w4 - w3).cross(w2 - w3).normalized()
+				w_norms.push_back(wn2); w_norms.push_back(wn2); w_norms.push_back(wn2)
+			
+	# ACE PERFORMANCE: Bake ConcavePolygonShape on Worker Thread!
+	# This avoids the 'Main-Thread Choke' of create_trimesh_collision()
+	if l_verts.size() > 0:
+		var shape = ConcavePolygonShape3D.new()
+		shape.set_faces(l_verts)
+		_collision_shape = shape
 			
 	_mesh_data_land = []; _mesh_data_land.resize(Mesh.ARRAY_MAX)
 	_mesh_data_land[Mesh.ARRAY_VERTEX] = l_verts
+	_mesh_data_land[Mesh.ARRAY_NORMAL] = l_norms # ACE: Missing Normals fixed
 	
 	if has_water:
 		_mesh_data_water = []; _mesh_data_water.resize(Mesh.ARRAY_MAX)
@@ -249,11 +291,16 @@ func _finalize_generation_on_main() -> void:
 	
 	_finalize_dual_materials(final_mesh, _mesh_data_water.size() > 0)
 	
-	if not _t_pts.is_empty(): _spawn_tree_lods(_t_pts)
-	if not _r_pts.is_empty(): _spawn_rock(_r_pts)
-	if not _g_pts.is_empty(): _spawn_grass(_g_pts)
-	if not _c_pts.is_empty(): _spawn_city_buildings(_c_pts)
-	if not _m_pts.is_empty(): _spawn_minerals(_m_pts)
+	# ACE: Prop Spawning Throttle
+	# Instead of synchronous instantiation (which freezes the main thread),
+	# we push spawn tasks to the PlanetGen queue.
+	var planet = get_parent().get_parent()
+	if is_instance_valid(planet) and "prop_spawn_queue" in planet:
+		if not _t_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_tree_lods", _t_pts.duplicate()])
+		if not _r_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_rock", _r_pts.duplicate()])
+		if not _g_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_grass", _g_pts.duplicate()])
+		if not _c_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_city_buildings", _c_pts.duplicate()])
+		if not _m_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_minerals", _m_pts.duplicate()])
 	
 	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear(); _m_pts.clear()
 	_is_generating = false
@@ -377,80 +424,38 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# NATURE THROTTLE: Trees/Rocks only spawn on high-detail chunks with fine grid
 			var nature_ok = scale_factor <= 0.02 and base_cell < 0.0002
 			
-			# ACE METROPOLITAN DECENTRALIZATION: Hyper-Localized Culling (10-20 Small Cities)
-			var raw_global = sin(cp.x * 1.5) * cos(cp.y * 1.4 + cp.z * 1.2)
-			var global_mask = pow(max(0.0, raw_global), 3.0) 
-			var n_nodes = pow(max(0.0, sin(cp.x * 12.0) * cos(cp.y * 11.0) * sin(cp.z * 13.0)), 2.0)
-			
-			# ACE AMPHIBIOUS CULLING: Cities only spawn on continental crust
-			var c_n_val = noise.get_noise_3dv(cp * 2.2)
-			var c_mask_val = smoothstep(-0.1, 0.1, c_n_val)
-			var major_mask = smoothstep(0.4, 0.6, n_nodes * global_mask) * c_mask_val
-			
-			# ACE STRUCTURAL HIERARCHY: Separation of Urban and Wilderness systems
-			if major_mask > 0.4:
-				# -----------------------------------
-				# CITY ZONE: Infrastructure & Architecture
-				# -----------------------------------
-				# ACE ORGANIC ROAD WARPING: Streets wind naturally over the topography
-				var w_n = sin(cp.x * radius * 0.003 + cp.y * radius * 0.002) * 0.15 + cos(cp.z * radius * 0.0025) * 0.15
-				var w_uv = (cp * 0.004 * radius) + Vector3(w_n, w_n, w_n) # Match shader uv
-				var r_grid = max(float(fposmod(w_uv.x, 1.0) >= 0.96), float(fposmod(w_uv.z, 1.0) >= 0.96))
-				var is_road = r_grid > 0.5
-				
-				if not is_road:
-					# ACE STRUCTURAL VOIDS: High-frequency probability mask creates plazas and parks
-					var spawn_prob = (float(hash(cp * 400.0) % 100) / 100.0)
-					if spawn_prob > 0.35:
-						# TITAN SPACING: Adaptive grid interval ensures consistency across LOD tiers
-						var interval = 6 if base_cell < 0.0002 else 2
-						if (abs(x_idx) % interval == 0) and (abs(y_idx) % interval == 0):
-							var h = get_terrain_elevation(cp)
-							# ACE AMPHIBIOUS CULLING: Strictly prevent buildings in water
-							if h > SEA_LEVEL:
-								# INTELLIGENT DENSITY: Height/Scale resolve based on urban core proximity
-								var density_factor = smoothstep(0.4, 0.7, major_mask)
-								# SKYLINE JITTER: High-variance scaling for a jagged, natural skyline
-								var s_jitter = 0.6 + (float((h_v >> 5) % 100) / 100.0) * 1.8
-								var b_scale = (0.5 + (float((h_v >> 3) % 100) / 100.0) * 0.5) * (1.0 + density_factor * 2.5) * s_jitter
-								
-								# DOCKING JITTER: Break the rigid grid with local offsets
-								var p_jitter = Vector3(float(h_v % 40) - 20.0, 0.0, float((h_v >> 7) % 40) - 20.0)
-								var b_xform = _get_object_xform(cp * (radius + h) + p_jitter, cp, float(h_v % 100)/100.0, b_scale)
-								c_pts.append(b_xform.rotated_local(Vector3.UP, float(h_v % 360)))
+			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
+			# WILDERNESS ZONE: Minerals & Nature
+			# -----------------------------------
+			# 1. MINERAL PRIORITY: Colossal Rarity (1/10th of previous)
+			if (h_v % 10000) < 3:
+				var h = get_terrain_elevation(cp)
+				if h > -100.0:
+					var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
+					var r_pick = h_v % 100
+					var type = "Copper"
+					if r_pick > 99: type = "Diamond"
+					elif r_pick > 90: type = "Platinum"
+					elif r_pick > 75: type = "Gold"
+					elif r_pick > 45: type = "Silver"
+					
+					# ACE: Small offset (5.0) since octahedron is now tip-anchored
+					var xf = _get_object_xform(cp * (radius + h + 5.0), cp, detail_n, 1.0)
+					m_pts.append([xf, type])
 			else:
-				# -----------------------------------
-				# WILDERNESS ZONE: Minerals & Nature
-				# -----------------------------------
-				# 1. MINERAL PRIORITY: Colossal Rarity (1/10th of previous)
-				if (h_v % 10000) < 3:
-					var h = get_terrain_elevation(cp)
-					if h > -100.0:
-						var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
-						var r_pick = h_v % 100
-						var type = "Copper"
-						if r_pick > 99: type = "Diamond"
-						elif r_pick > 90: type = "Platinum"
-						elif r_pick > 75: type = "Gold"
-						elif r_pick > 45: type = "Silver"
-						
-						# ACE: Small offset (5.0) since octahedron is now tip-anchored
-						var xf = _get_object_xform(cp * (radius + h + 5.0), cp, detail_n, 1.0)
-						m_pts.append([xf, type])
-				else:
-					# 2. NATURE FALLBACK: Standard Biome Scattering
-					if cluster_n > 0.22:
-						var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
-						if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult):
-							var h_t = get_terrain_elevation(cp)
-							if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
-								var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
-								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
-					elif cluster_n < -0.20:
-						if (h_v % 1000) < int(200 * DebugSettings.rock_mult):
-							var h_r = get_terrain_elevation(cp)
-							if h_r > -150.0:
-								r_pts.append(_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
+				# 2. NATURE FALLBACK: Standard Biome Scattering
+				if cluster_n > 0.22:
+					var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
+					if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult):
+						var h_t = get_terrain_elevation(cp)
+						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
+							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
+							t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
+				elif cluster_n < -0.20:
+					if (h_v % 1000) < int(200 * DebugSettings.rock_mult):
+						var h_r = get_terrain_elevation(cp)
+						if h_r > -150.0:
+							r_pts.append(_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
 
 	
 	if scale_factor <= 0.00055:
@@ -545,20 +550,20 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 	
 	# 2. FOLIAGE MATERIAL — Specialized Toon + Wind Shader
 	var foliage_mat: ShaderMaterial = ShaderMaterial.new()
-	foliage_mat.shader = load("res://src/shaders/foliage_toon.gdshader")
+	foliage_mat.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
 	foliage_mat.set_shader_parameter("shadow_strength", 0.6)
 	foliage_mat.set_shader_parameter("wind_speed", 0.7)
 	foliage_mat.set_shader_parameter("wind_strength", 0.4)
-	foliage_mat.set_shader_parameter("leaf_texture", load("res://assets/textures/tree_leaves_texture.png"))
-	foliage_mat.set_shader_parameter("normal_map", load("res://assets/textures/tree_leaves_texture_normal.png"))
+	foliage_mat.set_shader_parameter("leaf_texture", _get_tex("res://assets/textures/tree_leaves_texture.png"))
+	foliage_mat.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_leaves_texture_normal.png"))
 	
 	# 1. TRUNK MATERIAL — custom BoTW Toon Shader with hatching
 	var trunk_mat: ShaderMaterial = ShaderMaterial.new()
-	trunk_mat.shader = load("res://src/shaders/trunk_toon.gdshader")
+	trunk_mat.shader = _get_res("res://src/shaders/trunk_toon.gdshader")
 	trunk_mat.set_shader_parameter("albedo", Color(0.35, 0.25, 0.15))
-	trunk_mat.set_shader_parameter("bark_texture", load("res://assets/textures/tree_trunk_texture.png"))
-	trunk_mat.set_shader_parameter("normal_map", load("res://assets/textures/tree_trunk_texture_normal.png"))
-	trunk_mat.set_shader_parameter("disp_map", load("res://assets/textures/tree_trunk_texture_displacement.png"))
+	trunk_mat.set_shader_parameter("bark_texture", _get_tex("res://assets/textures/tree_trunk_texture.png"))
+	trunk_mat.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_trunk_texture_normal.png"))
+	trunk_mat.set_shader_parameter("disp_map", _get_tex("res://assets/textures/tree_trunk_texture_displacement.png"))
 	trunk_mat.set_shader_parameter("hatching_strength", 0.45)
 
 
@@ -744,11 +749,8 @@ func _build_botw_foliage(is_high: bool, complexity: int) -> ArrayMesh:
 	st.generate_tangents()
 	return st.commit()
 
-
-
-
 func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
-	# ACE OPTIMIZATION: High-fidelity drift with strict performance gating
+	# ACE OPTIMIZATION: Zero-cost instantiation via static resource caching
 	var p = CPUParticles3D.new()
 	p.fixed_fps = 0; p.fract_delta = true 
 	
@@ -758,43 +760,18 @@ func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
 	p.initial_velocity_min = 0.05; p.initial_velocity_max = 0.2
 	p.damping_min = 0.05; p.damping_max = 0.1
 	
-	# ACE BOTW SCALE CURVE: Leaves shrink as they dissolve into the ground
-	var s_curve = Curve.new()
-	s_curve.add_point(Vector2(0, 0))
-	s_curve.add_point(Vector2(0.1, 1))
-	s_curve.add_point(Vector2(0.8, 1))
-	s_curve.add_point(Vector2(1, 0))
-	p.scale_amount_curve = s_curve
-	
+	p.scale_amount_curve = _get_leaf_scale_curve()
 	p.speed_scale = 0.02
 	p.angle_max = 360.0; p.angle_min = -360.0
 	p.angular_velocity_min = 40.0; p.angular_velocity_max = 180.0
-	
 	p.amount = 20; p.lifetime = 60.0 
 	p.local_coords = false 
-	
-	var curve = Gradient.new()
-	curve.set_color(0, Color(1, 1, 1, 1))
-	curve.set_color(1, Color(1, 1, 1, 0))
-	p.color_ramp = curve
+	p.color_ramp = _get_leaf_gradient()
 	p.color = col
 	
-	var qm = QuadMesh.new(); qm.size = Vector2(3.0, 5.5) # BOLDER OVALS
-	var sm = StandardMaterial3D.new()
-	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	sm.albedo_texture = load("res://assets/textures/falling_leaf_texture_1775970377159.png")
-	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-	sm.cull_mode = BaseMaterial3D.CULL_DISABLED
-	sm.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
-	sm.vertex_color_use_as_albedo = true
-	# ACE TRANSLUCENCY: Leaves catch the sun for a vibrant glow
-	sm.backlight_enabled = true; sm.backlight = Color(0.2, 0.4, 0.1)
-	
-	qm.surface_set_material(0, sm)
-	p.mesh = qm; p.position = center + Vector3(0, 25, 0)
+	p.mesh = _get_leaf_mesh()
+	p.position = center + Vector3(0, 25, 0)
 	p.visibility_aabb = AABB(Vector3(-50,-150,-50), Vector3(100,300,100))
-	
-	# ACE PERFORMANCE GATING: Only render particles near the ship
 	p.visibility_range_end = 250.0; p.visibility_range_end_margin = 80.0
 	p.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
@@ -805,8 +782,38 @@ func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
 	var t = get_tree().create_timer(p.lifetime + 1.0)
 	t.timeout.connect(func(): if is_instance_valid(p): p.queue_free())
 
+static var _leaf_mesh: QuadMesh = null
+static func _get_leaf_mesh() -> QuadMesh:
+	if _leaf_mesh: return _leaf_mesh
+	_leaf_mesh = QuadMesh.new(); _leaf_mesh.size = Vector2(3.0, 5.5)
+	var sm = StandardMaterial3D.new()
+	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sm.albedo_texture = _get_tex("res://assets/textures/falling_leaf_texture_1775970377159.png")
+	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	sm.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
+	sm.vertex_color_use_as_albedo = true
+	sm.backlight_enabled = true; sm.backlight = Color(0.2, 0.4, 0.1)
+	_leaf_mesh.surface_set_material(0, sm)
+	return _leaf_mesh
+
+static var _leaf_scale_curve: Curve = null
+static func _get_leaf_scale_curve() -> Curve:
+	if _leaf_scale_curve: return _leaf_scale_curve
+	_leaf_scale_curve = Curve.new()
+	_leaf_scale_curve.add_point(Vector2(0, 0)); _leaf_scale_curve.add_point(Vector2(0.1, 1))
+	_leaf_scale_curve.add_point(Vector2(0.8, 1)); _leaf_scale_curve.add_point(Vector2(1, 0))
+	return _leaf_scale_curve
+
+static var _leaf_gradient: Gradient = null
+static func _get_leaf_gradient() -> Gradient:
+	if _leaf_gradient: return _leaf_gradient
+	_leaf_gradient = Gradient.new()
+	_leaf_gradient.set_color(0, Color(1, 1, 1, 1)); _leaf_gradient.set_color(1, Color(1, 1, 1, 0))
+	return _leaf_gradient
+
 static var _leaf_p_shader: Shader = null
-static func _get_leaf_particle_shader() -> Shader:
+static func _get_leaf_p_shader() -> Shader:
 	if _leaf_p_shader: return _leaf_p_shader
 	_leaf_p_shader = Shader.new()
 	_leaf_p_shader.code = """shader_type spatial;
@@ -814,71 +821,63 @@ render_mode unshaded, cull_disabled;
 uniform sampler2D leaf_tex;
 varying float v_life;
 void vertex() {
-	v_life = INSTANCE_CUSTOM.y; // Alpha-progress (0 to 1) 
+	v_life = INSTANCE_CUSTOM.y;
 	float t = floor((TIME + float(INSTANCE_ID) * 0.45) * 8.0) / 8.0;
-	
-	// ACE LEAF FLUTTER: Erratic swaying for natural botanical drift
 	float sway = sin(t * 1.5 + float(INSTANCE_ID)) * 2.5;
-	VERTEX.x += sway * (1.0 - v_life); // Flutter decreases as it 'lands'
+	VERTEX.x += sway * (1.0 - v_life);
 	VERTEX.z += cos(t * 1.2) * 1.5 * (1.0 - v_life);
-	
-	// BILLBOARD ALIGNMENT
 	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(vec4(normalize(cross(vec3(0.0, 1.0, 0.0), INV_VIEW_MATRIX[2].xyz)), 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(INV_VIEW_MATRIX[2].xyz, 0.0), vec4(VERTEX.xyz, 1.0));
 }
 void fragment() {
 	vec4 tex = texture(leaf_tex, UV);
-	// REMOVE WHITE BACKGROUND: Treat high-luminance as transparency
 	float luma = (tex.r + tex.g + tex.b) / 3.0;
 	if (luma > 0.95) discard;
-	
 	ALBEDO = COLOR.rgb * tex.rgb;
-	// FADE OUT: Graceful dissolve as the leaf 'despawns' from the ground
 	ALPHA = (1.0 - smoothstep(0.8, 1.0, v_life)) * (1.0 - smoothstep(0.9, 1.0, luma));
 }"""
 	return _leaf_p_shader
 
+static var _grass_shader: Shader = null
+static func _get_grass_shader() -> Shader:
+	if _grass_shader: return _grass_shader
+	_grass_shader = Shader.new()
+	_grass_shader.code = """shader_type spatial; render_mode diffuse_toon, specular_toon, cull_disabled;
+varying vec3 v_world_pos;
+varying float v_h_jitter;
+void vertex() {
+	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	v_h_jitter = INSTANCE_CUSTOM.x;
+	if (VERTEX.y > 0.05) {
+		float d = distance(v_world_pos, CAMERA_POSITION_WORLD);
+		float proximity = 1.0 - smoothstep(12.0, 120.0, d);
+		float t = floor(TIME * 8.0) / 8.0;
+		VERTEX.x += sin(t * 2.1 + v_world_pos.x * 0.15) * 2.5 * VERTEX.y * (1.1 + proximity * 4.0);
+		VERTEX.z += cos(t * 1.8 + v_world_pos.z * 0.15) * 2.0 * VERTEX.y * (1.1 + proximity * 4.0);
+	}
+}
+void fragment() {
+	ALBEDO = mix(vec3(0.1, 0.4, 0.1), vec3(0.3, 0.8, 0.2), v_h_jitter);
+	ROUGHNESS = 0.8;
+}"""
+	return _grass_shader
+
 func _spawn_grass(points: Array[Transform3D]) -> void:
+	if points.is_empty(): return
 	var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.mesh = _build_grass_mesh()
-	mm.use_custom_data = true # ACE DUO-TONE SYNC
+	mm.use_custom_data = true 
 	mm.instance_count = points.size()
 	for i in range(points.size()): 
 		mm.set_instance_transform(i, points[i])
 		var j = fmod(float(hash(points[i].origin)), 10.0)/10.0
 		mm.set_instance_custom_data(i, Color(j, 0, 0, 0))
-	var shader = Shader.new(); shader.code = """shader_type spatial; render_mode diffuse_toon, specular_toon, cull_disabled;
-varying vec3 v_world_pos;
-varying float v_h_jitter;
-void vertex() {
-	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	v_h_jitter = INSTANCE_CUSTOM.x; 
-	if (VERTEX.y > 0.05) {
-		// PROXIMITY MASK: Animated only when ship is close (300m) to prevent distant flicker
-		float d = distance(v_world_pos, CAMERA_POSITION_WORLD);
-		float proximity = 1.0 - smoothstep(50.0, 300.0, d);
-		
-		if (proximity > 0.01) {
-			float wt = floor(TIME * 8.0) / 8.0 * 1.4;
-			float wind = sin(v_world_pos.x * 0.2 + v_world_pos.z * 0.15 + wt);
-			VERTEX.x += wind * 0.3 * (VERTEX.y * 0.5) * proximity;
-			VERTEX.z += wind * 0.2 * (VERTEX.y * 0.5) * proximity;
-		}
-	}
-}
-void fragment() {
-	// ACE MEADOW FLATTENING: Bias normals UP so the grass field shades as a solid rolling plane (Europa/Pinto style)
-	NORMAL = mix(NORMAL, vec3(0,1,0), 0.7);
-	NORMAL = (FRONT_FACING) ? NORMAL : -NORMAL;
-
-	vec3 base = %s; vec3 contrast = %s;
-	ALBEDO = mix(base, contrast, v_h_jitter);
-	ROUGHNESS = 1.0;
-}""" % [_v3s(pal_grass_col), _v3s(pal_grass_secondary)]
-	# ACE MEADOWS: High Detail (Individual Blades)
-	var mmi_h = MultiMeshInstance3D.new(); mmi_h.multimesh = mm; mmi_h.material_override = ShaderMaterial.new(); mmi_h.material_override.shader = shader; 
 	
-	# POP-IN POLICY: Grass waits until 1.5km to avoid horizon noise
+	var mmi_h = MultiMeshInstance3D.new()
+	mmi_h.multimesh = mm
+	var mat = ShaderMaterial.new()
+	mat.shader = _get_grass_shader()
+	mmi_h.material_override = mat
+	
 	mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 200.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	
 	add_child(mmi_h); _flora_nodes.append(mmi_h)
 	
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:
@@ -892,8 +891,8 @@ func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	
 	# ACE METROPOLITAN SLAB
 	var f_mm = MultiMesh.new(); f_mm.transform_format = MultiMesh.TRANSFORM_3D
-	var f_mesh = BoxMesh.new(); f_mesh.size = Vector3(6000, 60.0, 6000)
-	f_mm.mesh = f_mesh; f_mm.instance_count = points.size()
+	f_mm.mesh = _get_box_mesh(Vector3(6000, 60.0, 6000))
+	f_mm.instance_count = points.size()
 	var f_mat = StandardMaterial3D.new(); f_mat.albedo_color = Color(0.08, 0.08, 0.09); f_mat.roughness = 0.95
 	for i in range(points.size()): f_mm.set_instance_transform(i, points[i].translated_local(Vector3(0, -32, 0)))
 	var f_mmi = MultiMeshInstance3D.new(); f_mmi.multimesh = f_mm; f_mmi.material_override = f_mat; add_child(f_mmi); _flora_nodes.append(f_mmi)
@@ -927,7 +926,7 @@ func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	# ACE SPACE-IMPOSTOR LOGIC: Faking the city from orbit
 	if scale_factor > 0.1:
 		var i_mm = MultiMesh.new(); i_mm.transform_format = MultiMesh.TRANSFORM_3D
-		i_mm.mesh = BoxMesh.new(); i_mm.mesh.size = Vector3(4500, 10, 4500)
+		i_mm.mesh = _get_box_mesh(Vector3(4500, 10, 4500))
 		i_mm.instance_count = points.size()
 		for i in points.size(): i_mm.set_instance_transform(i, points[i].translated_local(Vector3(0, -5, 0)))
 		var i_mmi = MultiMeshInstance3D.new(); i_mmi.multimesh = i_mm; i_mmi.material_override = _get_impostor_mat()
@@ -1585,88 +1584,55 @@ void vertex() {
 	v_local_pos = VERTEX;
 	v_world_normal = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
 
-	// VERTEX DISPLACEMENT: Multi-directional wave swell
-	// Uses summed sine waves at 4 non-orthogonal angles to avoid X/Z grid artifacts
-	float wt = floor(TIME * 8.0) / 8.0 * 0.9;
-	float s = sin(wt); float c = cos(wt * 0.7);
-	float disp = sin(dot(VERTEX.xz, vec2(0.047,  0.031)) + wt * 1.2) * 2.2
-			   + sin(dot(VERTEX.xz, vec2(-0.039, 0.052)) + wt * 0.9) * 1.8
-			   + sin(dot(VERTEX.xz, vec2(0.028,  -0.061)) + wt * 1.5) * 1.4
-			   + sin(dot(VERTEX.xz, vec2(0.057,   0.023)) + wt * 0.7) * 1.0;
-	VERTEX += normalize(VERTEX) * disp;
+	// ACE PROXIMITY GATING: Waves only animate when ship is within 4km
+	float d_to_cam = distance((MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz, CAMERA_POSITION_WORLD);
+	float wave_mask = 1.0 - smoothstep(1500.0, 4000.0, d_to_cam);
+
+	if (wave_mask > 0.01) {
+		float wt = floor(TIME * 8.0) / 8.0 * 0.9;
+		float disp = sin(dot(VERTEX.xz, vec2(0.047,  0.031)) + wt * 1.2) * 2.2
+				   + sin(dot(VERTEX.xz, vec2(-0.039, 0.052)) + wt * 0.9) * 1.8
+				   + sin(dot(VERTEX.xz, vec2(0.028,  -0.061)) + wt * 1.5) * 1.4
+				   + sin(dot(VERTEX.xz, vec2(0.057,   0.023)) + wt * 0.7) * 1.0;
+		VERTEX += normalize(VERTEX) * disp * wave_mask;
+	}
 }
 
 void fragment() {
+	float d_to_cam = distance((INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz, CAMERA_POSITION_WORLD);
+	float wave_mask = 1.0 - smoothstep(2000.0, 5000.0, d_to_cam);
+	
 	float wt = floor(TIME * 8.0) / 8.0;
 	float shore = v_shore;
-
-	// -------------------------------------------------------
-	// 1. DEEP / SHALLOW COLOR GRADIENT
-	// -------------------------------------------------------
 	vec3 base_col = mix(pal_water_base, pal_water_shore, smoothstep(0.0, 0.80, shore));
-	// -------------------------------------------------------
-	// 2. SHORE-DIRECTED WAVE TRAVEL
-	// Sample the FBM field shifted toward increasing shore values over time.
-	// This makes the entire noise pattern scroll inward toward the coastlines.
-	// shore acts as the radial distance proxy: waves at shore=0.8 are
-	// "further in" and have been traveling longer — so they're tighter/steeper.
-	// -------------------------------------------------------
-	float SCALE = 0.0018; // World space frequency — tune for visual size
+
+	float SCALE = 0.0018; 
 	vec2 ocean_uv = v_local_pos.xz * SCALE;
 
-	// Domain warp: shift sample position to break straight-line artifacts
-	float warp_speed = 0.07;
-	vec2 warp = vec2(
-		fbm(ocean_uv + vec2(wt * warp_speed, 1.7)),
-		fbm(ocean_uv + vec2(3.4, wt * warp_speed * 0.8))
-	) * 0.8 - 0.4;
-
-	// Shore-inward travel: translate sample toward shore over time
-	float travel_rate = 0.15;
-	vec2 shore_pull = vec2(shore * travel_rate * wt * 0.04); // Subtle directional drift inward
-
-	float ocean_n = fbm(ocean_uv + warp + shore_pull);
-
-	// Shoaling: waves tighten as they approach shore (higher frequency near land)
-	float shoal_freq = mix(1.0, 1.8, smoothstep(0.2, 0.8, shore));
-	ocean_n = fbm((ocean_uv + warp) * shoal_freq + vec2(wt * 0.06, wt * 0.04));
-
-	// -------------------------------------------------------
-	// 3. CEL-SHADED WAVE BANDS
-	// Quantize the smooth FBM into 3 hard toon bands:
-	// deep trough → mid-water → bright crest
-	// -------------------------------------------------------
 	float wave_cel = 0.0;
 	float crest_cel = 0.0;
-	if (ocean_n > 0.72) {
-		crest_cel = 1.0; // Bright white crest band
-	} else if (ocean_n > 0.52) {
-		wave_cel = 1.0;  // Mid-water highlight band
-	}
-
-	// Fade wave detail in very shallow water (shore rings take over there)
-	float deep_mask = smoothstep(0.75, 0.25, shore);
-	wave_cel  *= deep_mask;
-	crest_cel *= deep_mask;
-
-	// -------------------------------------------------------
-	// 4. SHORE RINGS — waves rolling toward the beach
-	// v_shore drives the ring animation so waves travel INTO shore.
-	// Domain-warped by the FBM field so rings follow organic coastline shapes.
-	// -------------------------------------------------------
 	float shore_rings = 0.0;
-	if (shore > 0.02 && shore < 0.97) {
-		// Warp the shore coordinate by the ocean FBM to make wavefronts curl organically
-		float s_warped = shore + (ocean_n - 0.5) * 0.12;
 
-		// Two wave frequencies create interference — waves travel TOWARD shore (s - TIME)
-		float ring_a = sin(s_warped * 32.0 - wt * 3.2); // Fast ripples  
-		float ring_b = sin(s_warped * 18.0 - wt * 2.0); // Slow swells
-		float interference = ring_a * 0.55 + ring_b * 0.45;
+	// ACE PERFORMANCE BYPASS: Only run heavy FBM and Shore Loops when near surface
+	if (wave_mask > 0.01) {
+		float warp_speed = 0.07;
+		vec2 warp = vec2(fbm(ocean_uv + vec2(wt * warp_speed, 1.7)), fbm(ocean_uv + vec2(3.4, wt * warp_speed * 0.8))) * 0.8 - 0.4;
+		float shoal_freq = mix(1.0, 1.8, smoothstep(0.2, 0.8, shore));
+		float ocean_n = fbm((ocean_uv + warp) * shoal_freq + vec2(wt * 0.06, wt * 0.04));
 
-		shore_rings = step(0.68, interference);
-		shore_rings *= smoothstep(0.0, 0.06, shore);  // Fade at land edge
-		shore_rings *= smoothstep(0.95, 0.65, shore); // Fade into open ocean
+		if (ocean_n > 0.72) crest_cel = 1.0;
+		else if (ocean_n > 0.52) wave_cel = 1.0;
+
+		float deep_mask = smoothstep(0.75, 0.25, shore);
+		wave_cel *= (deep_mask * wave_mask);
+		crest_cel *= (deep_mask * wave_mask);
+
+		if (shore > 0.02 && shore < 0.97) {
+			float s_warped = shore + (ocean_n - 0.5) * 0.12;
+			float ring_a = sin(s_warped * 32.0 - wt * 3.2);
+			float ring_b = sin(s_warped * 18.0 - wt * 2.0);
+			shore_rings = clamp(pow(max(0.0, ring_a * ring_b), 3.5) * 12.0, 0.0, 1.0) * wave_mask;
+		}
 	}
 
 	// -------------------------------------------------------
@@ -1726,7 +1692,7 @@ void light() {
 	return _shared_water_shader
 
 func _spawn_minerals(data: Array) -> void:
-	var m_script = load("res://src/world/MineableResource.gd")
+	var m_script = _get_res("res://src/world/MineableResource.gd")
 	if not m_script: return
 	for item in data:
 		var xf: Transform3D = item[0]

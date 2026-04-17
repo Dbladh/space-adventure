@@ -95,7 +95,9 @@ func _ready() -> void:
 	# Load once at startup, not every fire event
 	bolt_script = load("res://src/combat/LaserBolt.gd")
 	if bolt_script: print("--- GUNSMITH: LaserBolt loaded OK ---")
-	else: print("!!! GUNSMITH ERROR: Cannot find res://src/combat/LaserBolt.gd !!!")
+	# ACE TITAN SYNC: Block player until Universe is Ready
+	set_physics_process(false)
+	set_process(false)
 	
 	# 0. PHYSICAL BOUNDARIES: Starhawk-Class (6m Hull Radius)
 	coll_node = CollisionShape3D.new()
@@ -271,6 +273,10 @@ func _setup_starhawk_hull() -> void:
 			var mat = ShaderMaterial.new(); mat.shader = load("res://src/world/reentry_vignette.gdshader")
 			reentry_vignette.material = mat
 			hud.add_child(reentry_vignette)
+			
+			# ACE SHADER WARM-UP: Prevent 'First-Use' freeze during atmospheric entry
+			mat.set_shader_parameter("intensity", 0.001)
+			get_tree().create_timer(0.1).timeout.connect(func(): if is_instance_valid(mat): mat.set_shader_parameter("intensity", 0.0))
 			
 			# ACE HULL ANALYSIS: Dynamic nose detection
 			var model_aabb = AABB()
@@ -643,14 +649,23 @@ func _process_ace_flight(delta: float) -> void:
 	var surface_ratio = smoothstep(0.0, 3500.0, true_altitude)
 	var turb_altitude_ratio = smoothstep(150.0, 800.0, true_altitude)
 	
-	# ATMOSPHERIC SPEED DECELERATION: Tiered throttling for planetary exploration
-	# Surface: ~180m/s | Exosphere: 480m/s | Space: max_space_speed
-	var surface_max = lerp(180.0, 480.0, surface_ratio)
-	var dynamic_max_speed = lerp(surface_max, max_space_speed, altitude_ratio)
+	# ORBITAL SAFETY OVERRIDE: Prioritize performance by throttling speed near planets
+	# At 80km, the 'Gravity Brake' engages, forcing a bleed-off down to safe levels.
+	var safety_ratio = smoothstep(26000.0, 80000.0, true_altitude)
+	var gravity_brake_max = lerp(600.0, max_space_speed, safety_ratio)
 	
-	# Warp Thresholds: 450m/s (Surface) -> 2100m/s (Atmo) -> max_warp_speed (Space)
+	# ATMOSPHERIC SPEED DECELERATION: Tiered throttling for planetary exploration
+	# Surface: ~180m/s | Exosphere: 480m/s | Space: gravity_brake_max
+	var surface_max = lerp(180.0, 480.0, surface_ratio)
+	var dynamic_max_speed = lerp(surface_max, gravity_brake_max, altitude_ratio)
+	
+	# Warp Thresholds: 450m/s (Surface) -> 2100m/s (Atmo) -> gravity_brake_max (Space)
 	var surface_warp = lerp(450.0, 2100.0, surface_ratio)
-	var dynamic_warp_speed = lerp(surface_warp, max_warp_speed, altitude_ratio)
+	var dynamic_warp_speed = lerp(surface_warp, min(max_warp_speed, gravity_brake_max * 2.5), altitude_ratio)
+	
+	# ACE: Force-bleed velocity if exceeding the safety threshold (G-Lock)
+	if velocity.length() > gravity_brake_max * 1.5:
+		velocity = velocity.lerp(velocity.normalized() * (gravity_brake_max * 1.5), delta * 2.0)
 	
 	# THREE-TIER SPEED SELECTION
 	# Normal: R2 analog → dynamic_max_speed
@@ -1534,6 +1549,19 @@ func _setup_polar_weather() -> void:
 	snow_particles.position = Vector3(0, 80.0, -50.0) # Spawn overhead and slightly ahead
 	snow_particles.emitting = false
 
+func prewarm_vfx() -> void:
+	# ACE: Force-render all movement VFX behind the loading screen to avoid shader hitches
+	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+	if get("thruster_trails"):
+		for t in get("thruster_trails"): t.emitting = true
+	
+	# Wait one frame and then cut them
+	await get_tree().process_frame
+	if get("thruster_trails"):
+		for t in get("thruster_trails"): t.emitting = false
+
+# (c) On the Side LLC. and affiliates. Confidential and proprietary.
+
 func _update_polar_weather(delta: float) -> void:
 	if not snow_particles: return
 	
@@ -1543,7 +1571,11 @@ func _update_polar_weather(delta: float) -> void:
 		var d = p.global_position.distance_to(global_position)
 		if d < min_d: min_d = d; nearest_p = p
 	
-	# Atmospheric Layer: Extend detection to 60km to ensure visibility during descent
+	# Atmospheric Layer: Extend detection	# UNIVERSAL VOID: No atmospheric skyboxes per GEMINI mandates
+	# The background color is handled globally by Main.gd (Stark Charcoal)
+	# We only handle local lighting/fog here if needed
+	pass
+	
 	if nearest_p and min_d < nearest_p.planet_radius + 60000.0:
 		var p_type = nearest_p.get("archetype")
 		

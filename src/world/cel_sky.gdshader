@@ -73,14 +73,20 @@ void sky() {
 	float sky_grad = smoothstep(-0.35, 0.7, local_e.y);
 	vec3 final_col = mix(horizon_color, zenith_color, sky_grad);
 	
-	// 3. ICONIC WINDWAKER CLOUDS (Static Texture Sync)
+	// 3. ICONIC WINDWAKER CLOUDS (Deep-Space Throttle)
+	// ACE: We dramatically reduce coordinate precision and movement when in orbit
+	float cloud_throttle = 1.0 - space_blend;
 	vec3 cl_pos1 = local_e * vec3(0.35, 1.2, 0.35); 
+	
+	// If in deep space, we freeze the UVs to a stable state to prevent shimmer
 	vec2 cl_uv1 = cl_pos1.xz + cl_pos1.y * 0.15;
+	if (cloud_throttle < 0.05) {
+		cl_uv1 = floor(cl_uv1 * 100.0) / 100.0;
+	}
+	
 	float base_n = texture(cloud_noise, cl_uv1).r;
 	float bumpy_n = texture(cloud_noise, cl_uv1 * 3.5).r;
 	float final_n = base_n + bumpy_n * 0.2; 
-	
-	// SHAPE SYNC: Static puffs
 	float puff_mask1 = step(0.86, final_n);
 	
 	// ICONIC SHADOW SYNC

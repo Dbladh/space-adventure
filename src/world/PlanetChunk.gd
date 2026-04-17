@@ -73,6 +73,7 @@ const PROP_LOD_FADE: float = 300.0
 
 func start_generation() -> void:
 	self.visible = false
+	_is_generating = false # ACE: Reset state before starting new thread to avoid pool deadlocks
 	DebugSettings.connect_rebuild(self, "_on_rebuild_req")
 	_start_async_generation()
 
@@ -102,6 +103,7 @@ func sleep_and_reset() -> void:
 	_mesh_data_land.clear()
 	_mesh_data_water.clear()
 	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear()
+	_is_generating = false # FORCE RESET
 	
 	# Purge all botanical MultiMesh instances and collisions ASYNCHRONOUSLY
 	# Moving them to death_row prevents the main thread from locking up 
@@ -163,6 +165,10 @@ func get_terrain_elevation(sn: Vector3) -> float:
 			var craters = abs(noise.get_noise_3dv(sn * 1200.0))
 			var bubbling = noise.get_noise_3dv(sn * 3000.0) * 0.5
 			local_geo = (macro_h - craters * 1.8 + bubbling + micro_crag) * terrain_strength * 0.6
+		"ALPINE":
+			# CRAGGY PEAKS: High-frequency ridge noise for dramatic vertical scale
+			var ridge = 1.0 - abs(macro_h)
+			local_geo = (ridge * 2.5 - 0.8 + micro_crag * 1.5) * terrain_strength * 1.5
 		_:
 			# LUSH / CANDY: Standard Smooth Terraces
 			local_geo = (macro_h + micro_crag) * terrain_strength

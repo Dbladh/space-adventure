@@ -122,7 +122,7 @@ func _ready() -> void:
 	
 	# ARCHETYPE SYSTEM — THE COSMOLOGIST
 	# Sync with PlanetChunk: 8 thematic archetypes with procedural hue jitter.
-	var archetypes = ["LUSH", "DESERT", "FROZEN", "TOXIC", "VOLCANIC", "CANDY", "RADIATED", "ABYSS"]
+	var archetypes = ["LUSH", "DESERT", "FROZEN", "ALPINE", "VOLCANIC", "CANDY", "RADIATED", "ABYSS"]
 	var pal_rng = RandomNumberGenerator.new()
 	pal_rng.seed = hash(str(name) + str(planet_radius) + str(planet_seed)) & 0x7FFFFFFF
 	var theme = archetypes[pal_rng.randi() % archetypes.size()]
@@ -149,6 +149,11 @@ func _ready() -> void:
 			pal_grass_col = Color.from_hsv(h, 0.85, 0.9)
 			pal_mount_col = Color.from_hsv(0.8, 0.5, 0.4)
 			pal_water_base = Color.from_hsv(h+0.2, 0.85, 0.7)
+		"ALPINE":
+			var h = pal_rng.randf_range(0.58, 0.62)
+			pal_grass_col = Color.from_hsv(h, 0.15, 0.98) # Snow
+			pal_mount_col = Color.from_hsv(h, 0.4, 0.45)  # Blue Grey Stone
+			pal_water_base = Color.from_hsv(0.6, 0.8, 0.9) # Clear Blue Ice-Water
 		"VOLCANIC":
 			pal_grass_col = Color.from_hsv(0.0, 0.9, 0.5)
 			pal_mount_col = Color.from_hsv(0, 0.0, 0.15)
@@ -220,6 +225,10 @@ func get_terrain_height_at(pos: Vector3) -> float:
 			var craters = abs(noise.get_noise_3dv(sphere_norm * 1200.0))
 			var bubbling = noise.get_noise_3dv(sphere_norm * 3000.0) * 0.5
 			total_h = (macro_h - craters * 1.8 + bubbling + micro_crag) * terrain_strength * 0.6
+		"ALPINE":
+			# CRAGGY PEAKS: High-frequency ridge noise for dramatic vertical scale
+			var ridge = 1.0 - abs(macro_h)
+			total_h = (ridge * 2.5 - 0.8 + micro_crag * 1.5) * terrain_strength * 1.5
 		_:
 			# LUSH / CANDY / DEFAULT: The classic 'No Man's Sky' smooth terraced hills
 			total_h = (macro_h + micro_crag) * terrain_strength
@@ -293,14 +302,31 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		uniform vec3 ring_col_a;
 		varying vec3 v_local_pos;
 		void vertex() { v_local_pos = VERTEX; }
+		float hash(float n) { return fract(sin(n) * 43758.5453123); }
 		void fragment() {
-			float d = length(vec2(v_local_pos.x, v_local_pos.z));
-			float band = step(0.5, fract(d * 0.000048));
-			if (band > 0.0) { ALBEDO = ring_col_a; ALPHA = 0.8; }
-			else { ALPHA = 0.0; }
+			float d = length(v_local_pos.xz);
+			float radial_idx = floor(d * 0.0002);
+			float noise_val = hash(radial_idx);
+			
+			// Multi-frequency bands
+			float mask = mix(0.2, 0.8, noise_val);
+			mask *= 0.7 + 0.3 * sin(d * 0.0015); // Fine grooves
+			mask *= 0.8 + 0.2 * sin(d * 0.00004); // Broad variation
+			
+			// Cassini-style gaps for realism
+			float gaps = step(0.15, abs(sin(d * 0.000025 + noise_val)));
+			mask *= gaps;
+			
+			// Procedural tone shifting per band
+			vec3 final_col = ring_col_a * (0.85 + noise_val * 0.25);
+			ALBEDO = final_col;
+			ALPHA = clamp(mask * 0.6, 0.0, 0.85);
 		}"""
 		var r_inst = MeshInstance3D.new(); r_inst.mesh = r_mesh; r_inst.material_override = ShaderMaterial.new(); r_inst.material_override.shader = r_shader
-		r_inst.material_override.set_shader_parameter("ring_col_a", Color.WHITE)
+		
+		# Procedural Ring Palette: Derived from planet hue but desaturated and bright (ice/dust)
+		var r_col = Color.from_hsv(base_hue, 0.25, 1.0).lerp(Color.WHITE, 0.3)
+		r_inst.material_override.set_shader_parameter("ring_col_a", r_col)
 		r_inst.rotation_degrees = Vector3(rng.randf_range(10.0, 35.0), rng.randf_range(0, 360), 0.0)
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
 		r_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(r_inst)
@@ -652,8 +678,8 @@ func _process(_delta: float) -> void:
 			chunk_pool.append(z)
 	
 	# ACE FINALIZATION: Predictable Generation Cycles
-	# STRICT BUDGET: Exactly 1 chunk per frame to prevent instantiation spikes.
-	MAX_FINALIZE_PER_FRAME = 1 
+	# STRICT BUDGET: Exactly 4 chunks per frame to handle QuadTree splits without backlog.
+	MAX_FINALIZE_PER_FRAME = 4 
 	for i in range(min(finalize_queue.size(), MAX_FINALIZE_PER_FRAME)):
 		var chunk = finalize_queue.pop_front()
 		if is_instance_valid(chunk):
@@ -717,6 +743,9 @@ func get_terrain_elevation(sn: Vector3) -> float:
 			var craters = abs(noise.get_noise_3dv(sn * 1200.0))
 			var bubbling = noise.get_noise_3dv(sn * 3000.0) * 0.5
 			local_geo = (macro_h - craters * 1.8 + bubbling + micro_crag) * terrain_strength * 0.6
+		"ALPINE":
+			var ridge = 1.0 - abs(macro_h)
+			local_geo = (ridge * 2.5 - 0.8 + micro_crag * 1.5) * terrain_strength * 1.5
 		_:
 			local_geo = (macro_h + micro_crag) * terrain_strength
 			var volcanic: float = noise.get_noise_3dv(sn * 25000.0)

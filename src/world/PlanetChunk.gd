@@ -20,6 +20,9 @@ var continent_pole: Vector3 = Vector3.UP # ACE: Synchronized continent anchor
 var face: Node3D
 var planet: Node
 
+func setup(p_planet: Node) -> void:
+	self.planet = p_planet
+
 # DYNAMIC PROCEDURAL PLANET PALETTE
 static var _res_cache := {}
 static func _get_res(path: String) -> Resource:
@@ -991,21 +994,35 @@ func _build_faceted_rock_mesh(sides: int) -> ArrayMesh:
 		
 		# 1. LOWER SIDES (CCW: b1, m2, m1 and b2, m2, b1)
 		st.set_color(c_side)
-		st.add_vertex(b1); st.add_vertex(m2); st.add_vertex(m1)
-		st.add_vertex(b2); st.add_vertex(m2); st.add_vertex(b1)
+		st.set_uv(Vector2(float(i)/sides, 0)); st.add_vertex(b1)
+		st.set_uv(Vector2(float(i+1)/sides, 0.4)); st.add_vertex(m2)
+		st.set_uv(Vector2(float(i)/sides, 0.4)); st.add_vertex(m1)
+		
+		st.set_uv(Vector2(float(i+1)/sides, 0)); st.add_vertex(b2)
+		st.set_uv(Vector2(float(i+1)/sides, 0.4)); st.add_vertex(m2)
+		st.set_uv(Vector2(float(i)/sides, 0)); st.add_vertex(b1)
 		
 		# 2. UPPER SIDES (CCW: m1, t2, t1 and m2, t2, m1)
 		st.set_color(c_mid)
-		st.add_vertex(m1); st.add_vertex(t2); st.add_vertex(t1)
-		st.add_vertex(m2); st.add_vertex(t2); st.add_vertex(m1)
+		st.set_uv(Vector2(float(i)/sides, 0.4)); st.add_vertex(m1)
+		st.set_uv(Vector2(float(i+1)/sides, 0.8)); st.add_vertex(t2)
+		st.set_uv(Vector2(float(i)/sides, 0.8)); st.add_vertex(t1)
+		
+		st.set_uv(Vector2(float(i+1)/sides, 0.4)); st.add_vertex(m2)
+		st.set_uv(Vector2(float(i+1)/sides, 0.8)); st.add_vertex(t2)
+		st.set_uv(Vector2(float(i)/sides, 0.4)); st.add_vertex(m1)
 		
 		# 3. CAP (CCW: t1, t2, top)
 		st.set_color(c_top)
-		st.add_vertex(t1); st.add_vertex(t2); st.add_vertex(top)
+		st.set_uv(Vector2(float(i)/sides, 0.8)); st.add_vertex(t1)
+		st.set_uv(Vector2(float(i+1)/sides, 0.8)); st.add_vertex(t2)
+		st.set_uv(Vector2(0.5, 1.0)); st.add_vertex(top)
 		
 		# 4. BOTTOM CAP (CCW: 0, b1, b2)
 		st.set_color(c_side * 0.8)
-		st.add_vertex(Vector3.ZERO); st.add_vertex(b1); st.add_vertex(b2)
+		st.set_uv(Vector2(0.5, 0.0)); st.add_vertex(Vector3.ZERO)
+		st.set_uv(Vector2(float(i)/sides, 0)); st.add_vertex(b1)
+		st.set_uv(Vector2(float(i+1)/sides, 0)); st.add_vertex(b2)
 		
 	st.generate_normals(false)
 	st.generate_tangents()
@@ -1094,8 +1111,18 @@ func _add_lush_blob(st: SurfaceTool, center: Vector3, size: float, is_high: bool
 			var v3 = center + Vector3(sin(lat2)*cos(lon1), cos(lat2), sin(lat2)*sin(lon1)) * size
 			var v4 = center + Vector3(sin(lat2)*cos(lon2), cos(lat2), sin(lat2)*sin(lon2)) * size
 			
-			st.add_vertex(v1); st.add_vertex(v2); st.add_vertex(v4)
-			st.add_vertex(v1); st.add_vertex(v4); st.add_vertex(v3)
+			var u1 = float(s) / segments
+			var u2 = float(s + 1) / segments
+			var v1_uv = float(r) / rings
+			var v2_uv = float(r + 1) / rings
+			
+			st.set_uv(Vector2(u1, v1_uv)); st.add_vertex(v1)
+			st.set_uv(Vector2(u2, v1_uv)); st.add_vertex(v2)
+			st.set_uv(Vector2(u2, v2_uv)); st.add_vertex(v4)
+			
+			st.set_uv(Vector2(u1, v1_uv)); st.add_vertex(v1)
+			st.set_uv(Vector2(u2, v2_uv)); st.add_vertex(v4)
+			st.set_uv(Vector2(u1, v2_uv)); st.add_vertex(v3)
 
 func _build_low_tree() -> ArrayMesh:
 	if c_t_l: return c_t_l

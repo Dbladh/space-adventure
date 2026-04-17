@@ -87,11 +87,11 @@ void fragment() {
 	float c_noise = noise(NORMAL * 2.2) * 1.5; 
 	float major_mask = smoothstep(0.48, 0.52, c_noise + proximity * 0.9);
 
-	# ACE CONTINENTAL HANDOVER: Map landmasses and oceans to the orbital proxy
+	// ACE CONTINENTAL HANDOVER: Map landmasses and oceans to the orbital proxy
 	vec3 land_base = mix(col_a, col_b, smoothstep(0.4, 0.9, lat));
 	vec3 base_col = mix(w_col, land_base, major_mask);
 	
-	# POLAR ICE CAPS: Mandatory snow overlay at the high latitudes
+	// POLAR ICE CAPS: Mandatory snow overlay at the high latitudes
 	float pole_mask = smoothstep(0.82, 0.92, lat);
 	base_col = mix(base_col, vec3(0.95, 0.98, 1.0), pole_mask);
 	
@@ -101,7 +101,7 @@ void fragment() {
 	vec3 v_light_dir = (VIEW_MATRIX * vec4(light_dir, 0.0)).xyz;
 	float d = dot(NORMAL, v_light_dir);
 	
-	# MINIMALIST GLOW: Core metropolitan grid only
+	// MINIMALIST GLOW: Core metropolitan grid only
 	float darkness = 1.0 - smoothstep(-0.2, 0.2, d);
 	vec2 grid_uv = fract(NORMAL.xz * 60.0);
 	float grid_noise = step(0.4, grid_uv.x) * step(0.4, grid_uv.y);

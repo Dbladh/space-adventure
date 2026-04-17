@@ -19,4 +19,6 @@ static func connect_rebuild(obj: Object, method: String) -> void:
 	if not _signal_hub:
 		_signal_hub = Node.new()
 		_signal_hub.add_user_signal("rebuild_requested")
-	_signal_hub.connect("rebuild_requested", Callable(obj, method))
+	var c = Callable(obj, method)
+	if not _signal_hub.is_connected("rebuild_requested", c):
+		_signal_hub.connect("rebuild_requested", c)

@@ -24,7 +24,7 @@ var mobile_interact: bool = false
 
 # GYRO STEERING (Star Fox Style)
 @export var gyro_enabled: bool = true
-@export var gyro_sensitivity: float = 4.5
+@export var gyro_sensitivity: float = 1.9 # ACE: Lowered for absolute gravity stability
 var _gyro_offset: Vector3 = Vector3.ZERO
 
 var in_ship: bool = true
@@ -609,16 +609,21 @@ func _process_ace_flight(delta: float) -> void:
 		# Pro-Calibrated Mapping for Star Fox Tilt
 		# Gravity.x handles Yaw (Side-to-side tilt)
 		# Gravity.z handles Pitch (Forward-back tilt)
-		var t_yaw = grav.x / 9.8 * gyro_sensitivity * 0.5
-		var t_pitch = -grav.z / 9.8 * gyro_sensitivity * 0.5
+		# ACE DEADZONE: Ignore subtle tilts to prevent drift/spinning
+		const TILT_DEAD = 1.5
+		var tx = grav.x if abs(grav.x) > TILT_DEAD else 0.0
+		var tz = grav.z if abs(grav.z) > TILT_DEAD else 0.0
+		
+		var t_yaw = clamp(tx / 6.0, -1.0, 1.0) * gyro_sensitivity
+		var t_pitch = clamp(-tz / 6.0, -1.0, 1.0) * gyro_sensitivity
 		
 		yaw -= t_yaw
 		pitch -= t_pitch
 		
 		# ACE: Force tilt as primary steering on ALL mobile devices
 		if abs(yaw_stick) < 0.1 and abs(pitch_stick) < 0.1:
-			yaw = -t_yaw * 3.0
-			pitch = -t_pitch * 3.0
+			yaw = clamp(-t_yaw, -1.5, 1.5)
+			pitch = clamp(-t_pitch, -1.5, 1.5)
 
 	if Input.is_key_pressed(KEY_A): yaw = 1.0
 	if Input.is_key_pressed(KEY_D): yaw = -1.0

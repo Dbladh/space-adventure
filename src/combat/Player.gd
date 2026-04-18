@@ -203,7 +203,7 @@ func _setup_ace_camera() -> void:
 	_setup_thruster_trails()
 
 func _setup_combat_hud() -> void:
-	var hud = CanvasLayer.new(); hud.name = "CombatHUD"; add_child(hud)
+	var hud = CanvasLayer.new(); hud.name = "CombatHUD"; hud.layer = 125; add_child(hud)
 	
 	# ACE VISOR: Create a high-fidelity dynamic targeting circle
 	hud_reticle = Control.new()
@@ -458,7 +458,7 @@ func take_damage(amount: float) -> void:
 	if health_component: health_component.take_damage(amount)
 
 func _setup_player_hud() -> void:
-	var hud = CanvasLayer.new(); hud.layer = 100; add_child(hud)
+	var hud = CanvasLayer.new(); hud.layer = 125; add_child(hud)
 	
 	# ACE: Master Vitality Bar (Top Center)
 	var bar_w = 400.0; var bar_h = 24.0
@@ -1543,9 +1543,10 @@ func _process(delta: float) -> void:
 				
 	# GUNSMITH FINAL SYNC: Fire AFTER bolt pool updates to ensure muzzle-snapping
 	if in_ship and fire_cooldown <= 0.0:
-		var cur_fire = Input.is_key_pressed(KEY_F)
+		var cur_fire = Input.is_key_pressed(KEY_F) or mobile_fire
 		var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
-		if (cur_fire and not _prev_fire_key) or cur_joy_fire:
+		# Continuous fire if cur_fire is held, no need for _prev_fire_key
+		if cur_fire or cur_joy_fire:
 			_fire_alternating_cannon()
 			fire_cooldown = 0.18 # ACE RPS NERF: 5.5 shots per second
 		_prev_fire_key = cur_fire

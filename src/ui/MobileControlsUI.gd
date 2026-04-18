@@ -88,9 +88,9 @@ func _draw() -> void:
 	var sy = v_size.y
 
 	# --- THROTTLE BAR (left, latching) ---
-	var bar_x = 110.0
-	var bar_h = sy * 0.62
-	var bar_y_center = sy * 0.52
+	var bar_x = 80.0
+	var bar_h = sy * 0.45
+	var bar_y_center = sy * 0.70
 	var bar_top = bar_y_center - bar_h * 0.5
 	var bar_bot = bar_y_center + bar_h * 0.5
 	_rect_throttle_bar = Rect2(bar_x - 60.0, bar_top - 40.0, 160.0, bar_h + 80.0)
@@ -246,6 +246,8 @@ func _input(event: InputEvent) -> void:
 		if event.index == l_touch_idx:
 			_update_throttle_from_pos(event.position.y)
 			get_viewport().set_input_as_handled()
+		else:
+			_on_press(event.position, event.index)
 	elif event is InputEventMouseMotion:
 		if l_dragging:
 			_update_throttle_from_pos(event.position.y)
@@ -309,21 +311,21 @@ func _on_release(index: int) -> void:
 	if index == fire_touch:
 		fire_touch = -1
 		fire_pressed.emit(false)
-		queue_redraw(); get_viewport().set_input_as_handled(); return
+		queue_redraw(); get_viewport().set_input_as_handled()
 	if index == boost_touch:
 		boost_touch = -1
 		boost_pressed.emit(false)
-		queue_redraw(); get_viewport().set_input_as_handled(); return
+		queue_redraw(); get_viewport().set_input_as_handled()
 	if index == brake_touch:
 		brake_touch = -1
 		brake_pressed.emit(false)
-		queue_redraw(); get_viewport().set_input_as_handled(); return
+		queue_redraw(); get_viewport().set_input_as_handled()
 	if index == rolll_touch:
 		rolll_touch = -1
-		queue_redraw(); get_viewport().set_input_as_handled(); return
+		queue_redraw(); get_viewport().set_input_as_handled()
 	if index == rollr_touch:
 		rollr_touch = -1
-		queue_redraw(); get_viewport().set_input_as_handled(); return
+		queue_redraw(); get_viewport().set_input_as_handled()
 
 
 func _set_throttle_dragging(active: bool) -> void:
@@ -333,8 +335,8 @@ func _set_throttle_dragging(active: bool) -> void:
 
 func _update_throttle_from_pos(y: float) -> void:
 	var v_size = get_viewport_rect().size
-	var bar_h = v_size.y * 0.62
-	var bar_y_center = v_size.y * 0.52
+	var bar_h = v_size.y * 0.45
+	var bar_y_center = v_size.y * 0.70
 	var bar_top = bar_y_center - bar_h * 0.5
 	var bar_bot = bar_y_center + bar_h * 0.5
 	var raw_p = clamp((bar_bot - y) / bar_h, 0.0, 1.0)

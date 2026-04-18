@@ -403,7 +403,7 @@ func _setup_deep_space_minerals() -> void:
 
 func _setup_hardened_diag_hud() -> void:
 	hud_layer = CanvasLayer.new()
-	hud_layer.layer = 100 
+	hud_layer.layer = 125 
 	diag_label = Label.new()
 	# ACE: Safe Area Padding for iPhone 15 (Dynamic Island fallback)
 	diag_label.position = Vector2(80, 40)

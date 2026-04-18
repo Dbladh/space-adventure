@@ -12,6 +12,7 @@ const PlanetChunkScript := preload("res://src/world/PlanetChunk.gd")
 @export var subdivision_bias: float = 1.15
 # Each planet must get a unique seed so terrain is distinct per celestial body!
 @export var planet_seed: int = 1234
+var mobile_perf: bool = false
 
 # ATMOSPHERIC IDENTITY
 var sky_horizon_color: Color
@@ -54,10 +55,11 @@ var death_row: Array[Node] = []
 var prop_spawn_queue: Array = [] # ACE: Throttled Prop batches
 # ACE PHYSICS: Queue for trimesh collision generation to prevent spikes
 var collision_queue: Array[MeshInstance3D] = []
-const MAX_COLLISIONS_PER_FRAME: int = 2
+const MAX_COLLISIONS_PER_FRAME: int = 1
 var MAX_FINALIZE_PER_FRAME: int = 1
-const MAX_DEATHS_PER_FRAME: int = 60
+const MAX_DEATHS_PER_FRAME: int = 24
 var _prewarm_count: int = 0
+var _prewarm_target: int = 20
 
 func _prewarm_one_chunk() -> void:
 	var pc = PlanetChunkScript.new()
@@ -76,6 +78,11 @@ const FACE_NORMALS: Array[Vector3] = [
 
 func _ready() -> void:
 	noise = FastNoiseLite.new()
+	if mobile_perf:
+		max_lod = min(max_lod, 15)
+		subdivision_bias = min(subdivision_bias, 0.95)
+		terrain_strength *= 0.8
+		_prewarm_target = 12
 	# Always use the explicit planet_seed for terrain noise.
 	# Main.gd sets unique values (1001, 2002...) before add_child() is called,
 	# so _ready() always receives the correct distinct seed per body.
@@ -242,7 +249,13 @@ func get_terrain_height_at(pos: Vector3) -> float:
 
 func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: float) -> void:
 	# 1. PUFFY CLOUD BELTS: Massive celestial sphere at 35km altitude
-	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 35000.0; c_mesh.height = c_mesh.radius * 2.0; c_mesh.radial_segments = 64; c_mesh.rings = 32
+	# MOBILE: Drop tessellation ~4x (64/32 → 32/16) — the fluid shader over a
+	# sphere-scale mesh is one of the biggest vertex shader costs per frame.
+	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 35000.0; c_mesh.height = c_mesh.radius * 2.0
+	if mobile_perf:
+		c_mesh.radial_segments = 32; c_mesh.rings = 16
+	else:
+		c_mesh.radial_segments = 64; c_mesh.rings = 32
 	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 	uniform vec3 sun_dir;
 	varying vec3 v_local_pos;
@@ -295,9 +308,14 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
 	
-	# 2. PLANETARY RINGS (50% chance per planet)
-	if rng.randf() > 0.5:
-		var r_mesh = TorusMesh.new(); r_mesh.inner_radius = planet_radius + 150000.0; r_mesh.outer_radius = planet_radius + 400000.0; r_mesh.rings = 128; r_mesh.ring_segments = 4
+	# 2. PLANETARY RINGS (50% chance per planet; 25% on mobile to save fragment cost)
+	var ring_chance: float = 0.75 if mobile_perf else 0.5
+	if rng.randf() > ring_chance:
+		var r_mesh = TorusMesh.new(); r_mesh.inner_radius = planet_radius + 150000.0; r_mesh.outer_radius = planet_radius + 400000.0
+		if mobile_perf:
+			r_mesh.rings = 64; r_mesh.ring_segments = 4
+		else:
+			r_mesh.rings = 128; r_mesh.ring_segments = 4
 		var r_shader = Shader.new(); r_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 		uniform vec3 ring_col_a;
 		varying vec3 v_local_pos;
@@ -331,8 +349,9 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
 		r_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(r_inst)
 
-	# 3. POLAR AURORAS
-	_spawn_polar_auroras(pal_grass_col)
+	# 3. POLAR AURORAS — Skipped on mobile (additive-blend full-sphere shader is costly)
+	if not mobile_perf:
+		_spawn_polar_auroras(pal_grass_col)
 
 func _spawn_polar_auroras(base_color: Color) -> void:
 	var a_mesh = SphereMesh.new(); a_mesh.radius = planet_radius + 45000.0; a_mesh.height = a_mesh.radius * 2.0; a_mesh.radial_segments = 48; a_mesh.rings = 24
@@ -358,7 +377,9 @@ func _spawn_polar_auroras(base_color: Color) -> void:
 # ALL positions are deterministic from the planet_seed for full reproducibility.
 # ===========================================================================
 func _spawn_hero_landmarks(rng: RandomNumberGenerator) -> void:
-	var num = rng.randi_range(4, 6)
+	# MOBILE: Cut landmark count 4-6 → 2-3. Each landmark is a SurfaceTool mesh
+	# built on the main thread at load time — fewer = faster first-frame paint.
+	var num = rng.randi_range(2, 3) if mobile_perf else rng.randi_range(4, 6)
 	# Rock color derived from the planet palette — dark, slightly desaturated
 	var rock_col: Color = pal_mount_col.darkened(0.15)
 	var accent_col: Color = pal_grass_col.lightened(0.1)
@@ -604,7 +625,7 @@ func _add_tri_flat(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, col: Col
 
 func _process(_delta: float) -> void:
 	# ACE: Staggered Pool Pre-warm logic — must run at TOP to bypass hibernation returns
-	if _prewarm_count < 20:
+	if _prewarm_count < _prewarm_target:
 		_prewarm_one_chunk()
 		_prewarm_count += 1
 
@@ -665,29 +686,29 @@ func _process(_delta: float) -> void:
 	
 	# High-performance splitting: one mesh commit per frame
 	for i in range(min(split_queue.size(), MAX_SPLITS_PER_FRAME)):
-		var node = split_queue.pop_front()
+		var node = split_queue.pop_back()
 		if node: node.execute_split()
 	
 	# ACE RECLAMATION: Process Zombie Pool
-	var z_batch = min(zombie_pool.size(), 10) # ACE: Limit zombie checks per frame
+	var z_batch = min(zombie_pool.size(), 6 if mobile_perf else 10) # ACE: Limit zombie checks per frame
 	for i in range(z_batch):
-		var z = zombie_pool.pop_front()
+		var z = zombie_pool.pop_back()
 		if z.is_busy():
 			zombie_pool.append(z)
 		else:
 			chunk_pool.append(z)
 	
 	# ACE FINALIZATION: Predictable Generation Cycles
-	# STRICT BUDGET: Exactly 4 chunks per frame to handle QuadTree splits without backlog.
-	MAX_FINALIZE_PER_FRAME = 4 
+	# STRICT BUDGET: Spaced out to prevent frame spikes on mobile
+	MAX_FINALIZE_PER_FRAME = 1 if (OS.get_name() == "iOS" or OS.get_name() == "Android") else 2
 	for i in range(min(finalize_queue.size(), MAX_FINALIZE_PER_FRAME)):
-		var chunk = finalize_queue.pop_front()
+		var chunk = finalize_queue.pop_back()
 		if is_instance_valid(chunk):
 			chunk._finalize_generation_on_main()
 			
 	# ACE PROP THROTTLE: Spread node instantiation across multiple frames
-	for i in range(min(prop_spawn_queue.size(), 5)):
-		var task = prop_spawn_queue.pop_front()
+	for i in range(min(prop_spawn_queue.size(), 1 if mobile_perf else 2)):
+		var task = prop_spawn_queue.pop_back()
 		var node = task[0]
 		var method = task[1]
 		var data = task[2]
@@ -695,12 +716,13 @@ func _process(_delta: float) -> void:
 			node.call(method, data)
 
 	# ACE REAPER: Asynchronous destruction of urban nodes
-	for i in range(min(death_row.size(), MAX_DEATHS_PER_FRAME)):
+	var death_budget = 12 if mobile_perf else MAX_DEATHS_PER_FRAME
+	for i in range(min(death_row.size(), death_budget)):
 		var d = death_row.pop_back()
 		if is_instance_valid(d): d.free()
 	
 	for i in range(min(collision_queue.size(), MAX_COLLISIONS_PER_FRAME)):
-		var c = collision_queue.pop_front()
+		var c = collision_queue.pop_back()
 		if is_instance_valid(c):
 			# ACE PERMANENT FIX: Use the background-baked Collision Shape
 			# Instead of create_trimesh_collision() (which is a sync main-thread choke)
@@ -897,9 +919,14 @@ class QuadTreeNode:
 		chunk.y_axis = face.y_axis
 		chunk.offset = local_offset
 		chunk.scale_factor = scale
-		if scale > 0.05:   chunk.resolution = 16   
-		elif scale > 0.01: chunk.resolution = 24  
-		else:             chunk.resolution = 32  
+		if scale > 0.05:   chunk.resolution = 16
+		elif scale > 0.01: chunk.resolution = 24
+		else:              chunk.resolution = 32
+		var planet_mobile_perf: bool = bool(face.planet.get("mobile_perf")) if face.planet else false
+		if planet_mobile_perf:
+			if scale > 0.05:   chunk.resolution = 12
+			elif scale > 0.01: chunk.resolution = 18
+			else:              chunk.resolution = 24
 		chunk.planet_seed = face.planet.planet_seed
 		chunk.archetype = face.planet.archetype
 		

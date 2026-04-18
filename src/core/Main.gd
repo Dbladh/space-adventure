@@ -31,6 +31,7 @@ var _load_label: Label = null
 var _load_progress: float = 0.0
 var _is_finishing: bool = false
 var _boot_timer: float = 0.5 # Mandatory settle time
+var _mobile_perf_mode: bool = false
 
 static var _r_cache: Dictionary = {}
 static func _get_res(path: String) -> Resource:
@@ -42,13 +43,23 @@ static func _get_tex(path: String) -> Texture2D:
 func _ready() -> void:
 	instance = self
 	process_mode = PROCESS_MODE_ALWAYS
+	_mobile_perf_mode = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	if _mobile_perf_mode:
+		DebugSettings.terrain_complexity = 0.8
 	print("--- [DIAGNOSTIC] EXECUTING TITAN GENESIS BOOT SEQUENCE ---")
 	_setup_titan_splash()
 	
 	# ... existing initialization ...
 	# CELESTIAL HEADROOM: Increase engine ceiling to 60fps to provide the budget
 	# needed for 30fps quantization without stuttering.
-	Engine.max_fps = 60
+	# MOBILE LOCK: iOS/Android run a hard 30fps cap (with matching physics tick)
+	# to fit within A14-class thermal/power budgets and avoid hitches.
+	# Desktop still runs 60fps ceiling.
+	if _mobile_perf_mode:
+		Engine.max_fps = 30
+		Engine.physics_ticks_per_second = 30
+	else:
+		Engine.max_fps = 60
 	
 	# ECONOMY GENESIS: The Architect's Vault
 	var econ_script = load("res://src/core/EconomyManager.gd")
@@ -114,14 +125,15 @@ func _setup_stellar_horizon() -> void:
 	sky_mat.shader = load("res://src/world/cel_sky.gdshader")
 	
 	var fn_s = FastNoiseLite.new(); fn_s.noise_type = FastNoiseLite.TYPE_CELLULAR; fn_s.frequency = 0.05
-	var nt_s = NoiseTexture2D.new(); nt_s.width = 512; nt_s.height = 512; nt_s.noise = fn_s
+	var sky_tex_size = 256 if _mobile_perf_mode else 512
+	var nt_s = NoiseTexture2D.new(); nt_s.width = sky_tex_size; nt_s.height = sky_tex_size; nt_s.noise = fn_s
 	
 	var fn_n = FastNoiseLite.new(); fn_n.noise_type = FastNoiseLite.TYPE_SIMPLEX; fn_n.frequency = 0.02
-	var nt_n = NoiseTexture2D.new(); nt_n.width = 512; nt_n.height = 512; nt_n.noise = fn_n; nt_n.seamless = true
+	var nt_n = NoiseTexture2D.new(); nt_n.width = sky_tex_size; nt_n.height = sky_tex_size; nt_n.noise = fn_n; nt_n.seamless = true
 	
-	# MACROSCOPIC CLOUD NOISE: 512x512 2D texture restores cinematic FPS and visual continuity
+	# MACROSCOPIC CLOUD NOISE: Mobile uses a smaller source texture to cut startup and shader cost
 	var fn_c = FastNoiseLite.new(); fn_c.noise_type = FastNoiseLite.TYPE_SIMPLEX; fn_c.frequency = 0.025; fn_c.fractal_octaves = 2
-	var nt_c = NoiseTexture2D.new(); nt_c.width = 512; nt_c.height = 512; nt_c.noise = fn_c; nt_c.seamless = true
+	var nt_c = NoiseTexture2D.new(); nt_c.width = sky_tex_size; nt_c.height = sky_tex_size; nt_c.noise = fn_c; nt_c.seamless = true
 	
 	sky_mat.set_shader_parameter("star_noise", nt_s)
 	sky_mat.set_shader_parameter("nebula_noise", nt_n)
@@ -143,12 +155,17 @@ func _setup_stellar_horizon() -> void:
 	sky_env.fog_density = 0.0   # Start at 0, updated per-frame in _update_atmospheric_transition
 	sky_env.fog_aerial_perspective = 0.3  # Subtle sky blend — only affects very distant horizon
 	sky_env.fog_sun_scatter = 0.25  # Warm glow near the sun direction for golden horizon feel
-	# CINEMATIC BLOOM: Critical for energy bolt visibility in Retro/Pixelated modes
-	sky_env.glow_enabled = true
-	sky_env.glow_intensity = 0.8
-	sky_env.glow_strength = 1.0
-	sky_env.glow_bloom = 0.4
-	sky_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	# CINEMATIC BLOOM: Critical for energy bolt visibility in Retro/Pixelated modes.
+	# MOBILE: Glow is one of the most expensive post effects on tiled-GPU chips
+	# (A14/A15). Disable entirely on iOS/Android — the flat toon look holds up.
+	if not _mobile_perf_mode:
+		sky_env.glow_enabled = true
+		sky_env.glow_intensity = 0.8
+		sky_env.glow_strength = 1.0
+		sky_env.glow_bloom = 0.4
+		sky_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	else:
+		sky_env.glow_enabled = false
 	
 	env.environment = sky_env
 	add_child(env); move_child(env, 0); main_env = env
@@ -157,8 +174,17 @@ func _setup_stellar_horizon() -> void:
 	# ACE EXTREME RETRO SCALING: 25% internal resolution (Super-Chunky)
 	# This drastically reduces fragment shader pressure while leaning into the aesthetic.
 	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
-	vp.scaling_3d_scale = 0.25
+	# MOBILE: Drop to 15% internal resolution on iOS so iPhone 12-class GPUs
+	# can maintain a locked 30fps under planet-scale fragment loads.
+	# The FSR upscale + nearest-neighbour filter keeps the toon look readable.
+	vp.scaling_3d_scale = 0.15 if _mobile_perf_mode else 0.25
 	vp.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
+	if _mobile_perf_mode:
+		# MSAA is cheap on desktop but very expensive on tiled-GPU chips
+		vp.msaa_3d = Viewport.MSAA_DISABLED
+		vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+		vp.use_debanding = false
+		vp.use_taa = false
 
 func _setup_titan_splash() -> void:
 	_load_overlay = ColorRect.new()
@@ -189,7 +215,7 @@ func _finish_loading() -> void:
 		player_node.set_physics_process(true)
 		player_node.set_process(true)
 		if player_node.has_method("prewarm_vfx"):
-			player_node.prewarm_vfx()
+			await player_node.prewarm_vfx()
 	
 	var t = create_tween()
 	t.tween_property(_load_overlay, "modulate:a", 0.0, 1.0).set_trans(Tween.TRANS_SINE).set_delay(0.2)
@@ -214,10 +240,10 @@ func _setup_hardened_solar_genesis() -> void:
 	sun.rotation_degrees = Vector3(-45, 45, 0) 
 	sun.light_color = Color("#FFF0CE")
 	sun.light_energy = 1.4
-	sun.shadow_enabled = true
+	sun.shadow_enabled = not _mobile_perf_mode
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 	sun.directional_shadow_blend_splits = false # Sharp splits for that retro feel
-	sun.directional_shadow_max_distance = 6500.0 
+	sun.directional_shadow_max_distance = 2500.0 if _mobile_perf_mode else 6500.0 
 	
 	sun.add_to_group("World")
 	add_child(sun)
@@ -238,6 +264,7 @@ func _setup_titan_planetary() -> void:
 		planet.name = "Planet_Varn"
 		planet.set("planet_radius", 1125000.0)
 		planet.set("planet_seed", 1001)
+		planet.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet)
 		# Varn: 1.5Mkm forward (–Z) — the home world directly ahead at game start
 		planet.global_position = Vector3(0, 0, -1500000.0)
@@ -249,6 +276,7 @@ func _setup_titan_planetary() -> void:
 		moon.name = "Planet_Tethys"
 		moon.set("planet_radius", 625000.0)
 		moon.set("planet_seed", 2002)
+		moon.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(moon)
 		moon.global_position = Vector3(2500000.0, 400000.0, -1800000.0)
 		moon.add_to_group("World")
@@ -259,6 +287,7 @@ func _setup_titan_planetary() -> void:
 		planet3.name = "Planet_Keth"
 		planet3.set("planet_radius", 820000.0)
 		planet3.set("planet_seed", 3003)
+		planet3.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet3)
 		planet3.global_position = Vector3(-3500000.0, -800000.0, 2800000.0)
 		planet3.add_to_group("World")
@@ -269,18 +298,24 @@ func _setup_titan_planetary() -> void:
 		planet4.name = "Planet_Ido"
 		planet4.set("planet_radius", 380000.0)
 		planet4.set("planet_seed", 4004)
+		planet4.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet4)
 		planet4.global_position = Vector3(1800000.0, 300000.0, 450000.0)
 		planet4.add_to_group("World")
 		planet4.add_to_group("Planet")
 
 		# --- OUTER SYSTEM (Compressed) ---
+		# MOBILE: iOS/Android cap at 4 inner-system planets to keep quadtree LOD
+		# traffic, MultiMesh scatter counts, and memory pressure within A14 budgets.
+		if _mobile_perf_mode:
+			return
 
 		# PLANET 5 — Obsidia (seed 5005)
 		var planet5 = Node3D.new(); planet5.set_script(planet_gen_script)
 		planet5.name = "Planet_Obsidia"
 		planet5.set("planet_radius", 1850000.0)
 		planet5.set("planet_seed", 5005)
+		planet5.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet5)
 		planet5.global_position = Vector3(-5000000.0, 1500000.0, -6800000.0)
 		planet5.add_to_group("World")
@@ -291,6 +326,7 @@ func _setup_titan_planetary() -> void:
 		planet6.name = "Planet_Xylos"
 		planet6.set("planet_radius", 940000.0)
 		planet6.set("planet_seed", 6006)
+		planet6.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet6)
 		planet6.global_position = Vector3(8500000.0, -2200000.0, 5200000.0)
 		planet6.add_to_group("World")
@@ -301,6 +337,7 @@ func _setup_titan_planetary() -> void:
 		planet7.name = "Planet_Beryll"
 		planet7.set("planet_radius", 2400000.0)
 		planet7.set("planet_seed", 7007)
+		planet7.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet7)
 		planet7.global_position = Vector3(-12000000.0, 3500000.0, 11500000.0)
 		planet7.add_to_group("World")
@@ -311,6 +348,7 @@ func _setup_titan_planetary() -> void:
 		planet8.name = "Planet_Null9"
 		planet8.set("planet_radius", 450000.0)
 		planet8.set("planet_seed", 8008)
+		planet8.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet8)
 		planet8.global_position = Vector3(4000000.0, -8500000.0, -19500000.0)
 		planet8.add_to_group("World")
@@ -327,7 +365,10 @@ func _setup_asteroid_belt() -> void:
 		belt.set("inner_radius", 1400000.0)
 		belt.set("outer_radius", 2000000.0)
 		belt.set("thickness", 40000.0) # Compressed vertically for a sharp ring look
-		belt.set("count", 3000)
+		belt.set("count", 1800 if _mobile_perf_mode else 3000)
+		belt.set("mmi_count", 8000 if _mobile_perf_mode else 14000)
+		belt.set("phys_count", 240 if _mobile_perf_mode else 500)
+		belt.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(belt)
 		belt.global_position = planet_ref.global_position
 		belt.add_to_group("World")
@@ -343,7 +384,10 @@ func _setup_deep_space_minerals() -> void:
 	var rng = RandomNumberGenerator.new(); rng.seed = 77777 
 	
 	# ACE: We queue these for staggered spawning to prevent Physics Server lock-up
-	for i in range(250):
+	# MOBILE: Cut from 250 → 80 minerals on iOS; each mineral carries an OmniLight3D
+	# + SubViewport HUD, so count directly drives draw calls and touch latency.
+	var _mineral_count = 80 if _mobile_perf_mode else 250
+	for i in range(_mineral_count):
 		var type_idx = 0
 		var r = rng.randf()
 		if r > 0.98: type_idx = 4
@@ -429,7 +473,7 @@ func _process(_delta: float) -> void:
 	# ACE: Spawn minerals and check readiness BEFORE any early-returns
 	var batch_size = 50 if _is_loading else 15
 	for i in range(min(_mineral_spawn_queue.size(), batch_size)):
-		var data = _mineral_spawn_queue.pop_front()
+		var data = _mineral_spawn_queue.pop_back()
 		var mineral = StaticBody3D.new()
 		mineral.set_script(data.script)
 		mineral.set("resource_type", data.type)
@@ -448,7 +492,8 @@ func _process(_delta: float) -> void:
 		if all_ready:
 			_finish_loading()
 		else:
-			_load_label.text = "CALIBRATING QUANTUM FIELD: %d%%" % (100 - _mineral_spawn_queue.size() * 100 / 250)
+			var _mtotal = 80 if _mobile_perf_mode else 250
+			_load_label.text = "CALIBRATING QUANTUM FIELD: %d%%" % (100 - _mineral_spawn_queue.size() * 100 / max(_mtotal, 1))
 		return # Stay focused on loading
 
 	# HUD & TELEMETRY LOGIC (Runs only after loading is done)
@@ -464,19 +509,24 @@ func _process(_delta: float) -> void:
 	if "target_planet" in p and p.target_planet: 
 		alt_m = p.true_altitude
 
-	# 1. OPTIMIZED TELEMETRY: Throttle the heavy environmental updates to 15Hz
+	# 1. OPTIMIZED TELEMETRY: Throttle the heavy environmental updates.
+	# MOBILE: Drop atmospheric + shadow updates to ~5Hz so the string/shader
+	# parameter churn doesn't collide with the 30fps render pacing.
 	_env_tick += 1
-	if _env_tick >= 4:
+	var _env_target: int = 6 if _mobile_perf_mode else 4
+	if _env_tick >= _env_target:
 		_env_tick = 0
 		_update_atmospheric_transition(p)
 		_update_shadow_distance(p)
-	
+
 	if not hud_visible or not diag_label: return
-	
-	# HUD THROTTLE: Rebuild text only every 3 frames.
+
+	# HUD THROTTLE: Rebuild text only every N frames.
 	# String construction + label reflow is surprisingly expensive at 60fps.
+	# MOBILE: Stretch to 6 frames — telemetry readability is fine at ~5Hz.
 	_hud_tick += 1
-	if _hud_tick < 3: return
+	var _hud_target: int = 6 if _mobile_perf_mode else 3
+	if _hud_tick < _hud_target: return
 	_hud_tick = 0
 	
 	var alt = floor(alt_m / 1000.0)

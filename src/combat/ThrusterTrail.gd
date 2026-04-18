@@ -12,8 +12,11 @@ var _v_tick: int = 0
 var _last_v_update: bool = false
 var mesh_gen: ImmediateMesh
 var pulse_time: float = 0.0
+# MOBILE PERF: sampled in _ready so update_trail can clamp ribbon length/jitter.
+var _mobile_perf: bool = false
 
 func _ready() -> void:
+	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
 	mesh_gen = ImmediateMesh.new()
 	mesh = mesh_gen
 	
@@ -28,6 +31,19 @@ func _ready() -> void:
 	set_as_top_level(true)
 	add_to_group("Trails")
 
+func prewarm(port_pos: Vector3, fwd: Vector3) -> void:
+	# Force the mesh generator path once during loading so the first real thrust
+	# doesn't pay the ImmediateMesh / strip setup cost.
+	if not mesh_gen:
+		mesh_gen = ImmediateMesh.new()
+		mesh = mesh_gen
+	points.clear()
+	points.push_back(port_pos)
+	points.push_back(port_pos + fwd.normalized() * 12.0)
+	update_trail(port_pos, fwd, Vector3.ZERO, false, 0.01, 0.0)
+	points.clear()
+	mesh_gen.clear_surfaces()
+
 # ARCHITECT SYNC: Called by FloatingOrigin to snap world points
 func shift_points(offset: Vector3) -> void:
 	for i in range(points.size()):
@@ -40,9 +56,16 @@ func update_trail(port_pos: Vector3, fwd: Vector3, vel: Vector3, is_warping: boo
 	
 	pulse_time += delta
 	# 1. DYNAMIC LENGTH: Stretch based on Warp/Speed
+	# MOBILE: Cap ribbon length — each point becomes 2 verts in a TRIANGLE_STRIP
+	# and there are 5 trail ports. Desktop caps at 120 verts; mobile at 40.
 	var speed_ratio = clamp(vel.length() / 8000.0, 0.0, 1.0)
-	var dynamic_max = 25 + int(speed_ratio * 85.0)
-	if is_warping: dynamic_max = 120
+	var dynamic_max: int
+	if _mobile_perf:
+		dynamic_max = 12 + int(speed_ratio * 24.0)
+		if is_warping: dynamic_max = 40
+	else:
+		dynamic_max = 25 + int(speed_ratio * 85.0)
+		if is_warping: dynamic_max = 120
 	
 	# 2. MOMENTUM INHERITANCE: Makes the trail 'float' and curve naturally
 	var inherit_factor = 0.98 
@@ -99,8 +122,10 @@ func update_trail(port_pos: Vector3, fwd: Vector3, vel: Vector3, is_warping: boo
 		var to_cam = (p1 - cam.global_position).normalized()
 		var side = segment_dir.cross(to_cam).normalized() * w
 		
-		# WARP JITTER: Violent vibration during high-speed travel
-		if is_warping:
+		# WARP JITTER: Violent vibration during high-speed travel.
+		# MOBILE: Skip jitter — keeps the warp ribbon stable and drops 3 randf()
+		# calls per vertex (ribbon can hit 40 points × 5 trails while warping).
+		if is_warping and not _mobile_perf:
 			var jitter = Vector3(randf()-0.5, randf()-0.5, randf()-0.5) * 0.4
 			p1 += jitter
 		

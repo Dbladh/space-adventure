@@ -8,21 +8,33 @@ class_name GravityComponent
 @export var parent_body: Node3D # ARCHITECT: Support any body type
 @export var gravity_strength: float = 10.0 # Restored for space exploration
 
+var _planet_refresh_tick: int = 0
+var _cached_planets: Array[Node3D] = []
+
 func _physics_process(delta: float) -> void:
 	if not parent_body:
 		return
-		
-	# Find the nearest "Planet" from the group.
-	var planets: Array[Node] = get_tree().get_nodes_in_group("Planet")
+
+	# The planet set is static for most of the session, so refresh it on a small cadence
+	# instead of scanning the whole group every physics tick for every gravity source.
+	_planet_refresh_tick += 1
+	if _planet_refresh_tick >= 12 or _cached_planets.is_empty():
+		_planet_refresh_tick = 0
+		_cached_planets.clear()
+		var planets: Array[Node] = get_tree().get_nodes_in_group("Planet")
+		for planet in planets:
+			if planet is Node3D:
+				_cached_planets.append(planet)
+
+	# Find the nearest cached planet.
 	var nearest_planet: Node3D = null
 	var min_distance: float = INF
 	
-	for planet in planets:
-		if planet is Node3D:
-			var distance: float = parent_body.global_position.distance_to(planet.global_position)
-			if distance < min_distance:
-				min_distance = distance
-				nearest_planet = planet
+	for planet in _cached_planets:
+		var distance: float = parent_body.global_position.distance_to(planet.global_position)
+		if distance < min_distance:
+			min_distance = distance
+			nearest_planet = planet
 				
 	if nearest_planet:
 		apply_spherical_gravity(nearest_planet, delta)

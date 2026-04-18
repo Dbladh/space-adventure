@@ -22,6 +22,8 @@ var mmi_back: MultiMeshInstance3D # Distant Background (14k, Low Detail)
 var mmi_phys_med: MultiMeshInstance3D # Intermediate Hazards (1.5k, Med Detail)
 var mmi_phys_high: MultiMeshInstance3D # Near-Field 'Hero' Rocks (1.5k, High Detail)
 var player: Node3D
+var _health_component_script: Script = null
+var mobile_perf: bool = false
 
 # LOD CONSTANTS
 const PHYSICS_LOD_DIST: float = 80000.0 # 80km - asteroids beyond this lose collision
@@ -33,9 +35,16 @@ var _is_spawning_phys: bool = true
 var _rng: RandomNumberGenerator
 
 func _ready() -> void:
+	if mobile_perf:
+		# MOBILE: Tighter caps for iPhone 12-class hardware. Each MMI instance
+		# still costs per-frame transform I/O, and every phys rock is a
+		# StaticBody3D with its own CollisionShape3D.
+		mmi_count = min(mmi_count, 5000)
+		phys_count = min(phys_count, 150)
 	rock_mesh_low = _build_faceted_rock_mesh(4) # Pyramid / Minimal
 	rock_mesh_med = _build_faceted_rock_mesh(8) # Standard
 	rock_mesh_high = _build_faceted_rock_mesh(12) # High-Fidelity
+	_health_component_script = load("res://src/combat/HealthComponent.gd")
 	_spawn_deterministic_belt()
 	set_process(true)
 	
@@ -131,8 +140,12 @@ func _process(delta: float) -> void:
 	if dist_to_planet > STELLAR_CUTOFF:
 		return
 	
-	# PERFORMANCE: Increase batch size for 500 rocks (0.3ms budget)
-	var final_batch = 125 
+	# PERFORMANCE: Update a smaller slice each frame so the belt LOD stays smooth
+	# without turning per-frame visibility bookkeeping into a spike.
+	# MOBILE: Tighter batch (16) — with a 30fps cap we have twice as much wall
+	# time per frame but half as many frames per LOD sweep. 16/frame still
+	# sweeps all 150 rocks in <10 frames.
+	var final_batch = 16 if mobile_perf else (64 if dist_to_planet < 2200000.0 else 32)
 	for k in range(final_batch):
 		proc_idx = (proc_idx + 1) % asteroids.size()
 		var a = asteroids[proc_idx]
@@ -159,8 +172,7 @@ func _process(delta: float) -> void:
 
 func _process_physical_spawning() -> void:
 	# ACE: Spawn 50 rocks per frame to eliminate the startup freeze
-	var batch = 50
-	var hc_script = load("res://src/combat/HealthComponent.gd")
+	var batch = 24 if mobile_perf else 50
 	for i in range(batch):
 		if _spawn_idx >= phys_count:
 			_is_spawning_phys = false
@@ -184,8 +196,8 @@ func _process_physical_spawning() -> void:
 		var shape = SphereShape3D.new(); shape.radius = 6.0; collision.shape = shape
 		asteroid.add_child(collision)
 		
-		if hc_script:
-			var hc = Node.new(); hc.set_script(hc_script); hc.name = "HealthComponent"; hc.set("max_health", 100.0); asteroid.add_child(hc)
+		if _health_component_script:
+			var hc = Node.new(); hc.set_script(_health_component_script); hc.name = "HealthComponent"; hc.set("max_health", 100.0); asteroid.add_child(hc)
 		
 		add_child(asteroid); asteroid.add_to_group("Targets"); asteroid.add_to_group("Destructible"); asteroids.append(asteroid); coll_nodes.append(collision)
 		_spawn_idx += 1

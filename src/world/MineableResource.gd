@@ -8,11 +8,17 @@ extends StaticBody3D
 var health: float = 3.0 # 3-12 hits depending on type
 var max_health: float = 3.0 # ACE: Healthbar scaling
 var flash_timer: float = 0.0 # ACE: Damage feedback persistence
-var health_bar: ProgressBar = null 
+var health_bar: ProgressBar = null
 var hud_sprite: Sprite3D = null # ACE: Distance-culled HUD element
+var mesh_inst: MeshInstance3D = null
+var _visual_tick: int = 0
+# MOBILE PERF cached at _ready — disables OmniLight3D + SubViewport HUD
+# (each mineral would otherwise own a light and a transparent SubViewport).
+var _mobile_perf: bool = false
 
 func _ready() -> void:
 	add_to_group("Mineable") # ACE: Absolute identification for projectiles
+	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
 	# ACE SCALING: Balanced Mining Integrity – Just a few shots
 	match resource_type:
 		"Silver": health = 5.0
@@ -23,7 +29,11 @@ func _ready() -> void:
 	max_health = health
 	
 	_generate_low_poly_node()
-	_setup_tactical_hud()
+	# MOBILE: Skip the SubViewport HUD. 80 transparent SubViewports in flight
+	# shred the forward-cluster budget on A14-class GPUs and the health bar
+	# is rarely read against a moving ship reticle.
+	if not _mobile_perf:
+		_setup_tactical_hud()
 
 func _generate_low_poly_node() -> void:
 	# ACE GEOMETRY: Procedural 'Rupee' Octahedron (Anchored at Tip)
@@ -64,7 +74,7 @@ func _generate_low_poly_node() -> void:
 		st.set_normal(n_down); st.set_color(col); st.add_vertex(m2)
 		st.set_normal(n_down); st.set_color(col); st.add_vertex(m1)
 
-	var mesh_inst = MeshInstance3D.new()
+	mesh_inst = MeshInstance3D.new()
 	mesh_inst.mesh = st.commit()
 	
 	# ACE MATERIAL: 'Shiny Coin' Metallic Pass
@@ -78,12 +88,15 @@ func _generate_low_poly_node() -> void:
 	mat.emission = col * 1.5
 	mat.emission_energy_multiplier = 0.6 # ACE: Lower base for higher glint contrast
 	
-	# ACE: Add a physical light source for 'Discovery'
-	var light = OmniLight3D.new()
-	light.light_color = col
-	light.light_energy = 0.7
-	light.omni_range = size * 3.5
-	add_child(light)
+	# ACE: Add a physical light source for 'Discovery'.
+	# MOBILE: Skip the OmniLight3D entirely — emission on the material still
+	# sells the discovery glow without adding an active cluster light.
+	if not _mobile_perf:
+		var light = OmniLight3D.new()
+		light.light_color = col
+		light.light_energy = 0.7
+		light.omni_range = size * 3.5
+		add_child(light)
 		
 	mesh_inst.material_override = mat
 	add_child(mesh_inst)
@@ -122,21 +135,29 @@ func take_damage(_amount: float) -> void:
 		_on_mined()
 
 func _process(_delta: float) -> void:
+	var was_flashing := flash_timer > 0.0
+	if flash_timer > 0.0:
+		flash_timer = maxf(flash_timer - _delta, 0.0)
+
+	# The glint and HUD fade do not need a 60Hz refresh; update them on a lower cadence
+	# unless the resource is actively flashing from damage.
+	_visual_tick = (_visual_tick + 1) % 4
+	if not was_flashing and flash_timer <= 0.0 and _visual_tick != 0:
+		rotate_object_local(Vector3.UP, _delta * 0.4)
+		return
+
 	# ACE: Extreme Glint for high-contrast 'Discovery'
 	var pulse = sin(Time.get_ticks_msec() * 0.0035)
 	var glint = pow(max(0.0, pulse), 50.0) # Even Sharper
-	
-	if has_node("MeshInstance3D") or get_child_count() > 0:
-		var mesh_inst = get_child(0)
-		if mesh_inst is MeshInstance3D and mesh_inst.material_override:
-			if flash_timer > 0:
-				# ACE: Damage flash takes priority over shimmmery glint
-				mesh_inst.material_override.emission_energy_multiplier = 45.0
-				flash_timer -= _delta
-			else:
-				# ACE: normal shimmery glint
-				mesh_inst.material_override.emission_energy_multiplier = 0.2 + (glint * 40.0)
-			
+
+	if mesh_inst and mesh_inst.material_override:
+		if flash_timer > 0.0:
+			# ACE: Damage flash takes priority over shimmmery glint
+			mesh_inst.material_override.emission_energy_multiplier = 45.0
+		else:
+			# ACE: normal shimmery glint
+			mesh_inst.material_override.emission_energy_multiplier = 0.2 + (glint * 40.0)
+
 	if hud_sprite:
 		var cam = get_viewport().get_camera_3d()
 		if cam:

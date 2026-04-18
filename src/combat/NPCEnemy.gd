@@ -25,11 +25,19 @@ var current_yaw: float = 0.0
 var current_pitch: float = 0.0
 var current_thrust: float = 0.0
 var _v_tick: int = 0
+# MOBILE PERF + POOLED RAY QUERY: mirrors Player.gd so enemy bolt tracing doesn't
+# allocate a new PhysicsRayQueryParameters3D every bolt × frame.
+var _mobile_perf: bool = false
+var _ray_q: PhysicsRayQueryParameters3D = null
 
 func _ready():
 	add_to_group("Targets")
 	add_to_group("Enemies")
-	
+	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	_ray_q = PhysicsRayQueryParameters3D.new()
+	_ray_q.collision_mask = 1 | 2
+	_ray_q.exclude = [self]
+
 	# PRELOAD ARMAMENTS
 	bolt_script = load("res://src/combat/LaserBolt.gd")
 	
@@ -79,9 +87,11 @@ func _physics_process(delta):
 	var dist = rel_to_player.length()
 	var dir = rel_to_player.normalized()
 	
-	# ACE PERFORMANCE: Celestial Hibernation (Beyond 150km)
-	# Distant AI stops processing but remains visible for Radar/DOT
-	if dist > 150000.0: return 
+	# ACE PERFORMANCE: Celestial Hibernation
+	# MOBILE: tighten to 80km so distant AI never enters the steering/firing
+	# pipeline on iOS. Desktop keeps the cinematic 150km horizon.
+	var _hib = 80000.0 if _mobile_perf else 150000.0
+	if dist > _hib: return
 	
 	# ACE STEERING: Converge on target
 	var fwd = -global_transform.basis.z
@@ -178,10 +188,10 @@ func _process_enemy_bolts(delta):
 		var move_dist = (b["dir"] * speed + b["ship_v"]) * delta
 		var next_pos = node.global_position + move_dist
 		
-		# IMPACT PHYSICS
-		var query = PhysicsRayQueryParameters3D.create(node.global_position, next_pos)
-		query.collision_mask = 1 | 2; query.exclude = [self]
-		var result = space_state.intersect_ray(query)
+		# IMPACT PHYSICS — reuse _ray_q (configured once in _ready)
+		_ray_q.from = node.global_position
+		_ray_q.to = next_pos
+		var result = space_state.intersect_ray(_ray_q)
 		
 		if result:
 			_apply_bolt_impact(result.collider, result.position)

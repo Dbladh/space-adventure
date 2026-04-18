@@ -453,21 +453,31 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 					m_pts.append([xf, type])
 			else:
 				# 2. NATURE FALLBACK: Standard Biome Scattering
+				# MOBILE: Halve scatter density; tree get_terrain_elevation calls
+				# are the long-tail cost here and count directly inflates MMI size.
+				var _mob_on: bool = planet and "mobile_perf" in planet and planet.mobile_perf
+				var _nat_scale: float = 0.5 if _mob_on else 1.0
 				if cluster_n > 0.22:
 					var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
-					if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult):
+					if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult * _nat_scale):
 						var h_t = get_terrain_elevation(cp)
 						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
 							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
 							t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
 				elif cluster_n < -0.20:
-					if (h_v % 1000) < int(200 * DebugSettings.rock_mult):
+					if (h_v % 1000) < int(200 * DebugSettings.rock_mult * _nat_scale):
 						var h_r = get_terrain_elevation(cp)
 						if h_r > -150.0:
 							r_pts.append(_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
 
 	
-	if scale_factor <= 0.00055:
+	# MOBILE: Grass is the single biggest CPU win on iOS (15-25ms in the worst
+	# chunk). Skip the grass grid entirely — the hatch-toon shader + scattered
+	# rocks/trees already give a dense visual ground cover.
+	var _mobile_perf_chunk: bool = false
+	if planet and "mobile_perf" in planet:
+		_mobile_perf_chunk = planet.mobile_perf
+	if scale_factor <= 0.00055 and not _mobile_perf_chunk:
 		var g_cell: float = 0.0000045 / radius_ratio
 		var gs_x = int(floor((offset.x - scale_factor) / g_cell)); var ge_x = int(ceil((offset.x + scale_factor) / g_cell))
 		var gs_y = int(floor((offset.y - scale_factor) / g_cell)); var ge_y = int(ceil((offset.y + scale_factor) / g_cell))
@@ -527,19 +537,23 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	_apply_planetary_lod_policy(mmi_l, false)
 	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; add_child(mmi_l)
 
+func _is_mobile_perf() -> bool:
+	return is_instance_valid(planet) and bool(planet.get("mobile_perf"))
+
 func _apply_planetary_lod_policy(mmi: MultiMeshInstance3D, is_high_detail: bool) -> void:
+	var mobile_perf: bool = _is_mobile_perf()
 	mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
 	if is_high_detail:
-		mmi.visibility_range_end = PROP_LOD_HIGH_END
-		mmi.visibility_range_end_margin = PROP_LOD_FADE
+		mmi.visibility_range_end = 800.0 if mobile_perf else PROP_LOD_HIGH_END
+		mmi.visibility_range_end_margin = 180.0 if mobile_perf else PROP_LOD_FADE
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF # OPTIMIZATION: Foliage shadows are too expensive
 	else:
-		mmi.visibility_range_begin = PROP_LOD_HIGH_END
-		mmi.visibility_range_begin_margin = PROP_LOD_FADE
-		mmi.visibility_range_end = PROP_LOD_PROXY_END
-		mmi.visibility_range_end_margin = PROP_LOD_FADE * 2.5
+		mmi.visibility_range_begin = 800.0 if mobile_perf else PROP_LOD_HIGH_END
+		mmi.visibility_range_begin_margin = 180.0 if mobile_perf else PROP_LOD_FADE
+		mmi.visibility_range_end = 4200.0 if mobile_perf else PROP_LOD_PROXY_END
+		mmi.visibility_range_end_margin = 280.0 if mobile_perf else PROP_LOD_FADE * 2.5
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 func _spawn_tree_lods(points: Array[Transform3D]) -> void:
@@ -558,6 +572,7 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 	# ============================================================
 	
 	# 2. FOLIAGE MATERIAL — Specialized Toon + Wind Shader
+	var mobile_perf: bool = _is_mobile_perf()
 	var foliage_mat: ShaderMaterial = ShaderMaterial.new()
 	foliage_mat.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
 	foliage_mat.set_shader_parameter("shadow_strength", 0.6)
@@ -601,7 +616,7 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 			mt_th.set_instance_transform(i, points[i]); mt_th.set_instance_color(i, tr_c)
 			
 			# AMBIENT LEAF DRIFT: Throttled to only spawn for the immediate local neighborhood (Optimization)
-			if i % 15 == 0:
+			if not mobile_perf and i % 15 == 0:
 				var cam_p = Vector3.ZERO
 				if is_instance_valid(get_viewport().get_camera_3d()):
 					cam_p = get_viewport().get_camera_3d().global_position

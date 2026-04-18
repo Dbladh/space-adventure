@@ -20,7 +20,15 @@ var mouse_locked: bool = true
 # MOBILE SIMPLIFIED INPUT
 var mobile_throttle: float = 0.5 # ACE: 0.5 is Neutral (Stopped)
 var mobile_fire: bool = false
+var mobile_boost: bool = false   # ACE: Mobile warp/pulse-drive button
+var mobile_brake: bool = false   # ACE: Mobile brake — hard deceleration + throttle → neutral
 var mobile_interact: bool = false
+var mobile_throttle_dragging: bool = false
+var mobile_gyro_paused: bool = false # ACE: UI toggle — pauses gyro steering entirely
+var mobile_sens_mult: float = 1.0    # ACE: UI-driven sensitivity multiplier on top of gyro_sensitivity
+var mobile_ui_ref: Control = null    # ACE: back-reference so Player can push telemetry to the HUD
+var _mobile_look_touch_idx: int = -1
+var _mobile_look_last_pos: Vector2 = Vector2.ZERO
 
 # GYRO STEERING (Star Fox Style)
 @export var gyro_enabled: bool = true
@@ -72,6 +80,8 @@ var cam_spring: SpringArm3D
 var thruster_trails: Array = []
 var heat_soak: float = 0.0      # Engine thermal saturation
 var shard_timer: float = 0.0    # Plasma debris ejection interval
+var _atmo_heading: Vector3 = Vector3.FORWARD
+var _was_in_atmo: bool = false
 
 var last_tap_l: float = 0.0
 var last_tap_r: float = 0.0
@@ -89,9 +99,24 @@ var hud_threat_arrows: Array = []
 var snow_particles: CPUParticles3D = null
 var _cur_aim_point: Vector3 = Vector3.ZERO
 
+# MOBILE PERF: cached once at _ready so hot paths don't call OS.get_name() every frame.
+var _mobile_perf: bool = false
+# POOLED RAY QUERY: create() allocates + sets defaults every call. Reuse one
+# query object per frame and just reassign its fields.
+var _ray_q: PhysicsRayQueryParameters3D = null
+# THROTTLE COUNTERS for mobile budget pacing
+var _thruster_tick: int = 0
+var _terrain_floor_tick: int = 0
+var _terrain_floor_cached: float = 0.0
+var _last_flash_ms: int = 0
+
 
 func _ready() -> void:
 	self.add_to_group("Player")
+	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	_ray_q = PhysicsRayQueryParameters3D.new()
+	_ray_q.collision_mask = 1 | 2
+	_ray_q.exclude = [self]
 	lock_mouse()
 	
 	# COMPASS HARDENING: 3D arrow pointing back to ship
@@ -218,12 +243,28 @@ func _setup_combat_hud() -> void:
 	if mobile_ui_script:
 		var mc = Control.new()
 		mc.set_script(mobile_ui_script)
-		mc.mouse_filter = Control.MOUSE_FILTER_PASS
+		mc.mouse_filter = Control.MOUSE_FILTER_STOP
 		hud.add_child(mc)
+		mobile_ui_ref = mc
 		mc.throttle_changed.connect(func(val): mobile_throttle = val)
+		mc.throttle_dragging_changed.connect(func(active): mobile_throttle_dragging = active)
 		mc.fire_pressed.connect(func(p): mobile_fire = p)
+		mc.boost_pressed.connect(func(p): mobile_boost = p)
+		mc.brake_pressed.connect(_on_mobile_brake)
+		mc.roll_triggered.connect(func(dir): _trigger_barrel_roll(dir))
+		mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
+		mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
 		mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
 		mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
+
+func _on_mobile_brake(pressed: bool) -> void:
+	# BRAKE hold: zero out forward intent and request a rapid slow-down.
+	# Also snap the mobile throttle UI back to neutral so release feels clean.
+	mobile_brake = pressed
+	if pressed:
+		mobile_throttle = 0.5
+		if mobile_ui_ref and mobile_ui_ref.has_method("force_throttle"):
+			mobile_ui_ref.force_throttle(0.5)
 
 
 
@@ -359,6 +400,17 @@ func _process_ace_camera(delta: float) -> void:
 	# This avoids frame-latency and ensures zero-separation at high velocities.
 	cam_pivot.global_position = global_position
 	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
+	var surface_assist: float = 0.0
+	if target_planet:
+		surface_assist = clamp(1.0 - (true_altitude / 9000.0), 0.0, 1.0)
+	if cam_spring and surface_assist > 0.0:
+		var target_spring_y: float = lerp(10.0, 4.0, surface_assist)
+		var target_spring_len: float = lerp(250.0, 140.0, surface_assist)
+		cam_spring.position.y = lerp(cam_spring.position.y, target_spring_y, 8.0 * delta)
+		cam_spring.spring_length = lerp(cam_spring.spring_length, target_spring_len, 6.0 * delta)
+	elif cam_spring:
+		cam_spring.position.y = lerp(cam_spring.position.y, 10.0, 8.0 * delta)
+		cam_spring.spring_length = lerp(cam_spring.spring_length, 250.0, 6.0 * delta)
 	
 	if is_instance_valid(pinned_target):
 		var t_dir = (pinned_target.global_position - global_position).normalized()
@@ -606,28 +658,34 @@ func _process_ace_flight(delta: float) -> void:
 	var pitch = pitch_stick
 	
 	# MOTION STEERING: High-Authority Gravity Vector
-	if gyro_enabled:
+	# ACE MOBILE V2: supports UI "GYRO OFF" pause and a sensitivity multiplier.
+	# Curve: deadzone → normalized → pow(x, 1.6) so small tilts give fine trim
+	# and larger tilts ramp up quickly (No Man's Sky-style joystick response).
+	if gyro_enabled and not mobile_gyro_paused:
 		var grav = Input.get_gravity()
-		
+
 		# ACE AUTO-CALIBRATION: Capture first stable reading as Neutral
 		if not _is_calibrated and grav.length() > 1.0:
 			_gyro_neutral_z = grav.z
 			_is_calibrated = true
-		
-		# Pro-Calibrated Mapping for Star Fox Tilt
-		# Gravity.x handles Yaw (Side-to-side tilt)
-		# Gravity.z handles Pitch (Relative to captured neutral)
-		const TILT_DEAD = 1.2
+
+		# Deadzone (degrees of tilt that do nothing — now slightly wider)
+		const TILT_DEAD = 1.4
+		const TILT_FULL = 6.0 # Tilt magnitude at which we hit saturation
 		var tx = grav.x if abs(grav.x) > TILT_DEAD else 0.0
-		var tz = (grav.z - _gyro_neutral_z) if abs(grav.z - _gyro_neutral_z) > TILT_DEAD else 0.0
-		
-		var t_yaw = clamp(tx / 6.0, -1.0, 1.0) * gyro_sensitivity
-		var t_pitch = clamp(-tz / 6.0, -1.0, 1.0) * gyro_sensitivity
-		
+		var tz_raw = grav.z - _gyro_neutral_z
+		var tz = tz_raw if abs(tz_raw) > TILT_DEAD else 0.0
+
+		# Map tilt magnitude to [-1, 1] with a power curve for finer control
+		var nx = clamp(tx / TILT_FULL, -1.0, 1.0)
+		var nz = clamp(-tz / TILT_FULL, -1.0, 1.0)
+		var t_yaw = sign(nx) * pow(abs(nx), 1.6) * gyro_sensitivity * mobile_sens_mult
+		var t_pitch = sign(nz) * pow(abs(nz), 1.6) * gyro_sensitivity * mobile_sens_mult
+
 		yaw -= t_yaw
 		pitch -= t_pitch
-		
-		# ACE: Force tilt as primary steering on ALL mobile devices
+
+		# ACE: Force tilt as primary steering on ALL mobile devices when stick is idle
 		if abs(yaw_stick) < 0.1 and abs(pitch_stick) < 0.1:
 			yaw = clamp(-t_yaw, -1.5, 1.5)
 			pitch = clamp(-t_pitch, -1.5, 1.5)
@@ -642,41 +700,92 @@ func _process_ace_flight(delta: float) -> void:
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER): roll_input += 1.0
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER): roll_input -= 1.0
 	# CELESTIAL ROTATION TIERING (NMS-STYLE HORIZON LOCK)
+	if target_planet:
+		var raw_dist = global_position.distance_to(target_planet.global_position)
+		true_altitude = raw_dist - target_planet.get("planet_radius")
 	var is_in_atmo = target_planet and true_altitude < 26000.0
 	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
-	
-	# 1. PITCH: Local-axis rotation
-	rotate(basis.x.normalized(), pitch * rotation_speed * delta)
-	
-	# 2. YAW: Banks more naturally if we use local Basis Y instead of World-Up
-	if is_in_atmo:
-		# ACE HARDENING: Local Y rotation allows for Banked Turns (High-Fidelity)
+	var surface_assist: float = 0.0
+	if target_planet:
+		surface_assist = clamp(1.0 - (true_altitude / 9000.0), 0.0, 1.0)
+	var is_surface_flight: bool = surface_assist > 0.0
+	# ACE NMS FLIGHT: Full input authority in atmosphere. The old code damped pitch/yaw
+	# and rebuilt the basis from a decoupled heading vector, which caused the ship to
+	# visually lag its heading and enter sideways. We now steer the actual body basis
+	# directly and let a roll-correction torque keep the horizon level.
+	var steer_scale: float = lerp(1.0, 0.9, surface_assist)
+	yaw *= steer_scale
+	pitch *= lerp(1.0, 0.95, surface_assist)
+	# ROLL AUTHORITY: L1/R1 should visibly tilt the ship in atmosphere. Scaling down
+	# to 0.15 (old value) made the buttons feel broken — the auto-level torque snapped
+	# the hull upright before the roll was visible. 0.65 gives clear banking input,
+	# and the "user-active suppression" below keeps auto-level from fighting it.
+	roll_input *= lerp(1.0, 0.65, surface_assist)
+
+	# ATMOSPHERE MODE (No Man's Sky style):
+	#   1. Pitch  -> local rotation around ship.basis.x (nose up/down relative to surface)
+	#   2. Yaw    -> rotation around PLANET up (horizon stays level while turning)
+	#   3. Roll   -> auto-level torque so ship.basis.x stays perpendicular to world_up,
+	#                plus a small user bank contribution
+	# This replaces the old _atmo_heading approach, which decoupled the ship's visible
+	# body from its steering vector and left the hull rolled arbitrarily on entry.
+	if is_in_atmo and barrel_roll_t <= 0.0:
+		# ENTRY CATCH: on the single frame we cross into atmo, bias the ship toward an
+		# upright basis so reentry doesn't start sideways or inverted. 40% slerp is
+		# strong enough to feel "grabbed by gravity" without a visible snap.
+		if not _was_in_atmo:
+			var entry_fwd = (-global_transform.basis.z).slide(world_up)
+			if entry_fwd.length_squared() < 0.0001:
+				entry_fwd = velocity.slide(world_up)
+			if entry_fwd.length_squared() < 0.0001:
+				entry_fwd = _get_surface_forward_hint(world_up)
+			entry_fwd = entry_fwd.normalized()
+			var entry_basis = _surface_aligned_basis(world_up, entry_fwd)
+			global_transform.basis = global_transform.basis.slerp(entry_basis, 0.4)
+
+		# 1. PITCH — around the ship's LOCAL right axis
+		if abs(pitch) > 0.001:
+			rotate(global_transform.basis.x.normalized(), pitch * rotation_speed * delta)
+
+		# 2. YAW — around PLANET up so turns don't roll the ship and the horizon stays flat
+		if abs(yaw) > 0.001:
+			rotate(world_up, yaw * rotation_speed * delta * 0.9)
+
+		# 3. AUTO-LEVEL ROLL — signed torque around local forward so basis.x ⟂ world_up.
+		# NMS BANKING: when the pilot yaws (or holds L1/R1), we want a visible bank.
+		# Auto-level still pulls the hull upright when hands are off, but user roll
+		# input dominates while held. Yaw also contributes a small bank-into-turn
+		# so horizontal turns feel like flying, not driving.
+		var ship_fwd = -global_transform.basis.z
+		var ship_right = global_transform.basis.x
+		var desired_right = ship_fwd.cross(world_up)
+		if desired_right.length_squared() > 0.0001:
+			desired_right = desired_right.normalized()
+			var right_dot = clamp(ship_right.dot(desired_right), -1.0, 1.0)
+			var roll_err = acos(right_dot)
+			# Sign the correction around the ship's forward axis
+			if ship_right.cross(desired_right).dot(ship_fwd) < 0.0:
+				roll_err = -roll_err
+			# When the pilot is actively rolling, back off the auto-level torque so the
+			# input is actually felt. Scales from 1.0 (no input) to ~0.1 (full input).
+			var user_roll_strength = clamp(absf(roll_input) * 1.5, 0.0, 1.0)
+			var autolevel_scale: float = lerp(1.0, 0.12, user_roll_strength)
+			var level_rate: float = lerp(2.5, 8.0, surface_assist)
+			# NMS BANK-INTO-TURN: sideways yaw input adds a small roll in the turn direction
+			var bank_assist: float = -yaw * 0.35
+			rotate(ship_fwd, (
+				roll_err * level_rate * autolevel_scale
+				+ roll_input * roll_speed
+				+ bank_assist
+			) * delta)
+
+		# Cache forward for any downstream consumers that still read _atmo_heading
+		_atmo_heading = (-global_transform.basis.z).normalized()
+	elif not is_in_atmo:
+		# SPACE: full three-axis Newtonian flight, no gravity alignment
+		rotate(basis.x.normalized(), pitch * rotation_speed * delta)
 		rotate(basis.y.normalized(), yaw * rotation_speed * delta)
-	else:
-		rotate(basis.y.normalized(), yaw * rotation_speed * delta)
-	
-	# 3. ROLL: Full Manual Authority (ACE Drift Purge)
-	rotate(basis.z.normalized(), roll_input * roll_speed * delta)
-	
-	# ACE: PLANETARY HORIZON ALIGNMENT (Gravity Lock)
-	# As we enter the 26km barrier, the ship naturally seeks the horizon.
-	if is_in_atmo:
-		# Alignment strength peaks at surface, fades out as we reach orbit (26km)
-		var align_strength = clamp(1.0 - (true_altitude / 26000.0), 0.0, 1.0)
-		
-		# Only auto-level if the player isn't actively rolling or in a barrel roll
-		if abs(roll_input) < 0.1 and barrel_roll_t <= 0.0:
-			var current_up = global_transform.basis.y
-			var current_fwd = -global_transform.basis.z
-			
-			# Construct an 'Artificial Horizon' basis
-			var target_right = world_up.cross(current_fwd).normalized()
-			if target_right.length() < 0.1: target_right = global_transform.basis.x # Singularity handling
-			var target_fwd = target_right.cross(world_up).normalized()
-			var target_basis = Basis(target_right, world_up, -target_fwd)
-			
-			# ACE: Gentle restorative torque (2.5 factor for stable 'Star Fox' feel)
-			global_transform.basis = global_transform.basis.slerp(target_basis.orthonormalized(), 2.5 * align_strength * delta)
+		rotate(basis.z.normalized(), roll_input * roll_speed * delta)
 	
 	# PHYSICS HARDENING: Orthonormalize basis to prevent floating-point stretching
 	# At massive scales, tiny precision errors in rotation accumulate into a 'Flipped Hull'.
@@ -689,7 +798,8 @@ func _process_ace_flight(delta: float) -> void:
 	# Apply deadzone and precision curve (more control at low speeds)
 	raw_thrust = pow(clamp((raw_thrust - 0.05) / 0.95, 0.0, 1.0), 1.8)
 	raw_reverse = pow(clamp((raw_reverse - 0.05) / 0.95, 0.0, 1.0), 1.8)
-	var is_warping: bool = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT)
+	# BOOST/WARP: gamepad A, keyboard Shift, OR mobile BOOST button
+	var is_warping: bool = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT) or mobile_boost
 	# HYPERDRIVE: L1 + R1 held together = 3rd thrust tier (5× warp)
 	# L1 = JOY_BUTTON_LEFT_SHOULDER, R1 = JOY_BUTTON_RIGHT_SHOULDER
 	var is_hyperdrive: bool = is_warping \
@@ -699,18 +809,21 @@ func _process_ace_flight(delta: float) -> void:
 	var thrust_mapped = max(raw_thrust, 1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0)
 	var reverse_mapped = max(raw_reverse, 1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
 
-	# ACE: BI-DIRECTIONAL MOBILE THROTTLE
+	# ACE: BI-DIRECTIONAL MOBILE THROTTLE (LATCHING)
 	# 0.5 is Neutral. >0.5 is Forward. <0.5 is Reverse.
+	# The throttle no longer auto-resets, so the pilot can cruise hands-free and
+	# trim via gyro. BRAKE button forces the slider back to neutral on release.
 	if mobile_throttle > 0.52:
 		thrust_mapped = (mobile_throttle - 0.5) * 2.0
-		# ACE: Hyperdrive Trigger at 98% slider
-		if mobile_throttle > 0.98: thrust_mapped = 5.0 
 	elif mobile_throttle < 0.48:
 		reverse_mapped = (0.5 - mobile_throttle) * 2.0
 
-	if target_planet:
-		var raw_dist = global_position.distance_to(target_planet.global_position)
-		true_altitude = raw_dist - target_planet.get("planet_radius") 
+	# ACE MOBILE BRAKE: hold to override throttle with hard reverse assist.
+	# This gives pilots a panic-stop that also disengages warp.
+	if mobile_brake:
+		thrust_mapped = 0.0
+		reverse_mapped = max(reverse_mapped, 1.0)
+		is_warping = false
 	
 	# ATMOSPHERIC BARRIER CROSSING: Sync with 26km Exosphere Boundary
 	const BARRIER_ALT: float = 26000.0
@@ -739,6 +852,16 @@ func _process_ace_flight(delta: float) -> void:
 	# Warp Thresholds: 450m/s (Surface) -> 2100m/s (Atmo) -> gravity_brake_max (Space)
 	var surface_warp = lerp(450.0, 2100.0, surface_ratio)
 	var dynamic_warp_speed = lerp(surface_warp, min(max_warp_speed, gravity_brake_max * 2.5), altitude_ratio)
+	if is_surface_flight:
+		# NMS PULSE DRIVE: cruise stays "controlled taxi," but warp/boost should still
+		# feel like a genuine pulse drive over a planet. Previous caps (180-380 m/s)
+		# were below the G-Lock bleeder threshold, so holding boost did nothing visible.
+		#   Cruise: 260 -> 180 m/s  (was 220 -> 120)
+		#   Warp:   1800 -> 900 m/s (was 380 -> 180) -- true surface pulse drive
+		#   Brake:  2400 m/s ceiling (was 320) so the bleeder doesn't fight warp
+		dynamic_max_speed = min(dynamic_max_speed, lerp(260.0, 180.0, surface_assist))
+		dynamic_warp_speed = min(dynamic_warp_speed, lerp(1800.0, 900.0, surface_assist))
+		gravity_brake_max = min(gravity_brake_max, 2400.0)
 	
 	# ACE: Force-bleed velocity if exceeding the safety threshold (G-Lock)
 	if velocity.length() > gravity_brake_max * 1.5:
@@ -756,10 +879,28 @@ func _process_ace_flight(delta: float) -> void:
 		s_val = dynamic_warp_speed
 	else:
 		s_val = dynamic_max_speed
-	var target_vel = -global_transform.basis.z * s_val * thrust_mapped
-	
+	# NMS MODEL: thrust always follows the ship's actual forward. In atmosphere the
+	# auto-level torque keeps the hull upright around the roll axis, but pitch is
+	# entirely pilot-controlled — pitching the nose up MUST translate into climbing,
+	# and pitching down MUST translate into a dive. The old code sliced the vertical
+	# component off target_vel on the surface, so the ship was effectively locked to
+	# a single altitude. That's now gone; terrain safety + auto-level keep it from
+	# pancaking into the ground.
+	var thrust_dir: Vector3 = -global_transform.basis.z
+	if not is_in_atmo and is_surface_flight:
+		# Space-above-surface edge case: we're in "surface flight" but above the atmo
+		# boundary (shouldn't happen with current thresholds, but keep the guard).
+		thrust_dir = thrust_dir.slide(world_up)
+		if thrust_dir.length_squared() < 0.0001:
+			thrust_dir = _get_surface_forward_hint(world_up)
+		else:
+			thrust_dir = thrust_dir.normalized()
+	var target_vel = thrust_dir * s_val * thrust_mapped
+
 	if reverse_mapped > 0.1:
-		target_vel = global_transform.basis.z * dynamic_max_speed * 0.4 * reverse_mapped
+		target_vel = -thrust_dir * dynamic_max_speed * 0.4 * reverse_mapped
+	# (Removed the forced slide(world_up) for surface flight — the pilot now has
+	# full vertical freedom via pitch input, just like No Man's Sky.)
 		
 	# ACE DIVERGENT FLIGHT DYNAMICS: Modulate drag and inertia based on atmospheric density
 	# Space (Ratio 1.0) = Newtonian Inertia (Low Drag, Floating)
@@ -768,6 +909,8 @@ func _process_ace_flight(delta: float) -> void:
 	
 	if target_vel.length_squared() < 0.01:
 		var brake_power = lerp(12.0, 0.4, altitude_ratio) # Space drift takes ages to stop
+		if is_surface_flight:
+			brake_power += 8.0 * surface_assist
 		velocity = velocity.lerp(Vector3.ZERO, brake_power * delta)
 		if velocity.length_squared() < 0.25:
 			velocity = Vector3.ZERO
@@ -831,17 +974,34 @@ func _process_ace_flight(delta: float) -> void:
 	var cur_v_tick = int(Time.get_ticks_msec() / 33.33)
 	var v_update_30 = cur_v_tick != _v_tick_30_p
 	if v_update_30: _v_tick_30_p = cur_v_tick
-	
+
+	# ACE MOBILE TELEMETRY: push speed/altitude/warp to the HUD readout. Driven
+	# here (not in _process) so the value is fresh relative to the physics step.
+	if mobile_ui_ref and mobile_ui_ref.has_method("set_telemetry"):
+		mobile_ui_ref.set_telemetry(velocity.length(), true_altitude, is_warping)
+
 	move_and_slide()
 	
 	# ACE SAFETY FLOOR: Terrain-aware anti-clipping recovery (Radius-Aware)
+	# MOBILE: get_terrain_elevation runs layered FastNoiseLite samples — throttle
+	# to every 3rd physics frame (still >10Hz) and reuse the cached height
+	# between recomputes.
 	if target_planet and target_planet.has_method("get_terrain_elevation"):
 		var p_center = target_planet.global_position
 		var to_ship = global_position - p_center
 		var dist_to_center = to_ship.length()
 		var up_dir = to_ship / dist_to_center
-		
-		var terrain_h = target_planet.get_terrain_elevation(up_dir)
+
+		_terrain_floor_tick += 1
+		var _t_update: bool = true
+		if _mobile_perf and (_terrain_floor_tick % 3) != 0:
+			_t_update = false
+		var terrain_h: float
+		if _t_update:
+			terrain_h = target_planet.get_terrain_elevation(up_dir)
+			_terrain_floor_cached = terrain_h
+		else:
+			terrain_h = _terrain_floor_cached
 		var p_radius = target_planet.get("planet_radius")
 		
 		# ACE HARDENING: Optimized for 6m Hull Radius
@@ -905,10 +1065,22 @@ func _process_ace_flight(delta: float) -> void:
 	# UPDATE THRUSTER TRAILS (Sync after physical move to prevent high-velocity lag)
 	# At 64km/s, even a single frame of lag causes a 1km visual gap.
 	# Using the ship_model.global_transform ensures we catch the 25x model-space offsets.
+	# MOBILE: Rebuild the ImmediateMesh ribbon every other frame (15Hz at 30fps
+	# cap) to halve the vertex-submission cost of the 5-port trail system.
+	# Nozzle orb / OmniLight sync still runs every frame below so ignition is crisp.
+	_thruster_tick += 1
+	var _trail_ribbon_update: bool = true
+	var _trail_ribbon_delta: float = delta
+	if _mobile_perf:
+		if (_thruster_tick & 1) == 0:
+			_trail_ribbon_update = false
+		else:
+			_trail_ribbon_delta = delta * 2.0
 	if ship_model:
 		for t in thruster_trails:
 			var world_pos = ship_model.global_transform * t.offset
-			t.node.update_trail(world_pos, global_transform.basis.z, velocity, is_warping, thrust_mapped, delta)
+			if _trail_ribbon_update:
+				t.node.update_trail(world_pos, global_transform.basis.z, velocity, is_warping, thrust_mapped, _trail_ribbon_delta)
 			
 			# SYNC DYNAMIC NOZZLE ORB (Sphere core + Physical OmniLight)
 			if t.node.has_meta("glow_node"):
@@ -967,19 +1139,26 @@ func _process_ace_flight(delta: float) -> void:
 	# 5. VISUAL HULL DYNAMICS
 	# Simulates physical G-Forces forcing the Starhawk to bank and pitch violently during maneuvers
 	if ship_model:
-		var target_bank = yaw * 18.0 # Biting into the turn (Roll left/right)
+		var target_bank = yaw * lerp(18.0, 7.0, surface_assist) # Biting into the turn (Roll left/right)
 		var target_pitch_visual = (thrust_mapped * 6.0) - (reverse_mapped * 6.0) # Nose shifts up/down
+		if is_surface_flight:
+			target_pitch_visual = lerp(target_pitch_visual, 0.0, surface_assist)
 		
 		# Because the model is baseline-rotated -90.0 on Y, X becomes local Roll and Z becomes local Pitch!
 		var target_hull_euler = Vector3(target_bank, -90.0, target_pitch_visual)
 		
 		# KINEMATIC BANKING: Sync with deadzone-hardened flight controls to purge drift-lean
-		var bank_deg = yaw * 28.0
-		var dip_deg = -pitch * 8.0
+		var bank_deg = yaw * lerp(28.0, 10.0, surface_assist)
+		var dip_deg = lerp(-pitch * 8.0, 0.0, surface_assist)
+		dip_deg += (thrust_mapped - reverse_mapped) * lerp(6.0, 1.5, surface_assist)
+		if is_surface_flight:
+			dip_deg = clamp(dip_deg, -2.0, 4.0)
 		var t_rot = Vector3(bank_deg, -90.0, dip_deg)
 		
 		# ACE ROTATION HARDENING: Smooth lerp banking/dip every frame to prevent jitter
 		var rot_weight = 12.0 if (abs(yaw) < 0.01 and abs(pitch) < 0.01) else 4.0
+		if is_surface_flight:
+			rot_weight = 14.0
 		
 		# BARREL ROLL LOGIC: 360 Degree helical rotation
 		var is_rolling = barrel_roll_t > 0.0
@@ -1014,6 +1193,7 @@ func _process_ace_flight(delta: float) -> void:
 
 	# ACE: Master Camera & HUD Sync
 	_process_ace_camera(delta)
+	_was_in_atmo = is_in_atmo
 
 func _fire_alternating_cannon() -> void:
 	fire_cooldown = FIRE_RATE
@@ -1107,7 +1287,7 @@ func _input(event: InputEvent) -> void:
 			_fire_alternating_cannon()
 	
 	# ORBIT CAMERA: Mouse Look
-	if event is InputEventMouseMotion and mouse_locked and in_ship:
+	if event is InputEventMouseMotion and mouse_locked and in_ship and not mobile_throttle_dragging:
 		cam_orbit.x -= event.relative.x * 0.002
 		cam_orbit.y -= event.relative.y * 0.002
 		cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
@@ -1138,7 +1318,7 @@ func _input(event: InputEvent) -> void:
 		elif not in_ship and parked_ship and global_position.distance_to(parked_ship.global_position) < 80.0: _embark()
 		
 	# MOUSE LOOK
-	if event is InputEventMouseMotion and mouse_locked:
+	if event is InputEventMouseMotion and mouse_locked and not mobile_throttle_dragging:
 		if in_ship:
 			cam_orbit.x -= event.relative.x * 0.002
 			cam_orbit.y -= event.relative.y * 0.002
@@ -1163,32 +1343,35 @@ func _process(delta: float) -> void:
 			_radar_tick = 0
 			var best_target: Node3D = null
 			var fwd = -global_transform.basis.z 
+			# CACHE: Fetch Enemies once and reuse for both the radar scan and the
+			# off-screen threat arrows. Saves a second SceneTree group traversal.
+			var enemies_pool = get_tree().get_nodes_in_group("Enemies") if is_inside_tree() else []
 			if is_inside_tree():
 				var highest_dot = 0.98 # ACE PRECISION: Required 11-degree 'Close Proximity' cone
-				
+
 				# PRECEDENCE SCAN: Prioritize Enemies over passive targets
 				var candidate_pools = [
-					get_tree().get_nodes_in_group("Enemies"),
+					enemies_pool,
 					get_tree().get_nodes_in_group("Targets")
 				]
-				
+
 				for pool in candidate_pools:
 					for t in pool:
 						if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
 						var d_v = (t.global_position - global_position)
-						if d_v.length() > 25000.0: continue 
-						
+						if d_v.length() > 25000.0: continue
+
 						var dot = fwd.dot(d_v.normalized())
-						if dot > highest_dot: 
+						if dot > highest_dot:
 							highest_dot = dot
 							best_target = t
 					# If we found an enemy in the first pool, don't even look at rocks
 					if best_target: break
-					
+
 			lock_on_target = best_target
 
 			# FLEET THREAT TRACKER: Draw arrows for ALL off-screen enemies
-			var adversaries = get_tree().get_nodes_in_group("Enemies")
+			var adversaries = enemies_pool
 			var arrow_idx = 0
 			for a in adversaries:
 				if not is_instance_valid(a) or a.is_queued_for_deletion(): continue
@@ -1320,11 +1503,12 @@ func _process(delta: float) -> void:
 		var next_pos = old_pos + move_dist
 		b["pos"] = next_pos # Update internal physical pos
 		
-		# SWEPT-FRAME PHYSICS: Direct raycast from old to new position
-		var query = PhysicsRayQueryParameters3D.create(old_pos, next_pos)
-		query.collision_mask = 1 | 2 # Rocks and Ships
-		query.exclude = [self] # Hardened: Prevents self-collision at high-recoil fire
-		var result = space_state.intersect_ray(query)
+		# SWEPT-FRAME PHYSICS: Direct raycast from old to new position.
+		# Reusing _ray_q (allocated once in _ready) avoids per-bolt allocations —
+		# critical when dozens of bolts are live at 30fps on mobile.
+		_ray_q.from = old_pos
+		_ray_q.to = next_pos
+		var result = space_state.intersect_ray(_ray_q)
 		
 		if result and is_instance_valid(result.collider):
 			var target = result.collider
@@ -1370,7 +1554,10 @@ func _process(delta: float) -> void:
 
 func _trigger_explosion_inline(pos: Vector3, target: Node, normal: Vector3, is_big: bool = false) -> void:
 	_spawn_impact_flash(pos, normal)
-	_spawn_scorch_mark(pos, target, normal)
+	# MOBILE: Skip scorch Decals entirely. Decal nodes are forward-cluster
+	# expensive on tiled-GPU chips and the retro toon aesthetic hides their absence.
+	if not _mobile_perf:
+		_spawn_scorch_mark(pos, target, normal)
 	
 	var explosion_script = load("res://src/combat/ExplosionFX.gd")
 	if not explosion_script: return
@@ -1422,6 +1609,14 @@ func _spawn_scorch_mark(pos: Vector3, target: Node, normal: Vector3) -> void:
 	t.tween_callback(decal.queue_free)
 
 func _spawn_impact_flash(pos: Vector3, normal: Vector3) -> void:
+	# MOBILE: Rate-limit to one flash every 80ms — OmniLight3D spawning is one of
+	# the dearer costs on A14 during sustained fire. Visual feel is preserved
+	# because bolts spawn at >5Hz and flashes overlap.
+	if _mobile_perf:
+		var now_ms = Time.get_ticks_msec()
+		if now_ms - _last_flash_ms < 80:
+			return
+		_last_flash_ms = now_ms
 	# Offset away from surface to prevent Z-Fighting occlusion
 	var spawn_pos = pos + (normal * 2.5)
 	
@@ -1500,10 +1695,8 @@ func _disembark() -> void:
 			var g_up = (global_position - target_planet.global_position).normalized()
 			var h = target_planet.get_terrain_elevation(g_up)
 			var ground_pos = target_planet.global_position + (g_up * (target_planet.planet_radius + h))
-			
-			var t_bas = Basis(); t_bas.y = g_up; t_bas.x = g_up.cross(global_transform.basis.z).normalized()
-			if t_bas.x.length() < 0.1: t_bas.x = g_up.cross(Vector3.FORWARD).normalized()
-			t_bas.z = t_bas.x.cross(t_bas.y).normalized()
+
+			var t_bas = _surface_aligned_basis(g_up, -global_transform.basis.z)
 			
 			parked_ship.global_transform.basis = t_bas
 			parked_ship.global_position = ground_pos + (g_up * 10.0) # Prince-scale landing height
@@ -1567,6 +1760,35 @@ func _trigger_barrel_roll(dir: float) -> void:
 	barrel_roll_dir = dir
 	print("--- PILOT: BARREL ROLL TRIGGERED (Dir: ", dir, ") ---")
 
+func _surface_aligned_basis(up_dir: Vector3, forward_hint: Vector3) -> Basis:
+	var up = up_dir.normalized()
+	var fwd = forward_hint.slide(up)
+	if fwd.length_squared() < 0.0001:
+		fwd = up.cross(Vector3.RIGHT)
+	if fwd.length_squared() < 0.0001:
+		fwd = up.cross(Vector3.FORWARD)
+	fwd = fwd.normalized()
+	var right = up.cross(fwd)
+	if right.length_squared() < 0.0001:
+		right = up.cross(Vector3.RIGHT if abs(up.dot(Vector3.RIGHT)) < 0.9 else Vector3.FORWARD)
+	right = right.normalized()
+	fwd = right.cross(up).normalized()
+	return Basis(right, up, -fwd).orthonormalized()
+
+func _get_surface_forward_hint(world_up: Vector3) -> Vector3:
+	var hint: Vector3 = Vector3.ZERO
+	if velocity.length_squared() > 25.0:
+		hint = velocity.slide(world_up)
+	if hint.length_squared() < 0.0001:
+		hint = (-global_transform.basis.z).slide(world_up)
+	if hint.length_squared() < 0.0001 and cam_pivot:
+		hint = (-cam_pivot.global_transform.basis.z).slide(world_up)
+	if hint.length_squared() < 0.0001:
+		hint = world_up.cross(Vector3.RIGHT)
+	if hint.length_squared() < 0.0001:
+		hint = world_up.cross(Vector3.FORWARD)
+	return hint.normalized()
+
 
 func lock_mouse() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -1608,7 +1830,9 @@ func _setup_polar_weather() -> void:
 	snow_particles = CPUParticles3D.new()
 	# Attach to camera so they always surround the player but stay local to the world
 	if camera: camera.add_child(snow_particles)
-	snow_particles.amount = 800
+	# MOBILE: Cut particle budget ~60% across the board. Weather is a flavour layer,
+	# not a gameplay system, and 800 box-mesh particles at 30fps eats GPU on A14.
+	snow_particles.amount = 320 if _mobile_perf else 800
 	snow_particles.lifetime = 2.5
 	snow_particles.preprocess = 1.0
 	
@@ -1629,19 +1853,54 @@ func _setup_polar_weather() -> void:
 func prewarm_vfx() -> void:
 	# ACE: Force-render all movement VFX behind the loading screen to avoid shader hitches
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-	if get("thruster_trails"):
-		for t in get("thruster_trails"): t.emitting = true
+	if ship_model and get("thruster_trails"):
+		for t_data in get("thruster_trails"):
+			if typeof(t_data) != TYPE_DICTIONARY:
+				continue
+			var trail_node = t_data.get("node")
+			var offset = t_data.get("offset", Vector3.ZERO)
+			if not is_instance_valid(trail_node):
+				continue
+			var world_pos = ship_model.global_transform * offset
+			if trail_node.has_method("prewarm"):
+				trail_node.prewarm(world_pos, -global_transform.basis.z)
+			# Nudge the nozzle shader through one render path so the first thrust is not a compile hitch.
+			for child in trail_node.get_children():
+				if child is MeshInstance3D and child.material_override is ShaderMaterial:
+					child.visible = true
+					child.material_override.set_shader_parameter("power", 0.01)
+					child.material_override.set_shader_parameter("glow_color", Color.RED)
 	
 	# Wait one frame and then cut them
 	await get_tree().process_frame
-	if get("thruster_trails"):
-		for t in get("thruster_trails"): t.emitting = false
+	if ship_model and get("thruster_trails"):
+		for t_data in get("thruster_trails"):
+			if typeof(t_data) != TYPE_DICTIONARY:
+				continue
+			var trail_node = t_data.get("node")
+			if not is_instance_valid(trail_node):
+				continue
+			trail_node.points.clear()
+			trail_node.mesh_gen.clear_surfaces()
+			for child in trail_node.get_children():
+				if child is MeshInstance3D:
+					child.visible = true
+					if child.material_override is ShaderMaterial:
+						child.material_override.set_shader_parameter("power", 0.0)
 
 # (c) On the Side LLC. and affiliates. Confidential and proprietary.
 
+var _weather_tick: int = 0
 func _update_polar_weather(delta: float) -> void:
 	if not snow_particles: return
-	
+	# MOBILE: Weather classification (nearest planet, archetype) only needs
+	# refreshing a few times per second — not every physics tick. Throttle to
+	# ~5Hz on mobile, ~15Hz on desktop to save the planet scan + group iteration.
+	_weather_tick += 1
+	var _w_target: int = 6 if _mobile_perf else 2
+	if _weather_tick % _w_target != 0:
+		return
+
 	# Detect if we are at a pole of a snowy-capable planet
 	var nearest_p = null; var min_d = 1e16
 	for p in get_tree().get_nodes_in_group("Planet"):
@@ -1674,27 +1933,30 @@ func _update_polar_weather(delta: float) -> void:
 			mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 			snow_particles.material_override = mat
 			
+		# MOBILE: Halve the per-archetype budget. Keeps the weather feel but
+		# avoids CPUParticles3D transform churn eating our 33ms frame budget.
+		var _p_scale: float = 0.4 if _mobile_perf else 1.0
 		match p_type:
 			"VOLCANIC":
 				mat.albedo_color = Color(1.0, 0.35, 0.1) # Glowing Ash
 				snow_particles.gravity = Vector3(3.0, -5.0, 3.0) # Floating embers
-				snow_particles.amount = 400
+				snow_particles.amount = int(400 * _p_scale)
 			"DESERT":
 				mat.albedo_color = Color(0.85, 0.75, 0.5) # Sand
 				snow_particles.gravity = Vector3(45.0, -8.0, 15.0) # Horizon-sweeping Wind
-				snow_particles.amount = 1200
+				snow_particles.amount = int(1200 * _p_scale)
 			"TOXIC", "RADIATED":
 				mat.albedo_color = Color(0.35, 0.95, 0.45) # Acid rain
 				snow_particles.gravity = Vector3(5.0, -45.0, 5.0) # Heavy fall
-				snow_particles.amount = 1000
+				snow_particles.amount = int(1000 * _p_scale)
 			"ABYSS":
 				mat.albedo_color = Color(0.1, 0.2, 0.3) # Dark mist drops
 				snow_particles.gravity = Vector3(2.0, -5.0, 2.0)
-				snow_particles.amount = 600
+				snow_particles.amount = int(600 * _p_scale)
 			_: # FROZEN, LUSH, CANDY
 				mat.albedo_color = Color.WHITE # Snow
 				snow_particles.gravity = Vector3(12.0, -15.0, 5.0)
-				snow_particles.amount = 800
+				snow_particles.amount = int(800 * _p_scale)
 				
 		snow_particles.emitting = intensity > 0.05
 	else:

@@ -1865,11 +1865,12 @@ func prewarm_vfx() -> void:
 			if trail_node.has_method("prewarm"):
 				trail_node.prewarm(world_pos, -global_transform.basis.z)
 			# Nudge the nozzle shader through one render path so the first thrust is not a compile hitch.
-			for child in trail_node.get_children():
-				if child is MeshInstance3D and child.material_override is ShaderMaterial:
-					child.visible = true
-					child.material_override.set_shader_parameter("power", 0.01)
-					child.material_override.set_shader_parameter("glow_color", Color.RED)
+			if trail_node.has_meta("glow_node"):
+				var glow_node = trail_node.get_meta("glow_node")
+				if is_instance_valid(glow_node) and glow_node is MeshInstance3D and glow_node.material_override is ShaderMaterial:
+					glow_node.visible = true
+					glow_node.material_override.set_shader_parameter("power", 0.01)
+					glow_node.material_override.set_shader_parameter("glow_color", Color.RED)
 	
 	# Wait one frame and then cut them
 	await get_tree().process_frame
@@ -1882,11 +1883,12 @@ func prewarm_vfx() -> void:
 				continue
 			trail_node.points.clear()
 			trail_node.mesh_gen.clear_surfaces()
-			for child in trail_node.get_children():
-				if child is MeshInstance3D:
-					child.visible = true
-					if child.material_override is ShaderMaterial:
-						child.material_override.set_shader_parameter("power", 0.0)
+			if trail_node.has_meta("glow_node"):
+				var glow_node = trail_node.get_meta("glow_node")
+				if is_instance_valid(glow_node) and glow_node is MeshInstance3D:
+					glow_node.visible = true
+					if glow_node.material_override is ShaderMaterial:
+						glow_node.material_override.set_shader_parameter("power", 0.0)
 
 # (c) On the Side LLC. and affiliates. Confidential and proprietary.
 

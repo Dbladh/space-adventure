@@ -484,7 +484,7 @@ func _process(_delta: float) -> void:
 	var all_ready = _mineral_spawn_queue.is_empty()
 	var planets = get_tree().get_nodes_in_group("Planet")
 	for pl in planets:
-		if pl.get("_prewarm_count") < 20:
+		if pl.get("_prewarm_count") < pl.get("_prewarm_target"):
 			all_ready = false
 			break
 	

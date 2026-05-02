@@ -13,6 +13,11 @@ var direction: Vector3 = Vector3.FORWARD
 var elapsed: float = 0.0
 var mesh_node: MeshInstance3D
 
+# SHARED MATERIAL — first laser fired after launch was paying a Metal pipeline
+# compile (unshaded + emission variant), which compounded with the thruster
+# stalls on iOS.  Cache it across all bolts so the GPU PSO stays hot.
+static var _shared_bolt_mat: StandardMaterial3D = null
+
 func _ready() -> void:
 	# BUILD THE LASER ROD GEOMETRY PROCEDURALLY
 	# ACE: Increased thickness (3.5) for high-frequency retro-visibility
@@ -22,13 +27,15 @@ func _ready() -> void:
 	rod.height = 120.0
 	mesh_node.mesh = rod
 	mesh_node.rotation_degrees.x = 90.0 # Align the rod along the forward axis (Z)
-	
-	# GLOWING NEON MATERIAL — unshaded so it ignores world lighting and glows independently
-	var mat = StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.emission = Color(1.0, 0.4, 0.1) # FIERY ORANGE-RED
-	mat.emission_energy_multiplier = 14.0 # CRANKED for Retro clarity
-	rod.surface_set_material(0, mat)
+
+	# GLOWING NEON MATERIAL — shared across all bolts to keep the pipeline hot.
+	if _shared_bolt_mat == null:
+		_shared_bolt_mat = StandardMaterial3D.new()
+		_shared_bolt_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_shared_bolt_mat.emission_enabled = true
+		_shared_bolt_mat.emission = Color(1.0, 0.4, 0.1) # FIERY ORANGE-RED
+		_shared_bolt_mat.emission_energy_multiplier = 14.0 # CRANKED for Retro clarity
+	mesh_node.material_override = _shared_bolt_mat
 	add_child(mesh_node)
 	
 	# COLLISION SPHERE: Wide enough to register hits on all asteroid and tree scales

@@ -86,6 +86,11 @@ var cam_spring: SpringArm3D
 var thruster_trails: Array = []
 var heat_soak: float = 0.0      # Engine thermal saturation
 var shard_timer: float = 0.0    # Plasma debris ejection interval
+
+# SHARED VFX MATERIAL — created once on first plasma-shard spawn so subsequent
+# spawns don't pay a Metal pipeline-compile stall on mobile.  LaserBolt.gd has
+# its own static cache for the same reason.
+static var _shared_shard_mat: StandardMaterial3D = null
 var _atmo_heading: Vector3 = Vector3.FORWARD
 var _was_in_atmo: bool = false
 
@@ -1792,14 +1797,18 @@ func _spawn_plasma_shard(pos: Vector3) -> void:
 	var s = randf_range(0.1, 0.4)
 	bm.size = Vector3(s, s, s)
 	shard.mesh = bm
-	
-	var mat = StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color.RED
-	mat.emission_enabled = true
-	mat.emission = Color.RED
-	mat.emission_energy_multiplier = 4.0
-	shard.material_override = mat
+
+	# Reuse the shared shard material so the GPU pipeline stays hot — first-boost
+	# stalls of 1-3s on iOS came from compiling this StandardMaterial3D variant
+	# (unshaded + emission) on demand for every spawn.
+	if _shared_shard_mat == null:
+		_shared_shard_mat = StandardMaterial3D.new()
+		_shared_shard_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_shared_shard_mat.albedo_color = Color.RED
+		_shared_shard_mat.emission_enabled = true
+		_shared_shard_mat.emission = Color.RED
+		_shared_shard_mat.emission_energy_multiplier = 4.0
+	shard.material_override = _shared_shard_mat
 	
 	# Add to world-space and sync with Floating Origin
 	get_parent().add_child(shard)
@@ -1839,12 +1848,27 @@ func _setup_polar_weather() -> void:
 	snow_particles.emitting = false
 
 func prewarm_vfx() -> void:
-	# Three-pass prewarm behind the loading screen so every shader variant is
-	# compiled before the player can trigger them.  One frame was not enough —
-	# mobile GPU drivers (Metal / Vulkan) need several rendered frames to finish
-	# async pipeline compilation, and the warp variant (120-point ribbon) was
-	# never touched at all, causing the 10-20 s hitch on first boost.
-	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+	# Multi-pass prewarm behind the loading screen so every shader variant the
+	# player can trigger has its Metal / Vulkan pipeline compiled before
+	# gameplay starts.  Each pass waits 8 frames on mobile (2 on desktop) so
+	# the GPU actually finishes async PSO linking before the next pass —
+	# iOS Metal serializes compilation on the main thread on A14 and older,
+	# so we render at full intensity (visible, in front of the camera) and
+	# eat the wait-time behind the splash rather than mid-gameplay.
+	#
+	# Passes covered:
+	#   1) cruise thrust trail + red glow
+	#   2) warp trail (120-pt cyan ribbon — the variant that caused the freeze)
+	#   3) boost trail + orange/white-hot glow
+	#   4) plasma shard (unshaded + emission StandardMaterial3D)
+	#   5) laser bolt + explosion FX (fired weapons share emission/multimesh
+	#      pipelines, prewarming them keeps first-fire from compounding the
+	#      first-thrust stall)
+	if not _mobile_perf:
+		# Desktop GPUs compile pipelines fast enough that the 6 passes of
+		# stalling-on-first-frame here cost more than the freeze they prevent.
+		# Only mobile pays the iOS Metal hitch.
+		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 
 	var fwd := -global_transform.basis.z
 
@@ -1862,6 +1886,13 @@ func prewarm_vfx() -> void:
 					gn.material_override.set_shader_parameter("power", power)
 					gn.material_override.set_shader_parameter("glow_color", col)
 
+	# 8 frames per pass on mobile — iOS Metal serializes pipeline compilation
+	# on the main thread on A14 and older.  Each variant can take 1-3 s; we
+	# pay that cost up front behind the loading splash rather than as a
+	# 10-20 s freeze on the first boost.  Desktop GPUs compile fast enough
+	# that 2 frames is plenty.
+	var wait_frames := 8 if _mobile_perf else 2
+
 	# --- Pass 1: cruise/thrust variant (low ribbon, red glow) ---
 	if ship_model and get("thruster_trails"):
 		for t_data in get("thruster_trails"):
@@ -1873,8 +1904,8 @@ func prewarm_vfx() -> void:
 			if trail_node.has_method("prewarm"):
 				trail_node.prewarm(world_pos, fwd)
 	_set_glows.call(0.5, Color.RED)
-	await get_tree().process_frame
-	await get_tree().process_frame
+	for _w1 in range(wait_frames):
+		await get_tree().process_frame
 
 	# --- Pass 2: warp variant (120-pt ribbon, cyan glow) — the one that was missing ---
 	if ship_model and get("thruster_trails"):
@@ -1887,8 +1918,8 @@ func prewarm_vfx() -> void:
 			# Force the max-length warp ribbon so the GPU compiles that pipeline.
 			trail_node.update_trail(world_pos, fwd, fwd * 60000.0, true, 1.0, 0.016)
 	_set_glows.call(2.0, Color.CYAN)
-	await get_tree().process_frame
-	await get_tree().process_frame
+	for _w2 in range(wait_frames):
+		await get_tree().process_frame
 
 	# --- Pass 3: boost/full-power variant ---
 	if ship_model and get("thruster_trails"):
@@ -1900,8 +1931,42 @@ func prewarm_vfx() -> void:
 			var world_pos: Vector3 = ship_model.global_transform * offset
 			trail_node.update_trail(world_pos, fwd, fwd * 120000.0, false, 1.0, 0.016)
 	_set_glows.call(3.5, Color(1.0, 0.6, 0.1))
-	await get_tree().process_frame
-	await get_tree().process_frame
+	for _w3 in range(wait_frames):
+		await get_tree().process_frame
+
+	# --- Pass 4: plasma shard (unshaded + emission StandardMaterial3D) ---
+	# Spawn one near the camera so the rasterizer actually compiles its PSO,
+	# then queue_free immediately.  The static _shared_shard_mat caches the
+	# pipeline for every subsequent shard.
+	var prewarm_root: Node = get_parent() if get_parent() else self
+	if camera and is_instance_valid(camera):
+		var shard_pos = camera.global_transform.origin - camera.global_transform.basis.z * 25.0
+		_spawn_plasma_shard(shard_pos)
+	for _w4 in range(wait_frames):
+		await get_tree().process_frame
+
+	# --- Pass 5: laser bolt + explosion (first fire would otherwise stall) ---
+	if bolt_script and camera and is_instance_valid(camera):
+		var bolt = Area3D.new()
+		bolt.set_script(bolt_script)
+		prewarm_root.add_child(bolt)
+		bolt.global_transform.origin = camera.global_transform.origin - camera.global_transform.basis.z * 30.0
+		# Despawn before the bolt's lifetime so it doesn't fly into anything
+		# during the loading screen.
+		get_tree().create_timer(0.1).timeout.connect(func():
+			if is_instance_valid(bolt): bolt.queue_free()
+		)
+
+	# Force one explosion FX to compile its multimesh + outline-pass pipeline.
+	var ex_script = load("res://src/combat/ExplosionFX.gd")
+	if ex_script and camera and is_instance_valid(camera):
+		var fx = Node3D.new()
+		fx.set_script(ex_script)
+		prewarm_root.add_child(fx)
+		fx.global_position = camera.global_transform.origin - camera.global_transform.basis.z * 40.0
+		fx.set("explosion_scale", 1.0)
+	for _w5 in range(wait_frames):
+		await get_tree().process_frame
 
 	# --- Clear all trails and dim glow to invisible ---
 	if ship_model and get("thruster_trails"):

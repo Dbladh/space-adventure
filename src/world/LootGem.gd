@@ -38,8 +38,9 @@ func _ready() -> void:
 	add_child(mi)
 
 	# EXPLOSION VELOCITY: random direction biased upward (away from planet
-	# centre) so shards arc above the mineral before falling back to the
-	# surface.  Atmosphere/space gemstones both spawn this way.
+	# centre) so shards arc dramatically above the mineral before falling back
+	# to the surface.  Increased velocity from 220-420 to 380-680 so the burst
+	# feels more violent and shards spread wider across the surface.
 	var rng = RandomNumberGenerator.new(); rng.randomize()
 	var up_dir: Vector3
 	if planet:
@@ -51,19 +52,21 @@ func _ready() -> void:
 		rng.randf_range(-0.2, 0.6),
 		rng.randf_range(-1.0, 1.0)
 	).normalized()
-	# 0.7 up bias keeps the burst arc visually consistent regardless of the
-	# planet orientation; the random component spreads shards across ~120°.
-	var explode_dir = (up_dir * 0.7 + random_dir * 0.7).normalized()
-	velocity = explode_dir * rng.randf_range(220.0, 420.0)
+	# 0.8 up bias (increased from 0.7) keeps the burst arc visually consistent
+	# and more upward; the random component spreads shards outward.
+	var explode_dir = (up_dir * 0.8 + random_dir * 0.8).normalized()
+	velocity = explode_dir * rng.randf_range(380.0, 680.0)
 	spin_axis = Vector3(rng.randf(), rng.randf(), rng.randf()).normalized()
 	spin_speed = rng.randf_range(3.0, 7.0)
 
 static func _build_shared_mesh() -> ArrayMesh:
 	# ACE GEOMETRY: Mini-Rupee (Emerald cut). Vertex colors omitted so per-gem
 	# tint is driven entirely by the material's albedo/emission.
+	# Increased size (16.0 vs 8.0) so shards feel more substantial and are
+	# easier to visually track as they arc and home.
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var size := 8.0
+	var size := 16.0
 	var v_top := Vector3(0, size, 0)
 	var v_bot := Vector3(0, -size, 0)
 	var v_mid := [Vector3(size, 0, 0), Vector3(0, 0, size), Vector3(-size, 0, 0), Vector3(0, 0, -size)]

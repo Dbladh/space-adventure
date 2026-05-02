@@ -171,8 +171,13 @@ func _process(_delta: float) -> void:
 	rotate_object_local(Vector3.UP, _delta * 0.4)
 
 func _on_mined() -> void:
-	# ACE: Spawn 10-20 'Shatter' shards that arc up, land on the planet surface
+	# ACE: Award the player $1 for destroying this mineral (immediate payout),
+	# then spawn 10-20 'Shatter' shards that arc up, land on the planet surface
 	# for 1 s, then magnet-fly into the ship like Ratchet & Clank bolts.
+	var economy = get_node_or_null("/root/EconomyManager")
+	if economy:
+		economy.call("add_credits", 1)
+
 	var gem_script = load("res://src/world/LootGem.gd")
 	if not gem_script:
 		queue_free()

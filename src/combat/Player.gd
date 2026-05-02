@@ -756,8 +756,11 @@ func _process_ace_flight(delta: float) -> void:
 			rotate(world_up, yaw * rotation_speed * delta * 0.9)
 
 		# 3. ROLL — manual only, no auto-level torque
+		# Use +Z axis (same as space branch) so L/R buttons have consistent
+		# chirality in and out of atmosphere.  The old -Z was a sign error that
+		# reversed the roll direction whenever the ship entered an atmosphere.
 		if abs(roll_input) > 0.001:
-			rotate(-global_transform.basis.z, roll_input * roll_speed * delta)
+			rotate(global_transform.basis.z, roll_input * roll_speed * delta)
 
 		# Cache forward for any downstream consumers that still read _atmo_heading
 		_atmo_heading = (-global_transform.basis.z).normalized()

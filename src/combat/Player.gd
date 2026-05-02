@@ -1886,44 +1886,79 @@ func _setup_polar_weather() -> void:
 	snow_particles.emitting = false
 
 func prewarm_vfx() -> void:
-	# ACE: Force-render all movement VFX behind the loading screen to avoid shader hitches
+	# Three-pass prewarm behind the loading screen so every shader variant is
+	# compiled before the player can trigger them.  One frame was not enough —
+	# mobile GPU drivers (Metal / Vulkan) need several rendered frames to finish
+	# async pipeline compilation, and the warp variant (120-point ribbon) was
+	# never touched at all, causing the 10-20 s hitch on first boost.
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+
+	var fwd := -global_transform.basis.z
+
+	# --- Helper: set all glow nodes to a given power / color ---
+	var _set_glows := func(power: float, col: Color) -> void:
+		if not (ship_model and get("thruster_trails")): return
+		for t_data in get("thruster_trails"):
+			if typeof(t_data) != TYPE_DICTIONARY: continue
+			var tn = t_data.get("node")
+			if not is_instance_valid(tn): continue
+			if tn.has_meta("glow_node"):
+				var gn = tn.get_meta("glow_node")
+				if is_instance_valid(gn) and gn is MeshInstance3D and gn.material_override is ShaderMaterial:
+					gn.visible = true
+					gn.material_override.set_shader_parameter("power", power)
+					gn.material_override.set_shader_parameter("glow_color", col)
+
+	# --- Pass 1: cruise/thrust variant (low ribbon, red glow) ---
 	if ship_model and get("thruster_trails"):
 		for t_data in get("thruster_trails"):
-			if typeof(t_data) != TYPE_DICTIONARY:
-				continue
+			if typeof(t_data) != TYPE_DICTIONARY: continue
 			var trail_node = t_data.get("node")
 			var offset = t_data.get("offset", Vector3.ZERO)
-			if not is_instance_valid(trail_node):
-				continue
-			var world_pos = ship_model.global_transform * offset
+			if not is_instance_valid(trail_node): continue
+			var world_pos: Vector3 = ship_model.global_transform * offset
 			if trail_node.has_method("prewarm"):
-				trail_node.prewarm(world_pos, -global_transform.basis.z)
-			# Nudge the nozzle shader through one render path so the first thrust is not a compile hitch.
-			if trail_node.has_meta("glow_node"):
-				var glow_node = trail_node.get_meta("glow_node")
-				if is_instance_valid(glow_node) and glow_node is MeshInstance3D and glow_node.material_override is ShaderMaterial:
-					glow_node.visible = true
-					glow_node.material_override.set_shader_parameter("power", 0.01)
-					glow_node.material_override.set_shader_parameter("glow_color", Color.RED)
-	
-	# Wait one frame and then cut them
+				trail_node.prewarm(world_pos, fwd)
+	_set_glows.call(0.5, Color.RED)
 	await get_tree().process_frame
+	await get_tree().process_frame
+
+	# --- Pass 2: warp variant (120-pt ribbon, cyan glow) — the one that was missing ---
 	if ship_model and get("thruster_trails"):
 		for t_data in get("thruster_trails"):
-			if typeof(t_data) != TYPE_DICTIONARY:
-				continue
+			if typeof(t_data) != TYPE_DICTIONARY: continue
 			var trail_node = t_data.get("node")
-			if not is_instance_valid(trail_node):
-				continue
+			var offset = t_data.get("offset", Vector3.ZERO)
+			if not is_instance_valid(trail_node): continue
+			var world_pos: Vector3 = ship_model.global_transform * offset
+			# Force the max-length warp ribbon so the GPU compiles that pipeline.
+			trail_node.update_trail(world_pos, fwd, fwd * 60000.0, true, 1.0, 0.016)
+	_set_glows.call(2.0, Color.CYAN)
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	# --- Pass 3: boost/full-power variant ---
+	if ship_model and get("thruster_trails"):
+		for t_data in get("thruster_trails"):
+			if typeof(t_data) != TYPE_DICTIONARY: continue
+			var trail_node = t_data.get("node")
+			var offset = t_data.get("offset", Vector3.ZERO)
+			if not is_instance_valid(trail_node): continue
+			var world_pos: Vector3 = ship_model.global_transform * offset
+			trail_node.update_trail(world_pos, fwd, fwd * 120000.0, false, 1.0, 0.016)
+	_set_glows.call(3.5, Color(1.0, 0.6, 0.1))
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	# --- Clear all trails and dim glow to invisible ---
+	if ship_model and get("thruster_trails"):
+		for t_data in get("thruster_trails"):
+			if typeof(t_data) != TYPE_DICTIONARY: continue
+			var trail_node = t_data.get("node")
+			if not is_instance_valid(trail_node): continue
 			trail_node.points.clear()
 			trail_node.mesh_gen.clear_surfaces()
-			if trail_node.has_meta("glow_node"):
-				var glow_node = trail_node.get_meta("glow_node")
-				if is_instance_valid(glow_node) and glow_node is MeshInstance3D:
-					glow_node.visible = true
-					if glow_node.material_override is ShaderMaterial:
-						glow_node.material_override.set_shader_parameter("power", 0.0)
+	_set_glows.call(0.0, Color.RED)
 
 # (c) On the Side LLC. and affiliates. Confidential and proprietary.
 

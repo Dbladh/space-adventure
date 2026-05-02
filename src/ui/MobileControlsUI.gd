@@ -302,6 +302,12 @@ func _input(event: InputEvent) -> void:
 		if event.index == l_touch_idx:
 			_update_throttle_from_pos(event.position.y)
 			get_viewport().set_input_as_handled()
+		elif event.index == fire_touch or event.index == boost_touch \
+				or event.index == brake_touch or event.index == rolll_touch \
+				or event.index == rollr_touch:
+			# Already claimed by a button — swallow the drag so finger drift
+			# doesn't re-enter _on_press and steal the index for an adjacent button.
+			get_viewport().set_input_as_handled()
 		else:
 			_on_press(event.position, event.index)
 	elif event is InputEventMouseMotion:

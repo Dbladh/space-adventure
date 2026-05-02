@@ -467,16 +467,16 @@ func _on_release(index: int) -> void:
 	if index == fire_touch:
 		fire_touch = -1; fire_pressed.emit(false)
 		queue_redraw(); get_viewport().set_input_as_handled()
-	elif index == boost_touch:
+	if index == boost_touch:
 		boost_touch = -1; boost_pressed.emit(false)
 		queue_redraw(); get_viewport().set_input_as_handled()
-	elif index == brake_touch:
+	if index == brake_touch:
 		brake_touch = -1; brake_pressed.emit(false)
 		queue_redraw(); get_viewport().set_input_as_handled()
-	elif index == rolll_touch:
+	if index == rolll_touch:
 		rolll_touch = -1; roll_held.emit(1.0, false)
 		queue_redraw(); get_viewport().set_input_as_handled()
-	elif index == rollr_touch:
+	if index == rollr_touch:
 		rollr_touch = -1; roll_held.emit(-1.0, false)
 		queue_redraw(); get_viewport().set_input_as_handled()
 

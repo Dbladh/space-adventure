@@ -107,66 +107,86 @@ func _draw() -> void:
 	var bar_bot = bar_y_center + bar_h * 0.5
 	_rect_throttle_bar = Rect2(bar_x - 60.0, bar_top - 40.0, 160.0, bar_h + 80.0)
 
-	# Neutral gutter (wider so thumb knows where stop-point is)
-	var neutral_y = lerp(bar_bot, bar_top, 0.5)
-	draw_rect(Rect2(bar_x - 30, neutral_y - 2, 60, 4), Color(1, 1, 1, 0.35))
-	draw_line(Vector2(bar_x, bar_top), Vector2(bar_x, bar_bot), Color(1, 1, 1, 0.22), 8.0)
+	# Throttle backplate — solid dark panel with a hard cyan border (Star Fox HUD vibe)
+	var bar_bg = Rect2(bar_x - 26, bar_top - 12, 52, bar_h + 24)
+	draw_rect(bar_bg, Color(0.04, 0.06, 0.12, 0.92))
+	draw_rect(bar_bg, Color(0.30, 0.75, 1.0, 0.95), false, 2.0)
 
-	# Tick marks at 25/50/75/100
-	for i in range(1, 5):
+	# Center track (chunky, hard line)
+	draw_line(Vector2(bar_x, bar_top), Vector2(bar_x, bar_bot), Color(0.55, 0.85, 1.0, 0.45), 6.0)
+
+	# Tick marks — thicker, evenly spaced 0/25/50/75/100
+	for i in range(0, 5):
 		var ty = lerp(bar_bot, bar_top, i / 4.0)
-		draw_line(Vector2(bar_x - 14, ty), Vector2(bar_x + 14, ty), Color(1, 1, 1, 0.15), 2.0)
+		draw_rect(Rect2(bar_x - 18, ty - 1, 36, 3), Color(1, 1, 1, 0.55))
 
-	# Handle
+	# Neutral notch — pixel-art yellow band straddling center
+	var neutral_y = lerp(bar_bot, bar_top, 0.5)
+	draw_rect(Rect2(bar_x - 22, neutral_y - 3, 44, 6), Color(0.95, 0.92, 0.30, 0.95))
+
+	# Handle — hard square plate with bezel (uses the same retro plate helper)
 	var handle_y = lerp(bar_bot, bar_top, throttle)
 	var handle_size = 84.0
-	var sb = StyleBoxFlat.new()
-	var handle_col = Color.SPRING_GREEN
-	if throttle < 0.48: handle_col = Color(1.0, 0.55, 0.2) # reverse = orange
-	elif throttle > 0.95: handle_col = Color(0.4, 0.9, 1.0) # near max = cyan hint
-	sb.bg_color = handle_col
-	sb.set_corner_radius_all(18)
-	sb.set_shadow_size(5)
-	sb.set_shadow_color(Color(0, 0, 0, 0.65))
-	draw_style_box(sb, Rect2(bar_x - handle_size * 0.5, handle_y - handle_size * 0.5, handle_size, handle_size))
+	var handle_col := Color(0.10, 0.85, 0.30) # forward = solid green
+	if throttle < 0.48: handle_col = Color(0.95, 0.45, 0.10) # reverse = orange
+	elif throttle > 0.95: handle_col = Color(0.20, 0.85, 1.00) # near max = cyan
+	_draw_retro_plate(Rect2(bar_x - handle_size * 0.5, handle_y - handle_size * 0.5, handle_size, handle_size), handle_col, false)
 
-	# Throttle label
+	# Throttle label — hard 1px offset shadow for the stamped/retro look.
 	var tlbl := "NEUTRAL"
 	if throttle > 0.52: tlbl = "FWD %d%%" % int((throttle - 0.5) * 200.0)
 	elif throttle < 0.48: tlbl = "REV %d%%" % int((0.5 - throttle) * 200.0)
-	draw_string(font, Vector2(bar_x + 58, handle_y + 8), tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color.WHITE)
-	draw_string(font, Vector2(bar_x - 46, bar_top - 16), "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, 0.6))
+	var tlbl_pos := Vector2(bar_x + 58, handle_y + 8)
+	draw_string(font, tlbl_pos + Vector2(1, 1), tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(0, 0, 0, 0.8))
+	draw_string(font, tlbl_pos, tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color.WHITE)
+	var thd_pos := Vector2(bar_x - 46, bar_top - 16)
+	draw_string(font, thd_pos + Vector2(1, 1), "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0, 0, 0, 0.7))
+	draw_string(font, thd_pos, "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.85, 0.95, 1.0, 1.0))
 
-	# --- TOP-LEFT PANEL ---
+	# --- TOP-LEFT PANEL --- (config buttons: muted steel-blue retro plates)
 	_rect_recenter = Rect2(36, 36, 180, 54)
-	_draw_button(_rect_recenter, "RECENTER GYRO", Color(1, 1, 1, 0.12), false)
+	_draw_button(_rect_recenter, "RECENTER GYRO", Color(0.22, 0.28, 0.40, 1.0), false)
 
 	_rect_gyrolock = Rect2(36, 100, 180, 54)
 	var glbl = "GYRO: ON" if not gyro_paused else "GYRO: OFF"
-	_draw_button(_rect_gyrolock, glbl, Color(0.2, 0.5, 1.0, 0.25) if not gyro_paused else Color(0.4, 0.4, 0.4, 0.25), gyro_paused)
+	_draw_button(_rect_gyrolock, glbl, Color(0.18, 0.42, 0.78, 1.0) if not gyro_paused else Color(0.32, 0.32, 0.36, 1.0), gyro_paused)
 
 	_rect_sens = Rect2(36, 164, 180, 54)
-	_draw_button(_rect_sens, "SENS: %s" % SENS_LABELS[sens_idx], Color(0.15, 0.8, 0.5, 0.22), false)
+	_draw_button(_rect_sens, "SENS: %s" % SENS_LABELS[sens_idx], Color(0.12, 0.55, 0.42, 1.0), false)
 
 	# --- TOP-RIGHT PANEL ---
 	_rect_menu = Rect2(sx - 180 - 36, 36, 180, 54)
-	_draw_button(_rect_menu, "MENU", Color(0, 0, 0, 0.5), false)
+	_draw_button(_rect_menu, "MENU", Color(0.18, 0.18, 0.22, 1.0), false)
 
 	var grav = Input.get_gravity()
 	var motion_ok = grav.length() > 1.0
 	var motion_c = Color.SPRING_GREEN if motion_ok else Color(1, 0.7, 0.2)
 	draw_string(font, Vector2(sx - 180 - 36, 114), "MOTION: " + ("OK" if motion_ok else "WAIT"), HORIZONTAL_ALIGNMENT_LEFT, 180, 14, motion_c)
 
-	# --- TOP-CENTER TELEMETRY ---
+	# --- TOP-CENTER TELEMETRY (Star Fox 64 style: solid dark panel + corner brackets) ---
 	var hud_box = Rect2(sx * 0.5 - 170, 36, 340, 54)
-	draw_rect(hud_box, Color(0, 0, 0, 0.45))
-	draw_rect(hud_box, Color(0, 0.9, 1.0, 0.45), false, 2.0)
+	draw_rect(hud_box, Color(0.02, 0.06, 0.10, 0.92))
+	draw_rect(hud_box, Color(0.0, 0.85, 1.0, 1.0), false, 2.0)
+	# Corner brackets — 14px L-shapes at each corner, pure white pixel art.
+	var bk := 14.0
+	var hb_x0 := hud_box.position.x; var hb_y0 := hud_box.position.y
+	var hb_x1 := hud_box.position.x + hud_box.size.x
+	var hb_y1 := hud_box.position.y + hud_box.size.y
+	var hb_c := Color(1, 1, 1, 1)
+	draw_line(Vector2(hb_x0, hb_y0), Vector2(hb_x0 + bk, hb_y0), hb_c, 3.0)
+	draw_line(Vector2(hb_x0, hb_y0), Vector2(hb_x0, hb_y0 + bk), hb_c, 3.0)
+	draw_line(Vector2(hb_x1, hb_y0), Vector2(hb_x1 - bk, hb_y0), hb_c, 3.0)
+	draw_line(Vector2(hb_x1, hb_y0), Vector2(hb_x1, hb_y0 + bk), hb_c, 3.0)
+	draw_line(Vector2(hb_x0, hb_y1), Vector2(hb_x0 + bk, hb_y1), hb_c, 3.0)
+	draw_line(Vector2(hb_x0, hb_y1), Vector2(hb_x0, hb_y1 - bk), hb_c, 3.0)
+	draw_line(Vector2(hb_x1, hb_y1), Vector2(hb_x1 - bk, hb_y1), hb_c, 3.0)
+	draw_line(Vector2(hb_x1, hb_y1), Vector2(hb_x1, hb_y1 - bk), hb_c, 3.0)
 	var speed_str = "SPD %4d m/s" % int(hud_speed)
 	var alt_str = _format_alt(hud_alt)
-	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 22), speed_str, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.6, 1, 1))
-	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 44), "ALT " + alt_str, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.6, 1, 1))
+	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 22), speed_str, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.7, 1, 1))
+	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 44), "ALT " + alt_str, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(0.7, 1, 1))
 	if hud_warp:
-		draw_string(font, Vector2(hud_box.position.x + 200, hud_box.position.y + 34), "WARP", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(1, 0.9, 0.2))
+		draw_string(font, Vector2(hud_box.position.x + 200, hud_box.position.y + 34), "WARP", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(1, 0.92, 0.25))
 
 	# --- BOTTOM-RIGHT CONTROL CLUSTER ---
 	# Anchor point
@@ -174,57 +194,69 @@ func _draw() -> void:
 	var col_x = sx - pad
 	var base_y = sy - pad
 
+	# Solid arcade palette (helper handles the press-state bevel inversion).
 	# FIRE (primary, big, bottom-most-wide)
 	var fire_w = 210.0
 	var fire_h = 110.0
 	_rect_fire = Rect2(col_x - fire_w, base_y - fire_h, fire_w, fire_h)
-	var fire_col = Color(0.95, 0.12, 0.12, 0.9) if fire_touch == -1 else Color(1, 0.35, 0.35, 1.0)
-	_draw_button(_rect_fire, "FIRE", fire_col, fire_touch != -1, 34)
+	_draw_button(_rect_fire, "FIRE", Color(0.85, 0.08, 0.08, 1.0), fire_touch != -1, 34)
 
-	# BRAKE (below? no, above fire to free bottom — but user said big FIRE at bottom-right)
+	# BRAKE (above fire, left half of the row)
 	var brake_h = 70.0
 	_rect_brake = Rect2(col_x - fire_w, base_y - fire_h - 10 - brake_h, fire_w * 0.52, brake_h)
-	var brake_col = Color(1.0, 0.55, 0.0, 0.75) if brake_touch == -1 else Color(1.0, 0.75, 0.25, 1.0)
-	_draw_button(_rect_brake, "BRAKE", brake_col, brake_touch != -1, 22)
+	_draw_button(_rect_brake, "BRAKE", Color(0.88, 0.42, 0.05, 1.0), brake_touch != -1, 22)
 
 	# BOOST (same row as brake, to the right)
 	var boost_w = fire_w * 0.48 - 10
 	_rect_boost = Rect2(col_x - boost_w, base_y - fire_h - 10 - brake_h, boost_w, brake_h)
-	var boost_col = Color(0.95, 0.85, 0.1, 0.8) if boost_touch == -1 else Color(1, 1, 0.4, 1.0)
-	_draw_button(_rect_boost, "BOOST", boost_col, boost_touch != -1, 22)
+	_draw_button(_rect_boost, "BOOST", Color(0.95, 0.78, 0.05, 1.0), boost_touch != -1, 22)
 
 	# --- BOTTOM-LEFT ROTATE PAIR ---
 	# Hold = continuous roll. Double-tap (within _DOUBLE_TAP_WINDOW) = barrel roll.
-	# Sized roomy enough that the left thumb can re-tap without re-aiming.
 	var roll_h = 78.0
 	var roll_w = 132.0
 	_rect_rolll = Rect2(pad, base_y - roll_h, roll_w, roll_h)
 	_rect_rollr = Rect2(pad + roll_w + 12, base_y - roll_h, roll_w, roll_h)
-	_draw_button(_rect_rolll, "◀ ROLL", Color(0.3, 0.5, 1.0, 0.75) if rolll_touch == -1 else Color(0.6, 0.8, 1.0, 1.0), rolll_touch != -1, 22)
-	_draw_button(_rect_rollr, "ROLL ▶", Color(0.3, 0.5, 1.0, 0.75) if rollr_touch == -1 else Color(0.6, 0.8, 1.0, 1.0), rollr_touch != -1, 22)
+	var roll_col := Color(0.20, 0.38, 0.85, 1.0) # Star Fox blue
+	_draw_button(_rect_rolll, "◀ ROLL", roll_col, rolll_touch != -1, 22)
+	_draw_button(_rect_rollr, "ROLL ▶", roll_col, rollr_touch != -1, 22)
 
 
 # -----------------------------------------------------------------
 #  BUTTON DRAW HELPER
 # -----------------------------------------------------------------
 
-func _draw_button(r: Rect2, label: String, fill: Color, pressed: bool, font_size: int = 16) -> void:
-	var sb = StyleBoxFlat.new()
-	sb.bg_color = fill
-	sb.set_corner_radius_all(14)
+func _draw_retro_plate(r: Rect2, fill: Color, pressed: bool) -> void:
+	# PS1/N64-style raised plate. Sharp corners, double-bezel, no shadow.
+	# Pressed inverts the bezel so the face looks pushed in.
+	var face: Color = fill
+	face.a = max(face.a, 0.92)
+	var bevel_light: Color = face.lightened(0.35)
+	var bevel_dark: Color = face.darkened(0.45)
 	if pressed:
-		sb.set_border_width_all(3)
-		sb.border_color = Color(1, 1, 1, 0.9)
-	else:
-		sb.set_border_width_all(2)
-		sb.border_color = Color(1, 1, 1, 0.35)
-	sb.set_shadow_size(3)
-	sb.set_shadow_color(Color(0, 0, 0, 0.5))
-	draw_style_box(sb, r)
+		face = face.darkened(0.20)
+		var t := bevel_light; bevel_light = bevel_dark; bevel_dark = t
+	# Solid face fill (full rect; bezel lines paint over the edge band)
+	draw_rect(r, face)
+	# 3px bezel: light on top + left, dark on bottom + right.
+	var x0 := r.position.x; var y0 := r.position.y
+	var x1 := r.position.x + r.size.x; var y1 := r.position.y + r.size.y
+	draw_line(Vector2(x0, y0 + 1.5), Vector2(x1, y0 + 1.5), bevel_light, 3.0) # top
+	draw_line(Vector2(x0 + 1.5, y0), Vector2(x0 + 1.5, y1), bevel_light, 3.0) # left
+	draw_line(Vector2(x1 - 1.5, y0), Vector2(x1 - 1.5, y1), bevel_dark, 3.0)  # right
+	draw_line(Vector2(x0, y1 - 1.5), Vector2(x1, y1 - 1.5), bevel_dark, 3.0)  # bottom
+	# 1px hard outer outline — cyan when pressed for that arcade-press feedback.
+	var outline: Color = Color(0.55, 1.0, 1.0, 1.0) if pressed else Color(1, 1, 1, 0.95)
+	draw_rect(r, outline, false, 1.0)
+
+func _draw_button(r: Rect2, label: String, fill: Color, pressed: bool, font_size: int = 16) -> void:
+	_draw_retro_plate(r, fill, pressed)
 	var font = ThemeDB.fallback_font
 	var text_size = font.get_string_size(label, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size)
-	draw_string(font, r.position + Vector2(r.size.x * 0.5 - text_size.x * 0.5, r.size.y * 0.5 + font_size * 0.35),
-		label, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size, Color.WHITE)
+	# 1px hard offset shadow on the label for readability against the bevel.
+	var label_pos = r.position + Vector2(r.size.x * 0.5 - text_size.x * 0.5, r.size.y * 0.5 + font_size * 0.35)
+	draw_string(font, label_pos + Vector2(1, 1), label, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size, Color(0, 0, 0, 0.75))
+	draw_string(font, label_pos, label, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size, Color.WHITE)
 
 func _format_alt(alt: float) -> String:
 	if alt > 1000.0:

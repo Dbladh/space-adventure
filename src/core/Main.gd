@@ -440,17 +440,12 @@ func _setup_hardened_diag_hud() -> void:
 		map_node.hide() # ACE: Hidden during normal play
 	
 	_pause_overlay = ColorRect.new()
-	_pause_overlay.color = Color(0,0,0,0.6)
+	_pause_overlay.color = Color(0, 0, 0, 0.55)
 	_pause_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_pause_overlay.process_mode = PROCESS_MODE_ALWAYS
+	_pause_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE  # let MobileControlsUI handle touches
 	hud_layer.add_child(_pause_overlay)
 	_pause_overlay.hide()
-	
-	var pl = Label.new()
-	pl.text = "PAUSED - STRATEGIC OVERVIEW"
-	pl.add_theme_font_size_override("font_size", 48)
-	pl.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 60)
-	_pause_overlay.add_child(pl)
 
 	add_child(hud_layer)
 
@@ -656,11 +651,17 @@ func _toggle_map_fullscreen_to(active: bool) -> void:
 	map_node.visible = active
 	map_node.is_fullscreen = active
 	if active:
-		map_node.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE, 60)
-		map_node.custom_minimum_size = Vector2(800, 800)
-		map_node.anchor_left = 0.5; map_node.anchor_top = 0.5; map_node.anchor_right = 0.5; map_node.anchor_bottom = 0.5
-		map_node.offset_left = -400; map_node.offset_top = -300
-		map_node.offset_right = 400; map_node.offset_bottom = 500
+		# PAUSE MAP: Compact 300×300, anchored left-center so it doesn't
+		# overlap the MobileControlsUI settings panel on the right side.
+		# Starts at x=200 (clears the throttle bar) and is vertically centred.
+		var map_sz := 300.0
+		map_node.custom_minimum_size = Vector2(map_sz, map_sz)
+		map_node.anchor_left   = 0.0;  map_node.anchor_right  = 0.0
+		map_node.anchor_top    = 0.5;  map_node.anchor_bottom = 0.5
+		map_node.offset_left   = 200.0
+		map_node.offset_top    = -map_sz * 0.5
+		map_node.offset_right  = 200.0 + map_sz
+		map_node.offset_bottom = map_sz * 0.5
 	else:
 		map_node.custom_minimum_size = Vector2(480, 480)
 		_reset_map_to_corner()

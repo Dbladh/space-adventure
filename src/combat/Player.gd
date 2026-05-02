@@ -1509,10 +1509,30 @@ func _process(delta: float) -> void:
 			var target = result.collider
 			var hp = target.get_node_or_null("HealthComponent")
 			var is_dying = false
-			if hp:
+
+			# MINEABLE PRIORITY: planet-surface minerals own their HP/take_damage
+			# directly (no HealthComponent child).  When the bolt hits one, ask
+			# it to take 1 damage — MineableResource will run _on_mined() and
+			# explode into LootGem shards once health drops to zero.  The
+			# collider can be either the StaticBody3D itself or a child mesh,
+			# so check both before falling back to the generic NPC path.
+			var mineable: Node = null
+			if target.is_in_group("Mineable"):
+				mineable = target
+			elif target.get_parent() and target.get_parent().is_in_group("Mineable"):
+				mineable = target.get_parent()
+
+			if mineable and mineable.has_method("take_damage"):
+				# is_dying based on the mineral's own health field (1 dmg per
+				# shot, so health <= 1 means this hit shatters it).
+				var hp_var = mineable.get("health")
+				var cur_hp: float = float(hp_var) if hp_var != null else 1.0
+				is_dying = cur_hp <= 1.0
+				mineable.take_damage(1.0)
+			elif hp:
 				is_dying = (hp.current_health <= 25.0)
 				hp.take_damage(25.0)
-				
+
 				# ACE DESTRUCTION: Handle actual removal if health is depleted
 				if is_dying:
 					target.set_deferred("collision_layer", 0); target.set_deferred("collision_mask", 0)
@@ -1520,11 +1540,11 @@ func _process(delta: float) -> void:
 					for child in target.get_children():
 						if child is VisualInstance3D: child.hide()
 					get_tree().create_timer(0.15).timeout.connect(func(): if is_instance_valid(target): target.queue_free())
-			
+
 			# ACE VISUALS: Hit-spark vs Catastrophic Nova
 			_trigger_explosion_inline(result.position, target, result.normal, is_dying)
 
-			
+
 			node.queue_free(); live_bolts.remove_at(i)
 		elif v_update_30:
 			node.global_position = b["pos"]

@@ -171,27 +171,49 @@ func _process(_delta: float) -> void:
 	rotate_object_local(Vector3.UP, _delta * 0.4)
 
 func _on_mined() -> void:
-	# ACE: Spawn satisfying 'Shatter' particles that fly toward player
+	# ACE: Spawn 10-20 'Shatter' shards that arc up, land on the planet surface
+	# for 1 s, then magnet-fly into the ship like Ratchet & Clank bolts.
 	var gem_script = load("res://src/world/LootGem.gd")
-	if not gem_script: return
-	
-	# Rare types yield more shards!
-	var count = 5
+	if not gem_script:
+		queue_free()
+		return
+
+	# Find the nearest planet so the shards know where "down" is and at what
+	# radius the surface sits — the mineral's own global_position is on the
+	# surface, so its distance-from-centre IS the landing altitude.
+	var nearest_p: Node3D = null
+	var min_d: float = 1e16
+	for p in get_tree().get_nodes_in_group("Planet"):
+		var d = p.global_position.distance_to(global_position)
+		if d < min_d:
+			min_d = d
+			nearest_p = p
+
+	# Per-shard credit value: rarer minerals → more credits per shard, but
+	# count stays 10-20 so the visual moment is consistent.
+	var rng = RandomNumberGenerator.new()
+	rng.randomize()
+	var count = 10 + rng.randi_range(0, 10)  # 10-20
+	var per_value = 80
 	match resource_type:
-		"Silver": count = 8
-		"Gold": count = 15
-		"Platinum": count = 25
-		"Diamond": count = 40
-	
+		"Silver": per_value = 140
+		"Gold": per_value = 260
+		"Platinum": per_value = 480
+		"Diamond": per_value = 900
+
+	var shard_col = _get_resource_color().lerp(Color.WHITE, 0.4)
 	for i in range(count):
 		var gem = Node3D.new()
 		gem.set_script(gem_script)
-		gem.set("col", _get_resource_color().lerp(Color.WHITE, 0.4))
-		gem.set("value", 300 if count < 10 else 150)
+		gem.set("col", shard_col)
+		gem.set("value", per_value)
+		gem.set("planet", nearest_p)
+		gem.set("surface_dist", min_d)
 		get_tree().root.add_child(gem)
-		# Spawn at monolith center with small offset
-		gem.global_position = global_position + Vector3(0, 15.0, 0)
-		
+		# Spawn slightly above the mineral's bottom tip so the burst originates
+		# inside the (now-shattered) gem volume rather than underground.
+		gem.global_position = global_position + Vector3(0, 30.0, 0)
+
 	queue_free()
 
 func _setup_tactical_hud() -> void:

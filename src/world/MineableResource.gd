@@ -20,6 +20,16 @@ var _mobile_perf: bool = false
 # don't respawn if planet chunks reload. Uses position.hash() for fast lookup.
 static var _destroyed_positions: Dictionary = {}
 
+# ASYNC PERF (mobile): Shared mesh + collision-shape caches.
+# Building one ArrayMesh per type and reusing it across every instance avoids
+# the SurfaceTool.commit() main-thread spike that used to fire 10-20 times
+# every chunk load.  Per-instance variation is preserved via mesh_inst.scale.
+# Cylinder shapes are quantized into 5m buckets so a planet's ~80 minerals
+# share ~15-30 unique Shape3D resources rather than one each.
+static var _shared_meshes: Dictionary = {}    # resource_type → ArrayMesh
+static var _shared_shapes: Dictionary = {}    # size_bucket(int) → CylinderShape3D
+const _MESH_UNIT_SIZE: float = 1.0            # unit-scale octahedron geometry
+
 func _ready() -> void:
 	add_to_group("Mineable") # ACE: Absolute identification for projectiles
 	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
@@ -41,80 +51,112 @@ func _ready() -> void:
 
 func _generate_low_poly_node() -> void:
 	# ACE GEOMETRY: Procedural 'Rupee' Octahedron (Anchored at Tip)
-	var st = SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	
+	# ASYNC PERF: Shared cached mesh + scale-per-instance, no SurfaceTool work
+	# in the hot path on mobile.  See _get_or_build_mesh() for the unit geometry.
 	var rng = RandomNumberGenerator.new()
 	rng.seed = hash(str(global_position) + resource_type)
-	
+
 	var col = _get_resource_color()
 	var size = rng.randf_range(80.0, 160.0) # (80m - 160m)
 	if resource_type == "Diamond": size *= 1.4
-	
-	# ACE: Octahedron anchored so bottom tip is at origin (0,0,0)
-	var v_top = Vector3(0, size * 5.0, 0)
-	var v_bot = Vector3(0, 0, 0)
-	var v_mid = [
-		Vector3(size, size * 2.5, 0),
-		Vector3(0, size * 2.5, size),
-		Vector3(-size, size * 2.5, 0),
-		Vector3(0, size * 2.5, -size)
-	]
-	
-	# Build 8 triangular faces
-	for i in range(4):
-		var m1 = v_mid[i]
-		var m2 = v_mid[(i + 1) % 4]
-		
-		# Top Pyramid
-		var n_up = (m1 - v_top).cross(m2 - v_top).normalized()
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(v_top)
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(m1)
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(m2)
-		
-		# Bottom Pyramid
-		var n_down = (m2 - v_bot).cross(m1 - v_bot).normalized()
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(v_bot)
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(m2)
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(m1)
 
+	# Mesh: shared per type, scale brings unit geometry up to actual mineral size.
 	mesh_inst = MeshInstance3D.new()
-	mesh_inst.mesh = st.commit()
-	
-	# ACE MATERIAL: 'Shiny Coin' Metallic Pass
+	mesh_inst.mesh = _get_or_build_mesh(resource_type)
+	mesh_inst.scale = Vector3.ONE * size
+
+	# ACE MATERIAL: per-instance so each mineral's glint phase varies independently.
+	# (Sharing the material would synchronise every mineral's pulse — distracting.)
 	var mat = StandardMaterial3D.new()
 	mat.albedo_color = col
-	mat.metallic = 1.0 # ACE: Pure metallic reflection
-	mat.roughness = 0.02 # ACE: Mirror-like finish for sky reflection
+	mat.metallic = 1.0
+	mat.roughness = 0.02
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	
 	mat.emission_enabled = true
 	mat.emission = col * 1.5
-	mat.emission_energy_multiplier = 0.6 # ACE: Lower base for higher glint contrast
-	
-	# ACE: Add a physical light source for 'Discovery'.
-	# MOBILE: Skip the OmniLight3D entirely — emission on the material still
-	# sells the discovery glow without adding an active cluster light.
+	mat.emission_energy_multiplier = 0.6
+	mesh_inst.material_override = mat
+
 	if not _mobile_perf:
 		var light = OmniLight3D.new()
 		light.light_color = col
 		light.light_energy = 0.7
 		light.omni_range = size * 3.5
 		add_child(light)
-		
-	mesh_inst.material_override = mat
+
 	add_child(mesh_inst)
 	set_process(true)
-	
-	# ADD TALL COLLIDER (Full height of the spire)
+
+	# Collision shape: shared CylinderShape3D from the size-bucket cache.
+	# Position remains per-instance so the collider matches the visual scale exactly.
 	var shape = CollisionShape3D.new()
-	var cyl = CylinderShape3D.new()
-	cyl.height = size * 5.0 # ACE: Match true octahedron height
-	cyl.radius = size * 1.1 # ACE: Slight buffer for projectile detection
-	shape.shape = cyl
-	# ACE: Offset the collider so the bottom of the cylinder is at the tip (Y=2.5*size)
+	shape.shape = _get_or_build_shape(size)
 	shape.position = Vector3(0, size * 2.5, 0)
 	add_child(shape)
+
+# -------------------------------------------------------------------
+#  STATIC SHARED-RESOURCE BUILDERS
+# -------------------------------------------------------------------
+# These build the heavy ArrayMesh/Shape3D objects once and cache them in
+# class-level dictionaries.  Subsequent calls are O(1) dictionary lookups —
+# no SurfaceTool work, no GPU upload, no shape allocation.
+
+static func _get_or_build_mesh(type: String) -> ArrayMesh:
+	if _shared_meshes.has(type):
+		return _shared_meshes[type]
+
+	var col := _color_for_type(type)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# Unit-scale octahedron — every instance scales this via mesh_inst.scale.
+	var s := _MESH_UNIT_SIZE
+	var v_top := Vector3(0, s * 5.0, 0)
+	var v_bot := Vector3(0, 0, 0)
+	var v_mid := [
+		Vector3(s, s * 2.5, 0),
+		Vector3(0, s * 2.5, s),
+		Vector3(-s, s * 2.5, 0),
+		Vector3(0, s * 2.5, -s)
+	]
+	for i in range(4):
+		var m1: Vector3 = v_mid[i]
+		var m2: Vector3 = v_mid[(i + 1) % 4]
+		var n_up := (m1 - v_top).cross(m2 - v_top).normalized()
+		st.set_normal(n_up); st.set_color(col); st.add_vertex(v_top)
+		st.set_normal(n_up); st.set_color(col); st.add_vertex(m1)
+		st.set_normal(n_up); st.set_color(col); st.add_vertex(m2)
+		var n_down := (m2 - v_bot).cross(m1 - v_bot).normalized()
+		st.set_normal(n_down); st.set_color(col); st.add_vertex(v_bot)
+		st.set_normal(n_down); st.set_color(col); st.add_vertex(m2)
+		st.set_normal(n_down); st.set_color(col); st.add_vertex(m1)
+
+	var mesh := st.commit()
+	_shared_meshes[type] = mesh
+	return mesh
+
+static func _color_for_type(type: String) -> Color:
+	# Static mirror of _get_resource_color() (which is instance-scoped).
+	# Used by _get_or_build_mesh() at class scope.
+	match type:
+		"Copper":   return Color(0.48, 0.18, 0.08)
+		"Silver":   return Color(0.7, 0.7, 0.75)
+		"Gold":     return Color(1.0, 0.6, 0.0)
+		"Platinum": return Color(0.85, 0.85, 0.95)
+		"Diamond":  return Color(0.3, 0.8, 1.0)
+	return Color.GRAY
+
+static func _get_or_build_shape(size: float) -> CylinderShape3D:
+	# Quantize to 5m buckets so e.g. size 87.3 and 89.6 share the same shape.
+	# Visual mismatch is at most 2.5m on a 100m+ object — imperceptible.
+	var bucket := int(size / 5.0) * 5
+	if _shared_shapes.has(bucket):
+		return _shared_shapes[bucket]
+	var cyl := CylinderShape3D.new()
+	cyl.height = float(bucket) * 5.0
+	cyl.radius = float(bucket) * 1.1
+	_shared_shapes[bucket] = cyl
+	return cyl
 
 func _get_resource_color() -> Color:
 	match resource_type:

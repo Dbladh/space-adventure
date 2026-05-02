@@ -169,7 +169,8 @@ func _draw() -> void:
 	draw_rect(hud_box, Color(0.0, 0.85, 1.0, 1.0), false, 2.0)
 	# Corner brackets — 14px L-shapes at each corner, pure white pixel art.
 	var bk := 14.0
-	var hb_x0 := hud_box.position.x; var hb_y0 := hud_box.position.y
+	var hb_x0 := hud_box.position.x
+	var hb_y0 := hud_box.position.y
 	var hb_x1 := hud_box.position.x + hud_box.size.x
 	var hb_y1 := hud_box.position.y + hud_box.size.y
 	var hb_c := Color(1, 1, 1, 1)
@@ -239,8 +240,10 @@ func _draw_retro_plate(r: Rect2, fill: Color, pressed: bool) -> void:
 	# Solid face fill (full rect; bezel lines paint over the edge band)
 	draw_rect(r, face)
 	# 3px bezel: light on top + left, dark on bottom + right.
-	var x0 := r.position.x; var y0 := r.position.y
-	var x1 := r.position.x + r.size.x; var y1 := r.position.y + r.size.y
+	var x0 := r.position.x
+	var y0 := r.position.y
+	var x1 := r.position.x + r.size.x
+	var y1 := r.position.y + r.size.y
 	draw_line(Vector2(x0, y0 + 1.5), Vector2(x1, y0 + 1.5), bevel_light, 3.0) # top
 	draw_line(Vector2(x0 + 1.5, y0), Vector2(x0 + 1.5, y1), bevel_light, 3.0) # left
 	draw_line(Vector2(x1 - 1.5, y0), Vector2(x1 - 1.5, y1), bevel_dark, 3.0)  # right

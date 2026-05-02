@@ -10,8 +10,6 @@ var hud_visible: bool = true
 var diag_visible: bool = false
 var hud_layer: CanvasLayer
 var _player_ref: Node = null   # Cached — avoids get_nodes_in_group() every frame
-var _hud_tick: int = 0         # HUD update throttle counter
-var _env_tick: int = 0         # Environmental update throttle
 var map_node: Control = null
 
 # ATMOSPHERIC REFERENCES
@@ -122,7 +120,11 @@ func _setup_stellar_horizon() -> void:
 	sky_env.background_mode = Environment.BG_SKY
 	var master_sky = Sky.new()
 	var sky_mat = ShaderMaterial.new()
-	sky_mat.shader = load("res://src/world/cel_sky.gdshader")
+	# MOBILE: load a stripped sky variant (1 cloud lookup vs 5, no trig phasing,
+	# no starburst). Keeps the same uniform interface so the per-frame
+	# space_blend / atmospheric updates work unchanged.
+	var _sky_path := "res://src/world/cel_sky_mobile.gdshader" if _mobile_perf_mode else "res://src/world/cel_sky.gdshader"
+	sky_mat.shader = load(_sky_path)
 	
 	var fn_s = FastNoiseLite.new(); fn_s.noise_type = FastNoiseLite.TYPE_CELLULAR; fn_s.frequency = 0.05
 	var sky_tex_size = 256 if _mobile_perf_mode else 512
@@ -512,10 +514,12 @@ func _process(_delta: float) -> void:
 	# 1. OPTIMIZED TELEMETRY: Throttle the heavy environmental updates.
 	# MOBILE: Drop atmospheric + shadow updates to ~5Hz so the string/shader
 	# parameter churn doesn't collide with the 30fps render pacing.
-	_env_tick += 1
+	# STAGGER: Use Engine.get_process_frames() with offset phases so env and
+	# hud rebuilds NEVER land on the same frame (mobile: env=phase 0, hud=phase 3
+	# of a 6-frame cycle → zero overlap, halves the worst-case spike).
+	var fr := Engine.get_process_frames()
 	var _env_target: int = 6 if _mobile_perf_mode else 4
-	if _env_tick >= _env_target:
-		_env_tick = 0
+	if fr % _env_target == 0:
 		_update_atmospheric_transition(p)
 		_update_shadow_distance(p)
 
@@ -524,10 +528,9 @@ func _process(_delta: float) -> void:
 	# HUD THROTTLE: Rebuild text only every N frames.
 	# String construction + label reflow is surprisingly expensive at 60fps.
 	# MOBILE: Stretch to 6 frames — telemetry readability is fine at ~5Hz.
-	_hud_tick += 1
 	var _hud_target: int = 6 if _mobile_perf_mode else 3
-	if _hud_tick < _hud_target: return
-	_hud_tick = 0
+	var _hud_phase: int = 3 if _mobile_perf_mode else 2
+	if (fr + _hud_phase) % _hud_target != 0: return
 	
 	var alt = floor(alt_m / 1000.0)
 	var speed = floor(p.velocity.length() if "velocity" in p else 0.0)

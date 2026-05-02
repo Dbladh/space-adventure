@@ -7,6 +7,10 @@ extends CharacterBody3D
 @export var max_space_speed: float = 12000.0
 @export var max_warp_speed: float = 65000.0
 @export var max_hyperdrive_speed: float = 320000.0 # L1+R1 — Hyperdrive tier, ~5× warp
+# DEEP-SPACE CRUISE: when true_altitude is well past the gravity-brake boundary the
+# warp cap auto-scales up so inter-planet hops take seconds instead of minutes.
+# 600 km/s peak → 8M-unit hop ≈ 13 s, 16M ≈ 27 s. Tune via _deep_space_warp_lerp().
+@export var max_deep_space_warp_speed: float = 600000.0
 @export var rotation_speed: float = 2.8
 @export var roll_speed: float = 2.0
 @export var acceleration: float = 0.9
@@ -24,6 +28,8 @@ var mobile_boost: bool = false   # ACE: Mobile warp/pulse-drive button
 var mobile_brake: bool = false   # ACE: Mobile brake — hard deceleration + throttle → neutral
 var mobile_interact: bool = false
 var mobile_throttle_dragging: bool = false
+var _mobile_roll_l: bool = false # ◀ ROLL held (continuous +1 roll while down)
+var _mobile_roll_r: bool = false # ROLL ▶ held (continuous -1 roll while down)
 var mobile_gyro_paused: bool = false # ACE: UI toggle — pauses gyro steering entirely
 var mobile_sens_mult: float = 1.0    # ACE: UI-driven sensitivity multiplier on top of gyro_sensitivity
 var mobile_ui_ref: Control = null    # ACE: back-reference so Player can push telemetry to the HUD
@@ -252,6 +258,7 @@ func _setup_combat_hud() -> void:
 		mc.boost_pressed.connect(func(p): mobile_boost = p)
 		mc.brake_pressed.connect(_on_mobile_brake)
 		mc.roll_triggered.connect(func(dir): _trigger_barrel_roll(dir))
+		mc.roll_held.connect(_on_mobile_roll_held)
 		mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
 		mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
 		mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
@@ -265,6 +272,13 @@ func _on_mobile_brake(pressed: bool) -> void:
 		mobile_throttle = 0.5
 		if mobile_ui_ref and mobile_ui_ref.has_method("force_throttle"):
 			mobile_ui_ref.force_throttle(0.5)
+
+func _on_mobile_roll_held(direction: float, pressed: bool) -> void:
+	# Tracks each rotate button independently so simultaneous holds cancel cleanly.
+	if direction > 0.5:
+		_mobile_roll_l = pressed
+	elif direction < -0.5:
+		_mobile_roll_r = pressed
 
 
 
@@ -699,6 +713,9 @@ func _process_ace_flight(delta: float) -> void:
 	var roll_input: float = 0.0
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER): roll_input += 1.0
 	if Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER): roll_input -= 1.0
+	# Mobile bottom-left rotate buttons: held → continuous roll, double-tap → barrel roll.
+	if _mobile_roll_l: roll_input += 1.0
+	if _mobile_roll_r: roll_input -= 1.0
 	# CELESTIAL ROTATION TIERING (NMS-STYLE HORIZON LOCK)
 	if target_planet:
 		var raw_dist = global_position.distance_to(target_planet.global_position)
@@ -824,6 +841,12 @@ func _process_ace_flight(delta: float) -> void:
 		thrust_mapped = 0.0
 		reverse_mapped = max(reverse_mapped, 1.0)
 		is_warping = false
+
+	# BOOST AS PROPULSION: holding boost on mobile drives full-forward thrust even
+	# if the latching throttle is sitting at neutral or reverse. Brake still wins.
+	if mobile_boost and not mobile_brake:
+		thrust_mapped = 1.0
+		reverse_mapped = 0.0
 	
 	# ATMOSPHERIC BARRIER CROSSING: Sync with 26km Exosphere Boundary
 	const BARRIER_ALT: float = 26000.0
@@ -852,6 +875,13 @@ func _process_ace_flight(delta: float) -> void:
 	# Warp Thresholds: 450m/s (Surface) -> 2100m/s (Atmo) -> gravity_brake_max (Space)
 	var surface_warp = lerp(450.0, 2100.0, surface_ratio)
 	var dynamic_warp_speed = lerp(surface_warp, min(max_warp_speed, gravity_brake_max * 2.5), altitude_ratio)
+
+	# DEEP-SPACE CRUISE: once we're well clear of the gravity well, ramp the warp
+	# cap from max_warp_speed up to max_deep_space_warp_speed. Keeps planet-side
+	# pacing identical (altitude_ratio dominates below ~80 km) while making
+	# planet-to-planet travel a few-second hop instead of minutes.
+	var deep_space_ratio = smoothstep(200000.0, 2500000.0, true_altitude)
+	dynamic_warp_speed = lerp(dynamic_warp_speed, max_deep_space_warp_speed, deep_space_ratio)
 	if is_surface_flight:
 		# NMS PULSE DRIVE: cruise stays "controlled taxi," but warp/boost should still
 		# feel like a genuine pulse drive over a planet. Previous caps (180-380 m/s)
@@ -1348,8 +1378,10 @@ func _process(delta: float) -> void:
 			var enemies_pool = get_tree().get_nodes_in_group("Enemies") if is_inside_tree() else []
 			if is_inside_tree():
 				var highest_dot = 0.98 # ACE PRECISION: Required 11-degree 'Close Proximity' cone
+				const RADAR_RANGE_SQ := 25000.0 * 25000.0 # squared cutoff avoids sqrt per candidate
 
-				# PRECEDENCE SCAN: Prioritize Enemies over passive targets
+				# PRECEDENCE SCAN: Prioritize Enemies over passive targets.
+				# Enemies first; Targets (asteroids, ~1800 on mobile) only scanned if no enemy locks.
 				var candidate_pools = [
 					enemies_pool,
 					get_tree().get_nodes_in_group("Targets")
@@ -1359,9 +1391,11 @@ func _process(delta: float) -> void:
 					for t in pool:
 						if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
 						var d_v = (t.global_position - global_position)
-						if d_v.length() > 25000.0: continue
-
-						var dot = fwd.dot(d_v.normalized())
+						var d_sq = d_v.length_squared()
+						if d_sq > RADAR_RANGE_SQ: continue
+						if d_sq < 0.0001: continue
+						# Defer the sqrt+normalize until we know the candidate is in range
+						var dot = fwd.dot(d_v / sqrt(d_sq))
 						if dot > highest_dot:
 							highest_dot = dot
 							best_target = t

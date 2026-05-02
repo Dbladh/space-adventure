@@ -7,8 +7,8 @@ extends Control
 #   TOP-LEFT:    [RECENTER]  [GYRO LOCK]  [SENS: LOW/MED/HIGH]
 #   TOP-RIGHT:   [MOTION STATUS]  [MENU]
 #   LEFT-SIDE:   Latching vertical throttle (no auto-reset). Tap handle to snap neutral.
+#   BOTTOM-LEFT: [◀ ROLL] [ROLL ▶]  hold = continuous roll, double-tap = barrel roll
 #   BOTTOM-RIGHT CLUSTER (right thumb):
-#                   [ROLL L]       [ROLL R]
 #                         [ BOOST ]
 #                   [     FIRE     ]     <- large primary
 #                         [ BRAKE ]
@@ -19,11 +19,23 @@ signal throttle_dragging_changed(active: bool)
 signal fire_pressed(pressed: bool)
 signal boost_pressed(pressed: bool)
 signal brake_pressed(pressed: bool)
-signal roll_triggered(direction: float) # +1 = left, -1 = right
+signal roll_triggered(direction: float)            # double-tap → barrel roll (+1 = left, -1 = right)
+signal roll_held(direction: float, pressed: bool)  # single hold → continuous roll
 signal sensitivity_changed(value: float) # 0.6 / 1.0 / 1.6
 signal gyro_paused_changed(paused: bool)
 signal recalibrate_pressed()
 signal menu_pressed()
+
+# Double-tap detection for barrel-roll shortcut on the rotate buttons.
+const _DOUBLE_TAP_WINDOW := 0.22
+var _rolll_last_tap: float = -1.0
+var _rollr_last_tap: float = -1.0
+
+# Throttle geometry (kept compact so the bar's hit rect doesn't reach the
+# bottom-left roll buttons).
+const _THROTTLE_BAR_X := 80.0
+const _THROTTLE_BAR_H_RATIO := 0.40
+const _THROTTLE_BAR_Y_CENTER_RATIO := 0.55
 
 # ---- THROTTLE ----
 var throttle: float = 0.5
@@ -88,9 +100,9 @@ func _draw() -> void:
 	var sy = v_size.y
 
 	# --- THROTTLE BAR (left, latching) ---
-	var bar_x = 80.0
-	var bar_h = sy * 0.45
-	var bar_y_center = sy * 0.70
+	var bar_x = _THROTTLE_BAR_X
+	var bar_h = sy * _THROTTLE_BAR_H_RATIO
+	var bar_y_center = sy * _THROTTLE_BAR_Y_CENTER_RATIO
 	var bar_top = bar_y_center - bar_h * 0.5
 	var bar_bot = bar_y_center + bar_h * 0.5
 	_rect_throttle_bar = Rect2(bar_x - 60.0, bar_top - 40.0, 160.0, bar_h + 80.0)
@@ -181,13 +193,15 @@ func _draw() -> void:
 	var boost_col = Color(0.95, 0.85, 0.1, 0.8) if boost_touch == -1 else Color(1, 1, 0.4, 1.0)
 	_draw_button(_rect_boost, "BOOST", boost_col, boost_touch != -1, 22)
 
-	# ROLL LEFT / ROLL RIGHT (row above brake/boost)
-	var roll_h = 64.0
-	var roll_w = fire_w * 0.48 - 10
-	_rect_rolll = Rect2(col_x - fire_w, base_y - fire_h - 10 - brake_h - 10 - roll_h, roll_w, roll_h)
-	_rect_rollr = Rect2(col_x - roll_w, base_y - fire_h - 10 - brake_h - 10 - roll_h, roll_w, roll_h)
-	_draw_button(_rect_rolll, "◀ ROLL", Color(0.3, 0.5, 1.0, 0.75) if rolll_touch == -1 else Color(0.6, 0.8, 1.0, 1.0), rolll_touch != -1, 20)
-	_draw_button(_rect_rollr, "ROLL ▶", Color(0.3, 0.5, 1.0, 0.75) if rollr_touch == -1 else Color(0.6, 0.8, 1.0, 1.0), rollr_touch != -1, 20)
+	# --- BOTTOM-LEFT ROTATE PAIR ---
+	# Hold = continuous roll. Double-tap (within _DOUBLE_TAP_WINDOW) = barrel roll.
+	# Sized roomy enough that the left thumb can re-tap without re-aiming.
+	var roll_h = 78.0
+	var roll_w = 132.0
+	_rect_rolll = Rect2(pad, base_y - roll_h, roll_w, roll_h)
+	_rect_rollr = Rect2(pad + roll_w + 12, base_y - roll_h, roll_w, roll_h)
+	_draw_button(_rect_rolll, "◀ ROLL", Color(0.3, 0.5, 1.0, 0.75) if rolll_touch == -1 else Color(0.6, 0.8, 1.0, 1.0), rolll_touch != -1, 22)
+	_draw_button(_rect_rollr, "ROLL ▶", Color(0.3, 0.5, 1.0, 0.75) if rollr_touch == -1 else Color(0.6, 0.8, 1.0, 1.0), rollr_touch != -1, 22)
 
 
 # -----------------------------------------------------------------
@@ -286,11 +300,23 @@ func _on_press(pos: Vector2, index: int) -> void:
 		queue_redraw(); get_viewport().set_input_as_handled(); return
 	if _rect_rolll.has_point(pos) and rolll_touch == -1:
 		rolll_touch = index
-		roll_triggered.emit(1.0)
+		var now_l := Time.get_ticks_msec() / 1000.0
+		if now_l - _rolll_last_tap < _DOUBLE_TAP_WINDOW:
+			roll_triggered.emit(1.0)  # double-tap → barrel roll
+			_rolll_last_tap = -1.0     # consume so a third tap starts fresh
+		else:
+			_rolll_last_tap = now_l
+		roll_held.emit(1.0, true)      # always engage continuous roll on press
 		queue_redraw(); get_viewport().set_input_as_handled(); return
 	if _rect_rollr.has_point(pos) and rollr_touch == -1:
 		rollr_touch = index
-		roll_triggered.emit(-1.0)
+		var now_r := Time.get_ticks_msec() / 1000.0
+		if now_r - _rollr_last_tap < _DOUBLE_TAP_WINDOW:
+			roll_triggered.emit(-1.0) # double-tap → barrel roll
+			_rollr_last_tap = -1.0
+		else:
+			_rollr_last_tap = now_r
+		roll_held.emit(-1.0, true)
 		queue_redraw(); get_viewport().set_input_as_handled(); return
 
 	# Throttle drag region (left slab)
@@ -322,9 +348,11 @@ func _on_release(index: int) -> void:
 		queue_redraw(); get_viewport().set_input_as_handled()
 	if index == rolll_touch:
 		rolll_touch = -1
+		roll_held.emit(1.0, false)
 		queue_redraw(); get_viewport().set_input_as_handled()
 	if index == rollr_touch:
 		rollr_touch = -1
+		roll_held.emit(-1.0, false)
 		queue_redraw(); get_viewport().set_input_as_handled()
 
 
@@ -335,8 +363,8 @@ func _set_throttle_dragging(active: bool) -> void:
 
 func _update_throttle_from_pos(y: float) -> void:
 	var v_size = get_viewport_rect().size
-	var bar_h = v_size.y * 0.45
-	var bar_y_center = v_size.y * 0.70
+	var bar_h = v_size.y * _THROTTLE_BAR_H_RATIO
+	var bar_y_center = v_size.y * _THROTTLE_BAR_Y_CENTER_RATIO
 	var bar_top = bar_y_center - bar_h * 0.5
 	var bar_bot = bar_y_center + bar_h * 0.5
 	var raw_p = clamp((bar_bot - y) / bar_h, 0.0, 1.0)

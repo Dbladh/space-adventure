@@ -4,6 +4,10 @@
 
 extends Node3D
 
+# Shared geometry: one ArrayMesh built on first instantiation, reused by every gem.
+# Prevents the ~50× synchronous SurfaceTool.commit() freeze on bulk asteroid loot drops.
+static var _shared_mesh: ArrayMesh = null
+
 var target_player: Node3D = null
 var velocity: Vector3 = Vector3.ZERO
 var gravity: float = 8.0 # Local gravity for the 'shatter' effect
@@ -12,27 +16,33 @@ var timer: float = 0.0
 var value: int = 250
 var col: Color = Color.WHITE
 
-func _ready() -> void:
-	# ACE GEOMETRY: Mini-Rupee (Emerald cut)
-	var st = SurfaceTool.new()
+static func _build_shared_mesh() -> ArrayMesh:
+	# ACE GEOMETRY: Mini-Rupee (Emerald cut). Vertex colors omitted so per-gem
+	# tint is driven entirely by the material's albedo/emission.
+	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var size = 8.0
-	var v_top = Vector3(0, size, 0)
-	var v_bot = Vector3(0, -size, 0)
-	var v_mid = [Vector3(size, 0, 0), Vector3(0, 0, size), Vector3(-size, 0, 0), Vector3(0, 0, -size)]
+	var size := 8.0
+	var v_top := Vector3(0, size, 0)
+	var v_bot := Vector3(0, -size, 0)
+	var v_mid := [Vector3(size, 0, 0), Vector3(0, 0, size), Vector3(-size, 0, 0), Vector3(0, 0, -size)]
 	for i in range(4):
-		var m1 = v_mid[i]; var m2 = v_mid[(i + 1) % 4]
-		var n_up = (m1 - v_top).cross(m2 - v_top).normalized()
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(v_top)
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(m1)
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(m2)
-		var n_down = (m2 - v_bot).cross(m1 - v_bot).normalized()
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(v_bot)
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(m2)
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(m1)
-	
+		var m1: Vector3 = v_mid[i]
+		var m2: Vector3 = v_mid[(i + 1) % 4]
+		var n_up := (m1 - v_top).cross(m2 - v_top).normalized()
+		st.set_normal(n_up); st.add_vertex(v_top)
+		st.set_normal(n_up); st.add_vertex(m1)
+		st.set_normal(n_up); st.add_vertex(m2)
+		var n_down := (m2 - v_bot).cross(m1 - v_bot).normalized()
+		st.set_normal(n_down); st.add_vertex(v_bot)
+		st.set_normal(n_down); st.add_vertex(m2)
+		st.set_normal(n_down); st.add_vertex(m1)
+	return st.commit()
+
+func _ready() -> void:
+	if _shared_mesh == null:
+		_shared_mesh = _build_shared_mesh()
 	var mi = MeshInstance3D.new()
-	mi.mesh = st.commit()
+	mi.mesh = _shared_mesh
 	var mat = StandardMaterial3D.new()
 	mat.albedo_color = col
 	mat.emission_enabled = true

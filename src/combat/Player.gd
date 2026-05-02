@@ -10,7 +10,7 @@ extends CharacterBody3D
 # DEEP-SPACE CRUISE: when true_altitude is well past the gravity-brake boundary the
 # warp cap auto-scales up so inter-planet hops take seconds instead of minutes.
 # 600 km/s peak → 8M-unit hop ≈ 13 s, 16M ≈ 27 s. Tune via _deep_space_warp_lerp().
-@export var max_deep_space_warp_speed: float = 600000.0
+@export var max_deep_space_warp_speed: float = 1200000.0
 @export var rotation_speed: float = 2.8
 @export var roll_speed: float = 2.0
 @export var acceleration: float = 0.9
@@ -480,7 +480,7 @@ func _setup_player_hud() -> void:
 	health_bar_bg.color = Color(0.1, 0.1, 0.1, 0.8)
 	health_bar_bg.custom_minimum_size = Vector2(bar_w, bar_h)
 	health_bar_bg.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
-	health_bar_bg.position.y = 80.0; health_bar_bg.position.x -= bar_w/2.0
+	health_bar_bg.position.y = 96.0; health_bar_bg.position.x -= bar_w/2.0
 	hud.add_child(health_bar_bg)
 	
 	health_bar_fill = ColorRect.new()

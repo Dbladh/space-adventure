@@ -40,7 +40,9 @@ static func _get_tex(path: String) -> Texture2D:
 
 func _ready() -> void:
 	instance = self
-	process_mode = PROCESS_MODE_ALWAYS
+	# Do NOT set PROCESS_MODE_ALWAYS here — that would propagate to ALL children
+	# (Player, physics, enemies) and prevent get_tree().paused from working.
+	# Only specific UI nodes (MobileControlsUI, GalaxyMapUI, _pause_overlay) need ALWAYS.
 	_mobile_perf_mode = OS.get_name() == "iOS" or OS.has_feature("mobile")
 	if _mobile_perf_mode:
 		DebugSettings.terrain_complexity = 0.8
@@ -651,17 +653,16 @@ func _toggle_map_fullscreen_to(active: bool) -> void:
 	map_node.visible = active
 	map_node.is_fullscreen = active
 	if active:
-		# PAUSE MAP: Compact 300×300, anchored left-center so it doesn't
-		# overlap the MobileControlsUI settings panel on the right side.
-		# Starts at x=200 (clears the throttle bar) and is vertically centred.
+		# PAUSE MAP: 300×300 centred on screen.
+		# hud_layer is a CanvasLayer so anchors are relative to the screen rect.
 		var map_sz := 300.0
 		map_node.custom_minimum_size = Vector2(map_sz, map_sz)
-		map_node.anchor_left   = 0.0;  map_node.anchor_right  = 0.0
+		map_node.anchor_left   = 0.5;  map_node.anchor_right  = 0.5
 		map_node.anchor_top    = 0.5;  map_node.anchor_bottom = 0.5
-		map_node.offset_left   = 200.0
+		map_node.offset_left   = -map_sz * 0.5
 		map_node.offset_top    = -map_sz * 0.5
-		map_node.offset_right  = 200.0 + map_sz
-		map_node.offset_bottom = map_sz * 0.5
+		map_node.offset_right  =  map_sz * 0.5
+		map_node.offset_bottom =  map_sz * 0.5
 	else:
 		map_node.custom_minimum_size = Vector2(480, 480)
 		_reset_map_to_corner()

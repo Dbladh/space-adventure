@@ -192,38 +192,39 @@ func _draw() -> void:
 	var sy     = v_size.y
 	var paused = get_tree().paused
 
-	# ----- THROTTLE BAR (always visible) -----
-	var bar_x     = _throttle_bar_x
-	var bar_h     = sy * _THROTTLE_BAR_H_RATIO
-	var bar_y_cen = sy * _THROTTLE_BAR_Y_CENTER_RATIO
-	var bar_top   = bar_y_cen - bar_h * 0.5
-	var bar_bot   = bar_y_cen + bar_h * 0.5
+	# ----- THROTTLE BAR (hidden during pause — controls are deactivated) -----
+	if not paused:
+		var bar_x     = _throttle_bar_x
+		var bar_h     = sy * _THROTTLE_BAR_H_RATIO
+		var bar_y_cen = sy * _THROTTLE_BAR_Y_CENTER_RATIO
+		var bar_top   = bar_y_cen - bar_h * 0.5
+		var bar_bot   = bar_y_cen + bar_h * 0.5
 
-	var track_r = Rect2(bar_x - 14, bar_top, 28, bar_h)
-	_draw_rounded_rect(track_r, C_BG, 10.0)
-	_draw_rounded_rect(track_r, C_PANEL_BDR, 10.0, false, 1.5)
+		var track_r = Rect2(bar_x - 14, bar_top, 28, bar_h)
+		_draw_rounded_rect(track_r, C_BG, 10.0)
+		_draw_rounded_rect(track_r, C_PANEL_BDR, 10.0, false, 1.5)
 
-	var neutral_y = lerp(bar_bot, bar_top, 0.5)
-	var handle_y  = lerp(bar_bot, bar_top, throttle)
-	if throttle > 0.52:
-		_draw_rounded_rect(Rect2(bar_x - 10, handle_y, 20, neutral_y - handle_y), C_TEAL.darkened(0.2), 4.0)
-	elif throttle < 0.48:
-		_draw_rounded_rect(Rect2(bar_x - 10, neutral_y, 20, handle_y - neutral_y), C_ORANGE.darkened(0.2), 4.0)
+		var neutral_y = lerp(bar_bot, bar_top, 0.5)
+		var handle_y  = lerp(bar_bot, bar_top, throttle)
+		if throttle > 0.52:
+			_draw_rounded_rect(Rect2(bar_x - 10, handle_y, 20, neutral_y - handle_y), C_TEAL.darkened(0.2), 4.0)
+		elif throttle < 0.48:
+			_draw_rounded_rect(Rect2(bar_x - 10, neutral_y, 20, handle_y - neutral_y), C_ORANGE.darkened(0.2), 4.0)
 
-	draw_rect(Rect2(bar_x - 14, neutral_y - 3, 28, 6), C_ORANGE)
-	draw_rect(Rect2(bar_x - 16, neutral_y - 5, 32, 10), C_ORANGE_DIM, false, 1.5)
+		draw_rect(Rect2(bar_x - 14, neutral_y - 3, 28, 6), C_ORANGE)
+		draw_rect(Rect2(bar_x - 16, neutral_y - 5, 32, 10), C_ORANGE_DIM, false, 1.5)
 
-	var h_col = C_GREEN
-	if throttle < 0.48:   h_col = C_ORANGE
-	elif throttle > 0.95: h_col = C_TEAL
-	var hs = 72.0
-	_draw_space_button(Rect2(bar_x - hs * 0.5, handle_y - hs * 0.5, hs, hs), "", h_col, Color.TRANSPARENT, false, 0)
+		var h_col = C_GREEN
+		if throttle < 0.48:   h_col = C_ORANGE
+		elif throttle > 0.95: h_col = C_TEAL
+		var hs = 72.0
+		_draw_space_button(Rect2(bar_x - hs * 0.5, handle_y - hs * 0.5, hs, hs), "", h_col, Color.TRANSPARENT, false, 0)
 
-	var tlbl = "NEUTRAL"
-	if   throttle > 0.52: tlbl = "FWD %d%%" % int((throttle - 0.5) * 200.0)
-	elif throttle < 0.48: tlbl = "REV %d%%" % int((0.5 - throttle) * 200.0)
-	draw_string(font, Vector2(bar_x + 48, handle_y + 8), tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, C_CREAM)
-	draw_string(font, Vector2(bar_x - 40, bar_top - 18), "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, C_TEAL)
+		var tlbl = "NEUTRAL"
+		if   throttle > 0.52: tlbl = "FWD %d%%" % int((throttle - 0.5) * 200.0)
+		elif throttle < 0.48: tlbl = "REV %d%%" % int((0.5 - throttle) * 200.0)
+		draw_string(font, Vector2(bar_x + 48, handle_y + 8), tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, C_CREAM)
+		draw_string(font, Vector2(bar_x - 40, bar_top - 18), "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, C_TEAL)
 
 	# ----- TOP-LEFT: RECENTER only (always visible) -----
 	_draw_space_button(_rect_recenter, "RECENTER GYRO", C_BG, C_TEAL, false, 14)

@@ -99,15 +99,16 @@ func _ready() -> void:
 	queue_redraw()
 
 func _calculate_safe_area() -> void:
-	# Get usable screen rect accounting for notches and safe areas
+	# Get usable screen rect accounting for notches, Dynamic Island, home indicator
+	# screen_get_usable_rect() returns the "safe" inner area; screen_get_size() gives full resolution
 	var safe_rect = DisplayServer.screen_get_usable_rect()
-	var full_rect = DisplayServer.screen_get_rect()
+	var screen_size = Vector2(DisplayServer.screen_get_size())
 
-	# Calculate insets from edges
-	_safe_left = safe_rect.position.x - full_rect.position.x
-	_safe_top = safe_rect.position.y - full_rect.position.y
-	_safe_right = (full_rect.position.x + full_rect.size.x) - (safe_rect.position.x + safe_rect.size.x)
-	_safe_bottom = (full_rect.position.y + full_rect.size.y) - (safe_rect.position.y + safe_rect.size.y)
+	# Calculate insets from each edge (how many px the safe zone is inset from the screen edge)
+	_safe_left   = max(0.0, float(safe_rect.position.x))
+	_safe_top    = max(0.0, float(safe_rect.position.y))
+	_safe_right  = max(0.0, screen_size.x - float(safe_rect.position.x + safe_rect.size.x))
+	_safe_bottom = max(0.0, screen_size.y - float(safe_rect.position.y + safe_rect.size.y))
 
 	# Adjust throttle position based on safe left inset
 	_throttle_bar_x = 140.0 + _safe_left

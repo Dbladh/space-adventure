@@ -237,16 +237,16 @@ func _draw_retro_plate(r: Rect2, fill: Color, pressed: bool) -> void:
 		face = face.darkened(0.20)
 		var t := bevel_light; bevel_light = bevel_dark; bevel_dark = t
 	# Pixel-snap all coords so edges land on whole pixels.
-	var rx0 := floor(r.position.x)
-	var ry0 := floor(r.position.y)
-	var rx1 := floor(r.position.x + r.size.x)
-	var ry1 := floor(r.position.y + r.size.y)
-	var rsnap := Rect2(rx0, ry0, rx1 - rx0, ry1 - ry0)
+	var rx0: float = floor(r.position.x)
+	var ry0: float = floor(r.position.y)
+	var rx1: float = floor(r.position.x + r.size.x)
+	var ry1: float = floor(r.position.y + r.size.y)
+	var rsnap: Rect2 = Rect2(rx0, ry0, rx1 - rx0, ry1 - ry0)
 	# Solid face fill.
 	draw_rect(rsnap, face)
 	# CRT / PS1 scanlines — horizontal stripe every 4px at low opacity.
-	var scan_c := Color(0.0, 0.0, 0.0, 0.11)
-	var sy_scan := ry0 + 3.5
+	var scan_c: Color = Color(0.0, 0.0, 0.0, 0.11)
+	var sy_scan: float = ry0 + 3.5
 	while sy_scan < ry1 - 1.0:
 		draw_line(Vector2(rx0 + 1.0, sy_scan), Vector2(rx1 - 1.0, sy_scan), scan_c, 1.0)
 		sy_scan += 4.0

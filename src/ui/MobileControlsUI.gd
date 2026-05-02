@@ -164,7 +164,7 @@ func _draw() -> void:
 	draw_string(font, Vector2(sx - 180 - 36, 114), "MOTION: " + ("OK" if motion_ok else "WAIT"), HORIZONTAL_ALIGNMENT_LEFT, 180, 14, motion_c)
 
 	# --- TOP-CENTER TELEMETRY (Star Fox 64 style: solid dark panel + corner brackets) ---
-	var hud_box = Rect2(sx * 0.5 - 170, 36, 340, 54)
+	var hud_box: Rect2 = Rect2(sx * 0.5 - 170, 36, 340, 54)
 	draw_rect(hud_box, Color(0.02, 0.06, 0.10, 0.92))
 	draw_rect(hud_box, Color(0.0, 0.85, 1.0, 1.0), false, 2.0)
 	# Corner brackets — 14px L-shapes at each corner, pure white pixel art.

@@ -190,37 +190,36 @@ func _draw() -> void:
 		draw_string(font, Vector2(hud_box.position.x + 200, hud_box.position.y + 34), "WARP", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(1, 0.92, 0.25))
 
 	# --- BOTTOM-RIGHT CONTROL CLUSTER ---
-	# Anchor point
+	# Three vertically-stacked buttons, all the same width. No overlaps.
 	var pad = 36.0
 	var col_x = sx - pad
 	var base_y = sy - pad
+	var btn_w := 216.0  # all three share this width
+	var btn_h := 100.0  # FIRE and BOOST are the same height
+	var gap := 8.0
 
-	# Solid arcade palette (helper handles the press-state bevel inversion).
-	# FIRE (primary, big, bottom-most-wide)
-	var fire_w = 210.0
-	var fire_h = 110.0
-	_rect_fire = Rect2(col_x - fire_w, base_y - fire_h, fire_w, fire_h)
-	_draw_button(_rect_fire, "FIRE", Color(0.85, 0.08, 0.08, 1.0), fire_touch != -1, 34)
+	# FIRE — primary, bottom
+	_rect_fire = Rect2(col_x - btn_w, base_y - btn_h, btn_w, btn_h)
+	_draw_button(_rect_fire, "FIRE", Color(0.85, 0.08, 0.08, 1.0), fire_touch != -1, 36)
 
-	# BRAKE (above fire, left half of the row)
-	var brake_h = 70.0
-	_rect_brake = Rect2(col_x - fire_w, base_y - fire_h - 10 - brake_h, fire_w * 0.52, brake_h)
+	# BOOST — same size as FIRE, directly above
+	_rect_boost = Rect2(col_x - btn_w, base_y - btn_h - gap - btn_h, btn_w, btn_h)
+	_draw_button(_rect_boost, "BOOST", Color(0.95, 0.78, 0.05, 1.0), boost_touch != -1, 30)
+
+	# BRAKE — full width, shorter accent above BOOST
+	var brake_h := 58.0
+	_rect_brake = Rect2(col_x - btn_w, base_y - btn_h - gap - btn_h - gap - brake_h, btn_w, brake_h)
 	_draw_button(_rect_brake, "BRAKE", Color(0.88, 0.42, 0.05, 1.0), brake_touch != -1, 22)
-
-	# BOOST (same row as brake, to the right)
-	var boost_w = fire_w * 0.48 - 10
-	_rect_boost = Rect2(col_x - boost_w, base_y - fire_h - 10 - brake_h, boost_w, brake_h)
-	_draw_button(_rect_boost, "BOOST", Color(0.95, 0.78, 0.05, 1.0), boost_touch != -1, 22)
 
 	# --- BOTTOM-LEFT ROTATE PAIR ---
 	# Hold = continuous roll. Double-tap (within _DOUBLE_TAP_WINDOW) = barrel roll.
-	var roll_h = 78.0
-	var roll_w = 132.0
+	var roll_h := 80.0
+	var roll_w := 136.0
 	_rect_rolll = Rect2(pad, base_y - roll_h, roll_w, roll_h)
-	_rect_rollr = Rect2(pad + roll_w + 12, base_y - roll_h, roll_w, roll_h)
-	var roll_col := Color(0.20, 0.38, 0.85, 1.0) # Star Fox blue
-	_draw_button(_rect_rolll, "◀ ROLL", roll_col, rolll_touch != -1, 22)
-	_draw_button(_rect_rollr, "ROLL ▶", roll_col, rollr_touch != -1, 22)
+	_rect_rollr = Rect2(pad + roll_w + 10, base_y - roll_h, roll_w, roll_h)
+	var roll_col := Color(0.20, 0.38, 0.85, 1.0)
+	_draw_button(_rect_rolll, "◀ ROLL", roll_col, rolll_touch != -1, 24)
+	_draw_button(_rect_rollr, "ROLL ▶", roll_col, rollr_touch != -1, 24)
 
 
 # -----------------------------------------------------------------
@@ -237,20 +236,28 @@ func _draw_retro_plate(r: Rect2, fill: Color, pressed: bool) -> void:
 	if pressed:
 		face = face.darkened(0.20)
 		var t := bevel_light; bevel_light = bevel_dark; bevel_dark = t
-	# Solid face fill (full rect; bezel lines paint over the edge band)
-	draw_rect(r, face)
+	# Pixel-snap all coords so edges land on whole pixels.
+	var rx0 := floor(r.position.x)
+	var ry0 := floor(r.position.y)
+	var rx1 := floor(r.position.x + r.size.x)
+	var ry1 := floor(r.position.y + r.size.y)
+	var rsnap := Rect2(rx0, ry0, rx1 - rx0, ry1 - ry0)
+	# Solid face fill.
+	draw_rect(rsnap, face)
+	# CRT / PS1 scanlines — horizontal stripe every 4px at low opacity.
+	var scan_c := Color(0.0, 0.0, 0.0, 0.11)
+	var sy_scan := ry0 + 3.5
+	while sy_scan < ry1 - 1.0:
+		draw_line(Vector2(rx0 + 1.0, sy_scan), Vector2(rx1 - 1.0, sy_scan), scan_c, 1.0)
+		sy_scan += 4.0
 	# 3px bezel: light on top + left, dark on bottom + right.
-	var x0 := r.position.x
-	var y0 := r.position.y
-	var x1 := r.position.x + r.size.x
-	var y1 := r.position.y + r.size.y
-	draw_line(Vector2(x0, y0 + 1.5), Vector2(x1, y0 + 1.5), bevel_light, 3.0) # top
-	draw_line(Vector2(x0 + 1.5, y0), Vector2(x0 + 1.5, y1), bevel_light, 3.0) # left
-	draw_line(Vector2(x1 - 1.5, y0), Vector2(x1 - 1.5, y1), bevel_dark, 3.0)  # right
-	draw_line(Vector2(x0, y1 - 1.5), Vector2(x1, y1 - 1.5), bevel_dark, 3.0)  # bottom
-	# 1px hard outer outline — cyan when pressed for that arcade-press feedback.
+	draw_line(Vector2(rx0, ry0 + 1.5), Vector2(rx1, ry0 + 1.5), bevel_light, 3.0)
+	draw_line(Vector2(rx0 + 1.5, ry0), Vector2(rx0 + 1.5, ry1), bevel_light, 3.0)
+	draw_line(Vector2(rx1 - 1.5, ry0), Vector2(rx1 - 1.5, ry1), bevel_dark, 3.0)
+	draw_line(Vector2(rx0, ry1 - 1.5), Vector2(rx1, ry1 - 1.5), bevel_dark, 3.0)
+	# 2px hard outer outline — cyan when pressed for arcade-press feedback.
 	var outline: Color = Color(0.55, 1.0, 1.0, 1.0) if pressed else Color(1, 1, 1, 0.95)
-	draw_rect(r, outline, false, 1.0)
+	draw_rect(rsnap, outline, false, 2.0)
 
 func _draw_button(r: Rect2, label: String, fill: Color, pressed: bool, font_size: int = 16) -> void:
 	_draw_retro_plate(r, fill, pressed)

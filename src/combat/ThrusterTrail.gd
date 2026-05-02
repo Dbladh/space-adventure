@@ -61,8 +61,8 @@ func update_trail(port_pos: Vector3, fwd: Vector3, vel: Vector3, is_warping: boo
 	var speed_ratio = clamp(vel.length() / 8000.0, 0.0, 1.0)
 	var dynamic_max: int
 	if _mobile_perf:
-		dynamic_max = 12 + int(speed_ratio * 24.0)
-		if is_warping: dynamic_max = 40
+		dynamic_max = 8 + int(speed_ratio * 12.0)   # 8-20 pts every frame ≈ same cost as 16-40 every other frame
+		if is_warping: dynamic_max = 22
 	else:
 		dynamic_max = 25 + int(speed_ratio * 85.0)
 		if is_warping: dynamic_max = 120

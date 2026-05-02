@@ -739,62 +739,20 @@ func _process_ace_flight(delta: float) -> void:
 	# and the "user-active suppression" below keeps auto-level from fighting it.
 	roll_input *= lerp(1.0, 0.65, surface_assist)
 
-	# ATMOSPHERE MODE (No Man's Sky style):
-	#   1. Pitch  -> local rotation around ship.basis.x (nose up/down relative to surface)
-	#   2. Yaw    -> rotation around PLANET up (horizon stays level while turning)
-	#   3. Roll   -> auto-level torque so ship.basis.x stays perpendicular to world_up,
-	#                plus a small user bank contribution
-	# This replaces the old _atmo_heading approach, which decoupled the ship's visible
-	# body from its steering vector and left the hull rolled arbitrarily on entry.
+	# ATMOSPHERE MODE: Pitch/yaw/roll with full manual authority.
+	# No entry snap, no auto-level — ship keeps whatever orientation it had in space.
 	if is_in_atmo and barrel_roll_t <= 0.0:
-		# ENTRY CATCH: on the single frame we cross into atmo, bias the ship toward an
-		# upright basis so reentry doesn't start sideways or inverted. 40% slerp is
-		# strong enough to feel "grabbed by gravity" without a visible snap.
-		if not _was_in_atmo:
-			var entry_fwd = (-global_transform.basis.z).slide(world_up)
-			if entry_fwd.length_squared() < 0.0001:
-				entry_fwd = velocity.slide(world_up)
-			if entry_fwd.length_squared() < 0.0001:
-				entry_fwd = _get_surface_forward_hint(world_up)
-			entry_fwd = entry_fwd.normalized()
-			var entry_basis = _surface_aligned_basis(world_up, entry_fwd)
-			global_transform.basis = global_transform.basis.slerp(entry_basis, 0.4)
-
 		# 1. PITCH — around the ship's LOCAL right axis
 		if abs(pitch) > 0.001:
 			rotate(global_transform.basis.x.normalized(), pitch * rotation_speed * delta)
 
-		# 2. YAW — around PLANET up so turns don't roll the ship and the horizon stays flat
+		# 2. YAW — around PLANET up so turns don't roll the ship
 		if abs(yaw) > 0.001:
 			rotate(world_up, yaw * rotation_speed * delta * 0.9)
 
-		# 3. AUTO-LEVEL ROLL — signed torque around local forward so basis.x ⟂ world_up.
-		# NMS BANKING: when the pilot yaws (or holds L1/R1), we want a visible bank.
-		# Auto-level still pulls the hull upright when hands are off, but user roll
-		# input dominates while held. Yaw also contributes a small bank-into-turn
-		# so horizontal turns feel like flying, not driving.
-		var ship_fwd = -global_transform.basis.z
-		var ship_right = global_transform.basis.x
-		var desired_right = ship_fwd.cross(world_up)
-		if desired_right.length_squared() > 0.0001:
-			desired_right = desired_right.normalized()
-			var right_dot = clamp(ship_right.dot(desired_right), -1.0, 1.0)
-			var roll_err = acos(right_dot)
-			# Sign the correction around the ship's forward axis
-			if ship_right.cross(desired_right).dot(ship_fwd) < 0.0:
-				roll_err = -roll_err
-			# When the pilot is actively rolling, back off the auto-level torque so the
-			# input is actually felt. Scales from 1.0 (no input) to ~0.1 (full input).
-			var user_roll_strength = clamp(absf(roll_input) * 1.5, 0.0, 1.0)
-			var autolevel_scale: float = lerp(1.0, 0.12, user_roll_strength)
-			var level_rate: float = lerp(2.5, 8.0, surface_assist)
-			# NMS BANK-INTO-TURN: sideways yaw input adds a small roll in the turn direction
-			var bank_assist: float = -yaw * 0.35
-			rotate(ship_fwd, (
-				roll_err * level_rate * autolevel_scale
-				+ roll_input * roll_speed
-				+ bank_assist
-			) * delta)
+		# 3. ROLL — manual only, no auto-level torque
+		if abs(roll_input) > 0.001:
+			rotate(-global_transform.basis.z, roll_input * roll_speed * delta)
 
 		# Cache forward for any downstream consumers that still read _atmo_heading
 		_atmo_heading = (-global_transform.basis.z).normalized()
@@ -1099,18 +1057,13 @@ func _process_ace_flight(delta: float) -> void:
 	# cap) to halve the vertex-submission cost of the 5-port trail system.
 	# Nozzle orb / OmniLight sync still runs every frame below so ignition is crisp.
 	_thruster_tick += 1
-	var _trail_ribbon_update: bool = true
-	var _trail_ribbon_delta: float = delta
-	if _mobile_perf:
-		if (_thruster_tick & 1) == 0:
-			_trail_ribbon_update = false
-		else:
-			_trail_ribbon_delta = delta * 2.0
 	if ship_model:
 		for t in thruster_trails:
 			var world_pos = ship_model.global_transform * t.offset
-			if _trail_ribbon_update:
-				t.node.update_trail(world_pos, global_transform.basis.z, velocity, is_warping, thrust_mapped, _trail_ribbon_delta)
+			# Always update every frame — the old every-other-frame skip caused the ribbon
+			# to freeze while the nozzle glow kept moving, producing a flicker at 30fps.
+			# Mobile trail length is capped inside ThrusterTrail to keep vertex cost low.
+			t.node.update_trail(world_pos, global_transform.basis.z, velocity, is_warping, thrust_mapped, delta)
 			
 			# SYNC DYNAMIC NOZZLE ORB (Sphere core + Physical OmniLight)
 			if t.node.has_meta("glow_node"):

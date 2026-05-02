@@ -1745,6 +1745,15 @@ func _spawn_minerals(data: Array) -> void:
 	for item in data:
 		var xf: Transform3D = item[0]
 		var type: String = item[1]
+
+		# DESTRUCTION PERSISTENCE: Skip any mineral that's been destroyed
+		# previously (even if the chunk is being reloaded). The destroyed
+		# minerals registry uses position hash for O(1) lookup.
+		var global_xf = self.global_transform * xf
+		var pos_hash = hash(global_xf.origin.round())
+		if m_script.get("_destroyed_positions").has(pos_hash):
+			continue
+
 		var res = StaticBody3D.new()
 		res.set_script(m_script)
 		res.set("resource_type", type)

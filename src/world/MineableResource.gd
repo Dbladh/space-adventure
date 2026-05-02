@@ -16,6 +16,10 @@ var _visual_tick: int = 0
 # (each mineral would otherwise own a light and a transparent SubViewport).
 var _mobile_perf: bool = false
 
+# PERSISTENT DESTRUCTION REGISTRY: Track destroyed mineral positions so they
+# don't respawn if planet chunks reload. Uses position.hash() for fast lookup.
+static var _destroyed_positions: Dictionary = {}
+
 func _ready() -> void:
 	add_to_group("Mineable") # ACE: Absolute identification for projectiles
 	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
@@ -174,6 +178,12 @@ func _on_mined() -> void:
 	# ACE: Award the player $1 for destroying this mineral (immediate payout),
 	# then spawn 10-20 'Shatter' shards that arc up, land on the planet surface
 	# for 1 s, then magnet-fly into the ship like Ratchet & Clank bolts.
+
+	# Register this position as destroyed so if the planet chunk reloads,
+	# the mineral doesn't respawn.  Use position hash for O(1) lookup.
+	var pos_hash = hash(global_position.round())
+	_destroyed_positions[pos_hash] = true
+
 	var economy = get_node_or_null("/root/EconomyManager")
 	if economy:
 		economy.call("add_credits", 1)

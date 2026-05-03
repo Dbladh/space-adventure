@@ -1,5 +1,7 @@
 extends Node3D
 
+const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+
 # AsteroidMineComponent.gd
 # Mining interface for asteroids. Spawns loot when destroyed.
 # Attached as a child of asteroid nodes and handles damage/destruction.
@@ -35,34 +37,40 @@ func _on_health_depleted() -> void:
 func _on_destroyed() -> void:
 	destroyed = true
 
-	if asteroid_parent:
-		# Spawn 1-3 loot gems with weighted rarity
-		var gem_script = load("res://src/world/LootGem.gd")
-		if gem_script:
-			var rng := RandomNumberGenerator.new()
-			rng.randomize()
-			var count: int = rng.randi_range(1, 3)
+	if not asteroid_parent:
+		return
 
-			# First gem is always Stone (guaranteed), then add weighted rare drops
-			var resource_types: Array[String] = ["Stone"]
-			for i in range(count - 1):
-				resource_types.append(_pick_weighted_resource(rng))
+	# Spawn 1-3 loot gems with weighted rarity
+	var gem_script = load("res://src/world/LootGem.gd")
+	if not gem_script:
+		push_error("Failed to load LootGem script")
+		asteroid_parent.queue_free()
+		return
 
-			for resource_type in resource_types:
-				var gem := Node3D.new()
-				gem.set_script(gem_script)
-				gem.set("resource_type", resource_type)
-				gem.set("value", ResourceRegistry.get_value(resource_type))
-				gem.set("col", ResourceRegistry.get_color(resource_type))
-				gem.set("planet", null)  # Asteroids don't have a "down" direction
-				gem.set("surface_dist", 0.0)
-				get_tree().root.add_child(gem)
-				gem.global_position = asteroid_parent.global_position + Vector3(randf_range(-50.0, 50.0), randf_range(-50.0, 50.0), randf_range(-50.0, 50.0))
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var count: int = rng.randi_range(1, 3)
 
-		# Destroy the asteroid itself
-		if asteroid_parent:
-			# Mark for removal — the AsteroidBelt will handle cleanup
-			asteroid_parent.queue_free()
+	# First gem is always Stone (guaranteed), then add weighted rare drops
+	var resource_types: Array[String] = ["Stone"]
+	for i in range(count - 1):
+		resource_types.append(_pick_weighted_resource(rng))
+
+	var spawn_origin = asteroid_parent.global_position
+	for resource_type in resource_types:
+		var gem := Node3D.new()
+		gem.set_script(gem_script)
+		gem.set("resource_type", resource_type)
+		gem.set("value", ResourceRegistry.get_value(resource_type))
+		gem.set("col", ResourceRegistry.get_color(resource_type))
+		gem.set("planet", null)  # Asteroids don't have a "down" direction
+		gem.set("surface_dist", 0.0)
+		get_tree().root.add_child(gem)
+		# Spawn gems in a scattered pattern around asteroid
+		gem.global_position = spawn_origin + Vector3(randf_range(-100.0, 100.0), randf_range(-100.0, 100.0), randf_range(-100.0, 100.0))
+
+	# Destroy the asteroid itself
+	asteroid_parent.queue_free()
 
 # Pick a resource based on tier weights and natural pool availability
 func _pick_weighted_resource(rng: RandomNumberGenerator) -> String:

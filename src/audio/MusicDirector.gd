@@ -54,8 +54,8 @@ var _perc_playback: AudioStreamGeneratorPlayback
 # =====================================================================
 
 var _sfx_ship_fire: AudioStreamPlayer
-var _sfx_ship_boost: AudioStreamPlayer
-var _sfx_ship_thrusters: AudioStreamPlayer
+var _sfx_ship_idle: AudioStreamPlayer    # constant low hum, always looping
+var _sfx_ship_thruster: AudioStreamPlayer  # ship_boost.wav looped, pitch+vol scale with speed
 var _sfx_explosion_small: AudioStreamPlayer
 var _sfx_explosion_big: AudioStreamPlayer
 
@@ -164,6 +164,7 @@ var _arp_step_timer: float = 0.0
 var _arp_step_index: int = 0
 var _arp_current_freq: float = 220.0
 var _arp_envelope: float = 0.0
+var _arp_decay_rate: float = 2.5    # recomputed each step to fill 75% of the step duration
 var _arp_rest: bool = false
 var _arp_direction: int = 1
 var _arp_phrase_count: int = 0
@@ -196,7 +197,7 @@ const HAT_VOL   := 0.08
 
 # Percussion step tracking
 var _perc_step_timer: float = 0.0
-var _perc_step_index: int = 0
+var _perc_step_index: int = 7    # init to 7 so first advance lands on step 0 (downbeat)
 var _perc_bar_count: int = 0          # track bars for fills
 
 # Patterns: 8 steps per bar (8th notes). Each step is a bitfield:
@@ -371,31 +372,47 @@ func _ready() -> void:
 	_accent_player.play()
 	_accent_playback = _accent_player.get_stream_playback()
 
-	# SFX players (sampled audio effects for ship/combat)
+	# ── SFX players ─────────────────────────────────────────────────────
+	# Weapon fire — oneshot, quieter than music so it doesn't overpower
 	_sfx_ship_fire = AudioStreamPlayer.new()
 	_sfx_ship_fire.bus = "Master"
 	_sfx_ship_fire.stream = load("res://assets/resources/audio/ship_fire.wav")
+	_sfx_ship_fire.volume_db = -14.0
 	add_child(_sfx_ship_fire)
 
-	_sfx_ship_boost = AudioStreamPlayer.new()
-	_sfx_ship_boost.bus = "Master"
-	_sfx_ship_boost.stream = load("res://assets/resources/audio/ship_boost.wav")
-	add_child(_sfx_ship_boost)
+	# Idle hum — looping, very low-level ambient background at all times
+	var idle_stream = load("res://assets/resources/audio/ship_idle.wav")
+	if idle_stream is AudioStreamWAV:
+		idle_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	_sfx_ship_idle = AudioStreamPlayer.new()
+	_sfx_ship_idle.bus = "Master"
+	_sfx_ship_idle.stream = idle_stream
+	_sfx_ship_idle.volume_db = -28.0   # barely audible — atmospheric texture only
+	add_child(_sfx_ship_idle)
+	_sfx_ship_idle.play()
 
-	_sfx_ship_thrusters = AudioStreamPlayer.new()
-	_sfx_ship_thrusters.bus = "Master"
-	_sfx_ship_thrusters.stream = load("res://assets/resources/audio/ship_thrusters.wav")
-	_sfx_ship_thrusters.volume_db = -6.0
-	add_child(_sfx_ship_thrusters)
+	# Thruster engine (uses ship_boost.wav) — loops while moving, pitch+vol scale with speed
+	var thruster_stream = load("res://assets/resources/audio/ship_boost.wav")
+	if thruster_stream is AudioStreamWAV:
+		thruster_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	_sfx_ship_thruster = AudioStreamPlayer.new()
+	_sfx_ship_thruster.bus = "Master"
+	_sfx_ship_thruster.stream = thruster_stream
+	_sfx_ship_thruster.volume_db = -20.0   # start quiet; updated by update_thruster_audio()
+	_sfx_ship_thruster.pitch_scale = 0.70
+	add_child(_sfx_ship_thruster)
 
+	# Explosions — proportionally louder than music to feel impactful
 	_sfx_explosion_small = AudioStreamPlayer.new()
 	_sfx_explosion_small.bus = "Master"
 	_sfx_explosion_small.stream = load("res://assets/resources/audio/explosion_small.wav")
+	_sfx_explosion_small.volume_db = -8.0
 	add_child(_sfx_explosion_small)
 
 	_sfx_explosion_big = AudioStreamPlayer.new()
 	_sfx_explosion_big.bus = "Master"
 	_sfx_explosion_big.stream = load("res://assets/resources/audio/explosion_big.mp3")
+	_sfx_explosion_big.volume_db = -4.0
 	add_child(_sfx_explosion_big)
 
 	# Initialize bass frequency
@@ -550,8 +567,8 @@ func _process(delta: float) -> void:
 		_bass_step_timer -= bass_step_dur
 		_retrigger_bass_pulse()
 
-	# Decay envelopes
-	_arp_envelope = maxf(_arp_envelope - delta * 2.5, 0.0)
+	# Decay envelopes — arp uses tempo-proportional rate so notes fill ~75% of each step
+	_arp_envelope = maxf(_arp_envelope - delta * _arp_decay_rate, 0.0)
 	_stinger_env  = maxf(_stinger_env  - delta * 4.0, 0.0)
 
 	# ── Ambient accent timer ─────────────────────────────────────────
@@ -971,8 +988,13 @@ func _fill_bass_buffer() -> void:
 func _advance_arp_step() -> void:
 	_arp_phrase_count += 1
 
+	# Tempo-proportional decay: notes fill 78% of each step so they sound rhythmically
+	# connected regardless of BPM.  Computed once per step, used in _process() envelope.
+	var step_dur := 60.0 / _arp_tempo / 2.0
+	_arp_decay_rate = 1.0 / (step_dur * 0.78)
+
 	var is_ghost := false
-	if randf() < 0.28:
+	if randf() < 0.18:   # reduced from 0.28 — more consistent tempo feel
 		if randf() < 0.15:
 			is_ghost = true
 		else:
@@ -1007,7 +1029,10 @@ func _advance_arp_step() -> void:
 	if is_ghost:
 		_arp_accent *= 0.20
 
-	_arp_envelope = _arp_accent
+	# Envelope always starts at 1.0; accent is applied as volume in the fill loop.
+	# This means all notes sustain for the same duration — accent only affects loudness,
+	# not how long the note rings, which keeps the rhythmic pulse consistent.
+	_arp_envelope = 1.0
 	_arp_pan = 0.25 if _arp_phrase_count % 2 == 0 else -0.25
 
 func _fill_arp_buffer() -> void:
@@ -1019,7 +1044,7 @@ func _fill_arp_buffer() -> void:
 
 	var freq  := _arp_current_freq
 	var inv_r := 1.0 / _sample_rate
-	var vol   := _arp_volume * _arp_envelope
+	var vol   := _arp_volume * _arp_envelope * _arp_accent   # accent = volume; envelope = sustain shape
 	var filt  := clampf(_filter_cutoff / 3000.0, 0.15, 1.0)
 	var phase := _arp_phase
 	var tbl   := _sin_table
@@ -1331,18 +1356,19 @@ func play_fire() -> void:
 		_sfx_ship_fire.stop()
 		_sfx_ship_fire.play()
 
-func play_boost() -> void:
-	if _sfx_ship_boost:
-		_sfx_ship_boost.stop()
-		_sfx_ship_boost.play()
-
-func play_thrusters_loop() -> void:
-	if _sfx_ship_thrusters and not _sfx_ship_thrusters.playing:
-		_sfx_ship_thrusters.play()
-
-func stop_thrusters() -> void:
-	if _sfx_ship_thrusters:
-		_sfx_ship_thrusters.stop()
+func update_thruster_audio(speed: float) -> void:
+	if not _sfx_ship_thruster:
+		return
+	if speed < 60.0:
+		if _sfx_ship_thruster.playing:
+			_sfx_ship_thruster.stop()
+		return
+	# Normalise speed: 0 = slow cruise (~100 u/s), 1 = full warp (~6000+ u/s)
+	var t := clampf((speed - 60.0) / 5940.0, 0.0, 1.0)
+	_sfx_ship_thruster.pitch_scale = lerpf(0.68, 1.38, t)
+	_sfx_ship_thruster.volume_db   = lerpf(-20.0, -7.0, t)
+	if not _sfx_ship_thruster.playing:
+		_sfx_ship_thruster.play()
 
 func play_explosion(is_big: bool = false) -> void:
 	var sfx = _sfx_explosion_big if is_big else _sfx_explosion_small

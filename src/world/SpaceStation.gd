@@ -1,14 +1,18 @@
 extends Node3D
 
+const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+
 # SpaceStation.gd
 # Dockable station. Fly within DOCK_RANGE for the UI to auto-open.
 #   • Sell All  — converts held resources to credits
 #   • Forge     — spend 3 resource slots to spawn a deterministic planet
 #   • Dismantle — destroy a forged planet and recover the resources
 
-const DOCK_RANGE: float = 200000.0
+const DOCK_RANGE: float = 600000.0   # 600 km — stations are massive now
 const MAX_PLANETS: int = 3
 
+var station_display_name: String = "Alpha"   # set before add_child()
+var _ring_node: Node3D = null                # rotated each frame
 var _player: Node3D = null
 var _ui_layer: CanvasLayer = null
 var _panel: Control = null
@@ -33,31 +37,78 @@ func _ready() -> void:
 # ---------------------------------------------------------------------------
 
 func _build_visual() -> void:
-	var mi := MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = Vector3(6000, 2000, 6000)
-	mi.mesh = box
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.55, 0.65, 0.75)
-	mat.emission_enabled = true
-	mat.emission = Color(0.2, 0.45, 0.9)
-	mat.emission_energy_multiplier = 1.8
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mi.material_override = mat
-	add_child(mi)
+	# All sizes in metres.  Station is ~300 km across — Death Star scale.
+	const DISC_R   := 150_000.0   # main disc radius
+	const DISC_H   :=  28_000.0   # disc thickness
+	const RING_IN  := 170_000.0   # orbital ring inner radius
+	const RING_OUT := 215_000.0   # orbital ring outer radius
+	const CORE_R   :=  42_000.0   # central sphere radius
 
-	var ring := MeshInstance3D.new()
+	# ── Main disc body ────────────────────────────────────────────────
+	var disc_mesh := CylinderMesh.new()
+	disc_mesh.top_radius    = DISC_R
+	disc_mesh.bottom_radius = DISC_R
+	disc_mesh.height        = DISC_H
+	disc_mesh.radial_segments = 24
+
+	var disc_mat := StandardMaterial3D.new()
+	disc_mat.albedo_color = Color(0.42, 0.52, 0.62)
+	disc_mat.emission_enabled = true
+	disc_mat.emission = Color(0.15, 0.35, 0.75)
+	disc_mat.emission_energy_multiplier = 1.2
+	disc_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	disc_mesh.material = disc_mat
+
+	var disc := MeshInstance3D.new()
+	disc.mesh = disc_mesh
+	add_child(disc)
+
+	# ── Central core sphere ───────────────────────────────────────────
+	var sphere_mesh := SphereMesh.new()
+	sphere_mesh.radius = CORE_R
+	sphere_mesh.height = CORE_R * 2.0
+	sphere_mesh.radial_segments = 16
+	sphere_mesh.rings = 8
+
+	var core_mat := StandardMaterial3D.new()
+	core_mat.albedo_color = Color(0.6, 0.75, 1.0)
+	core_mat.emission_enabled = true
+	core_mat.emission = Color(0.2, 0.6, 1.0)
+	core_mat.emission_energy_multiplier = 3.5
+	core_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sphere_mesh.material = core_mat
+
+	var core := MeshInstance3D.new()
+	core.mesh = sphere_mesh
+	add_child(core)
+
+	# ── Orbital ring (slowly rotates) ────────────────────────────────
 	var torus := TorusMesh.new()
-	torus.inner_radius = 3500
-	torus.outer_radius = 4200
-	ring.mesh = torus
+	torus.inner_radius = RING_IN
+	torus.outer_radius = RING_OUT
+	torus.rings         = 48
+	torus.ring_segments = 12
+
 	var ring_mat := StandardMaterial3D.new()
+	ring_mat.albedo_color = Color(0.1, 0.8, 1.0)
 	ring_mat.emission_enabled = true
-	ring_mat.emission = Color(0.1, 0.9, 1.0)
-	ring_mat.emission_energy_multiplier = 4.0
+	ring_mat.emission = Color(0.1, 0.8, 1.0)
+	ring_mat.emission_energy_multiplier = 5.0
 	ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ring.material_override = ring_mat
-	add_child(ring)
+	torus.material = ring_mat
+
+	_ring_node = Node3D.new()
+	var ring := MeshInstance3D.new()
+	ring.mesh = torus
+	_ring_node.add_child(ring)
+	add_child(_ring_node)
+
+	# ── OmniLight so the station glows across the system ─────────────
+	var light := OmniLight3D.new()
+	light.light_color = Color(0.3, 0.7, 1.0)
+	light.light_energy = 8.0
+	light.omni_range   = RING_OUT * 8.0
+	add_child(light)
 
 # ---------------------------------------------------------------------------
 # UI BUILD
@@ -87,7 +138,7 @@ func _build_ui() -> void:
 
 	# ---- Title ----
 	var title := Label.new()
-	title.text = "[ SPACE STATION ]"
+	title.text = "[ STATION " + station_display_name.to_upper() + " ]"
 	title.add_theme_font_size_override("font_size", 34)
 	title.add_theme_color_override("font_color", Color.CYAN)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -250,7 +301,11 @@ func _refresh_planets_ui() -> void:
 # PROXIMITY LOOP
 # ---------------------------------------------------------------------------
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	# Slowly rotate the orbital ring for visual interest
+	if _ring_node:
+		_ring_node.rotate_y(delta * 0.04)
+
 	if not _player:
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0:

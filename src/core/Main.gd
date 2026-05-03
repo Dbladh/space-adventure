@@ -286,23 +286,41 @@ func _setup_titan_planetary() -> void:
 		planet.set("planet_resources", ["Stone", "Wood", "Neon Moss", "Silica Dust", "Copper"])
 
 func _setup_space_station() -> void:
+	# Planet_Varn: centre (0,0,-1,500,000), radius 1,125,000m, belt to ~2,625,000m.
+	# Stations are ~300 km across so the POI beacon height must exceed their radius.
+
+	# 1. Orbital — just outside Planet_Varn's atmosphere (~1,350 km from centre)
+	_spawn_station("Orbital",
+		Vector3(1_350_000, 250_000, -1_500_000),
+		Color(0.3, 1.0, 0.5))   # green — the "home" station
+
+	# 2. Alpha — deep space along -Z, far from the belt
+	_spawn_station("Alpha",
+		Vector3(0, 0, -8_000_000),
+		Color(0.3, 0.8, 1.0))   # cyan
+
+	# 3. Beta — off in another quadrant
+	_spawn_station("Beta",
+		Vector3(-7_000_000, 600_000, -3_500_000),
+		Color(0.9, 0.5, 1.0))   # purple
+
+func _spawn_station(display_name: String, pos: Vector3, beacon_col: Color) -> void:
 	var ss_script = load("res://src/world/SpaceStation.gd")
 	if not ss_script: return
 	var station := Node3D.new()
 	station.set_script(ss_script)
-	station.name = "SpaceStation_Alpha"
+	station.name = "SpaceStation_" + display_name
+	station.set("station_display_name", display_name)
 	station.add_to_group("SpaceStation")
 	world_root.add_child(station)
-	# Planet_Varn centre at (0,0,-1,500,000), radius 1,125,000, ring belt up to 2 Mm.
-	# Station is placed 6.5 Mm from planet centre to be clearly in open space.
-	station.global_position = Vector3(0, 0, -8000000.0)
+	station.global_position = pos
 
-	# POI beacon so the station is visible from across the system
 	var marker_script = load("res://src/ui/POIMarker.gd")
 	if marker_script:
 		var marker := Node3D.new()
 		marker.set_script(marker_script)
-		marker.call_deferred("setup", "Alpha Station", "station", 180000.0, Color(0.3, 0.8, 1.0))
+		# Beacon column height well above the 215 km ring radius
+		marker.call_deferred("setup", display_name + " Station", "station", 600_000.0, beacon_col)
 		station.add_child(marker)
 
 func _setup_asteroid_belt() -> void:

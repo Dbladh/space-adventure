@@ -441,8 +441,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
 			# WILDERNESS ZONE: Minerals & Nature
 			# -----------------------------------
-			# 1. MINERAL PRIORITY: Colossal Rarity (reduced Copper spawning)
-			if (h_v % 30000) < 1:
+			# 1. MINERAL PRIORITY: Colossal Rarity (Copper scattered throughout planet)
+			if (h_v % 25000) < 3:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
 					# Pick deterministically from this planet's resource pool
@@ -540,7 +540,6 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Stone", 120, 8.0)
 
 func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: String, max_count: int, sphere_r: float) -> void:
-	if _is_mobile_perf(): return
 	var proxy_script = load("res://src/world/SurfacePropProxy.gd")
 	if not proxy_script: return
 
@@ -550,12 +549,17 @@ func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: Stri
 		if is_instance_valid(pl):
 			player_pos = pl.global_position
 
+	# Mobile: Reduce proxy count to 50% to avoid performance issues
+	var effective_max = max_count
+	if _is_mobile_perf():
+		effective_max = max(1, max_count / 2)
+
 	var sphere := SphereShape3D.new()
 	sphere.radius = sphere_r
 
 	var spawned := 0
 	for i in range(points.size()):
-		if spawned >= max_count: break
+		if spawned >= effective_max: break
 		var world_pos: Vector3 = global_transform * points[i].origin
 		if world_pos.distance_to(player_pos) > PROP_LOD_HIGH_END * 1.5:
 			continue

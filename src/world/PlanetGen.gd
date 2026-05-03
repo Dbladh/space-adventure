@@ -208,6 +208,7 @@ func _ready() -> void:
 	_spawn_majestic_clouds_and_rings(rng, base_hue)
 	# ACE: Scatter colossal Hero Landmarks as navigation anchors across the planet surface
 	_spawn_hero_landmarks(rng)
+	_spawn_poi_marker()
 	print("--- ARCHITECT: PLANET [%s] SYNCHRONIZED (terrain_seed=%d) ---" % [name, noise.seed])
 
 func get_terrain_height_at(pos: Vector3) -> float:
@@ -609,6 +610,19 @@ func _build_floating_island(base: Vector3, basis: Basis, rng: RandomNumberGenera
 	add_child(mi)
 
 # Shared unshaded-style material for all landmarks — uses the terrain rock colour
+func _spawn_poi_marker() -> void:
+	var marker_script = load("res://src/ui/POIMarker.gd")
+	if not marker_script: return
+	var display_name = name.replace("Planet_", "")
+	# Place label well above the atmosphere (planet_radius + 40% headroom)
+	var height = planet_radius * 1.4
+	# Tint the beacon using the planet's grass/surface palette color
+	var col = pal_grass_col.lerp(Color.WHITE, 0.5)
+	var marker := Node3D.new()
+	marker.set_script(marker_script)
+	marker.call_deferred("setup", display_name, "planet", height, col)
+	add_child(marker)
+
 func _landmark_material(col: Color) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = col

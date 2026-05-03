@@ -296,6 +296,14 @@ func _setup_space_station() -> void:
 	# Orbit Planet_Varn (at 0,0,-1500000) at a safe distance above the ring belt
 	station.global_position = Vector3(0, 80000.0, -2900000.0)
 
+	# POI beacon so the station is visible from across the system
+	var marker_script = load("res://src/ui/POIMarker.gd")
+	if marker_script:
+		var marker := Node3D.new()
+		marker.set_script(marker_script)
+		marker.call_deferred("setup", "Alpha Station", "station", 180000.0, Color(0.3, 0.8, 1.0))
+		station.add_child(marker)
+
 func _setup_asteroid_belt() -> void:
 	var belt_script = load("res://src/world/AsteroidBelt.gd")
 	if belt_script and planet_ref:
@@ -391,12 +399,14 @@ func _setup_hardened_diag_hud() -> void:
 		inv.inventory_changed.connect(_refresh_inv)
 
 	# NAVIGATION BEACON: Shows nearest space station bearing and distance
+	# Positioned below RECENTER GYRO (which ends at roughly y=90 on most screens)
 	var beacon_script = load("res://src/ui/NavBeacon.gd")
 	if beacon_script:
 		var beacon = Control.new()
 		beacon.set_script(beacon_script)
 		beacon.set_anchors_preset(Control.PRESET_TOP_LEFT)
-		beacon.custom_minimum_size = Vector2(200, 100)
+		beacon.custom_minimum_size = Vector2(200, 90)
+		beacon.position = Vector2(8, 100)
 		hud_layer.add_child(beacon)
 
 	# ACE NAVIGATION: Inject the tactical galaxy map into the HUD

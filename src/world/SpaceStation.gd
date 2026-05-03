@@ -331,6 +331,9 @@ func _show_ui() -> void:
 	# Hide all gameplay HUD and freeze the world while docked
 	get_tree().call_group("GameHUD", "hide")
 	get_tree().paused = true
+	# Enable mouse cursor for UI interaction
+	if _player and _player.has_method("unlock_mouse"):
+		_player.unlock_mouse()
 
 func _hide_ui() -> void:
 	_ui_visible = false
@@ -338,6 +341,9 @@ func _hide_ui() -> void:
 	# Restore gameplay HUD and unpause
 	get_tree().paused = false
 	get_tree().call_group("GameHUD", "show")
+	# Lock mouse cursor back for gameplay
+	if _player and _player.has_method("lock_mouse"):
+		_player.lock_mouse()
 
 # ---------------------------------------------------------------------------
 # ACTIONS

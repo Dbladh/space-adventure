@@ -69,6 +69,14 @@ func _ready() -> void:
 		econ.name = "EconomyManager"
 		add_child(econ)
 		Engine.set_meta("EconomyManager", econ)
+
+	# INVENTORY GENESIS: Resource stacks
+	var inv_script = load("res://src/core/InventoryManager.gd")
+	if inv_script:
+		var inv = inv_script.new()
+		inv.name = "InventoryManager"
+		add_child(inv)
+		Engine.set_meta("InventoryManager", inv)
 	
 	# 1. ATOMIC PURGE
 	_purge_ghost_entities()
@@ -434,7 +442,29 @@ func _setup_hardened_diag_hud() -> void:
 	if Engine.has_meta("EconomyManager"):
 		var econ = Engine.get_meta("EconomyManager")
 		econ.currency_changed.connect(func(n): creds.text = "$" + str(n))
-	
+
+	# INVENTORY ROW: Shows resource stacks below the credit counter
+	var inv_label = Label.new(); inv_label.name = "InventoryLabel"
+	inv_label.text = ""
+	inv_label.add_theme_font_size_override("font_size", 28)
+	inv_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
+	hud_layer.add_child(inv_label)
+	inv_label.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 0)
+	inv_label.position.y = 200.0
+	inv_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+
+	if Engine.has_meta("InventoryManager"):
+		var inv = Engine.get_meta("InventoryManager")
+		var _refresh_inv = func(_type: String, _amt: int) -> void:
+			var all = inv.get_all()
+			var parts: Array[String] = []
+			var abbrev = {"Copper": "Cu", "Silver": "Ag", "Gold": "Au", "Platinum": "Pt", "Diamond": "Di"}
+			for r in ["Copper", "Silver", "Gold", "Platinum", "Diamond"]:
+				if all.get(r, 0) > 0:
+					parts.append(abbrev[r] + ":" + str(all[r]))
+			inv_label.text = "  ".join(parts)
+		inv.inventory_changed.connect(_refresh_inv)
+
 	# ACE NAVIGATION: Inject the tactical galaxy map into the HUD
 	var map_script = load("res://src/ui/GalaxyMapUI.gd")
 	if map_script:

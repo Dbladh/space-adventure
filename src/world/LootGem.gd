@@ -15,6 +15,7 @@ var state: String = "EXPLODING"
 var timer: float = 0.0
 var land_timer: float = 0.0
 var value: int = 250
+var resource_type: String = "Copper"
 var col: Color = Color.WHITE
 # Surface-landing context: passed in by MineableResource at spawn so each shard
 # knows its planet and the radius (planet center → mineral root) to settle at.
@@ -183,7 +184,10 @@ func _on_collected() -> void:
 	if music_director.size() > 0:
 		music_director[0].call("play_item_collect")
 
-	# Add to economy
+	# Add resource to inventory
+	if Engine.has_meta("InventoryManager"):
+		Engine.get_meta("InventoryManager").add(resource_type, 1)
+	# Also award credits until SpaceStation exists
 	if Engine.has_meta("EconomyManager"):
 		Engine.get_meta("EconomyManager").add_credits(value)
 	queue_free()

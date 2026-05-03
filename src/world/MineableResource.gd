@@ -268,6 +268,7 @@ func _on_mined() -> void:
 		gem.set_script(gem_script)
 		gem.set("col", shard_col)
 		gem.set("value", per_value)
+		gem.set("resource_type", resource_type)
 		gem.set("planet", nearest_p)
 		gem.set("surface_dist", min_d)
 		get_tree().root.add_child(gem)

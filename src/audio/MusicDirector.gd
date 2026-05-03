@@ -202,6 +202,15 @@ const PATTERN_COMBAT  := [5, 2, 5, 4, 5, 2, 5, 4]   # driving kick, snare 2+6
 const FILL_A := [5, 2, 5, 2, 5, 6, 5, 7]   # building fill
 const FILL_B := [1, 2, 4, 2, 1, 6, 2, 5]   # syncopated fill
 
+# 16th-note bass groove velocity patterns. 0.0 = rest, positive = hit velocity.
+# 16 steps per bar. Rests create breathing room and rhythmic personality.
+# These drive the pulsing bass independently of the arp/perc patterns.
+const BASS_GROOVE_SPACE   := [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.70, 0.0, 0.0, 0.0, 0.0, 0.55, 0.0, 0.0]
+const BASS_GROOVE_CRUISE  := [1.0, 0.0, 0.55, 0.0, 0.0, 0.75, 0.0, 0.0, 0.90, 0.0, 0.55, 0.0, 0.70, 0.0, 0.50, 0.65]
+const BASS_GROOVE_ATMO    := [1.0, 0.0, 0.0, 0.60, 0.0, 0.0, 0.75, 0.0, 0.85, 0.0, 0.0, 0.65, 0.0, 0.0, 0.70, 0.0]
+const BASS_GROOVE_SURFACE := [1.0, 0.0, 0.65, 0.50, 0.80, 0.0, 0.70, 0.60, 0.90, 0.0, 0.65, 0.50, 0.75, 0.0, 0.60, 0.55]
+const BASS_GROOVE_COMBAT  := [1.0, 0.65, 0.0, 0.75, 0.90, 0.0, 0.70, 0.80, 1.0, 0.60, 0.0, 0.75, 0.85, 0.0, 0.70, 0.65]
+
 # =====================================================================
 #  LOOKUP TABLES
 # =====================================================================
@@ -225,6 +234,27 @@ var _stinger_phase: float = 0.0
 var _stinger_freq: float = 440.0
 var _stinger_env: float = 0.0
 var _stinger_vol: float = 0.15
+
+# =====================================================================
+#  BASS PULSE ENGINE
+#  Pulsating 16th-note bass with retriggered envelope + harmonic series.
+#  The pulsing layer snaps to the chord root instantly (no portamento).
+#  The sustained pad layer glides (portamento) for warmth.
+#  Per-step harmonic brightness varies each retrigger for timbral movement.
+# =====================================================================
+
+var _bass_pulse_env: float = 0.0       # retriggered envelope (0..1)
+var _bass_pulse_decay: float = 0.998   # per-sample decay (recomputed each retrigger)
+var _bass_step_timer: float = 0.0      # synced to 16th-note grid
+
+# 16th-note step counter (0..15); initialized so first increment = step 0 (downbeat)
+var _bass_step_count: int = 15
+
+# Per-step harmonic brightness: randomized each retrigger → each note has unique timbre.
+var _bass_harm_level: float = 0.5
+
+# Harmonic LFO: slow global timbral drift (~0.08 Hz, ~12s per cycle)
+var _harmonic_lfo_phase: float = 0.0
 
 const _MAX_FILL_FRAMES := 1024
 
@@ -419,6 +449,13 @@ func _process(delta: float) -> void:
 		_perc_step_timer -= perc_step_dur
 		_advance_perc_step()
 
+	# ── Bass pulse step clock (16th notes — 2× denser than arp/perc) ────
+	_bass_step_timer += delta
+	var bass_step_dur := 60.0 / _arp_tempo / 4.0   # 16th notes
+	if _bass_step_timer >= bass_step_dur:
+		_bass_step_timer -= bass_step_dur
+		_retrigger_bass_pulse()
+
 	# Decay envelopes
 	_arp_envelope = maxf(_arp_envelope - delta * 2.5, 0.0)
 	_stinger_env  = maxf(_stinger_env  - delta * 4.0, 0.0)
@@ -457,8 +494,9 @@ func _advance_chord() -> void:
 	var root_idx: int = prog[_chord_index]
 	_chord_root_ratio = scale[root_idx]
 
-	# Bass target: chord root in octave 2
-	_bass_freq = ROOT_HZ * _chord_root_ratio * 2.0
+	# Bass target: chord root in octave 1 (C2 = 65 Hz — deep, full bass range).
+	# Pulsing layer snaps here immediately; pad layer glides via portamento.
+	_bass_freq = ROOT_HZ * _chord_root_ratio
 
 	# Build arp triad from chord root within the scale
 	var s_len := scale.size()
@@ -541,9 +579,9 @@ func _poll_game_state() -> void:
 func _update_music_targets() -> void:
 	match current_state:
 		MusicState.DEEP_SPACE:
-			_target_bass_volume     = 0.10
+			_target_bass_volume     = 0.12
 			_target_arp_volume      = 0.025
-			_target_perc_volume     = 0.02      # barely-there pulse
+			_target_perc_volume     = 0.30      # sparse kick — audible but distant
 			_target_filter_cutoff   = 500.0
 			_target_reverb_mix      = 0.55
 			_arp_tempo              = 35.0
@@ -560,9 +598,9 @@ func _update_music_targets() -> void:
 
 		MusicState.CRUISING:
 			var spd_t := clampf(_ship_speed / 5000.0, 0.0, 1.0)
-			_target_bass_volume     = 0.13
+			_target_bass_volume     = 0.15
 			_target_arp_volume      = 0.04
-			_target_perc_volume     = lerpf(0.04, 0.07, spd_t)
+			_target_perc_volume     = lerpf(0.30, 0.40, spd_t)
 			_target_filter_cutoff   = lerpf(700.0, 2200.0, spd_t)
 			_target_reverb_mix      = 0.4
 			_arp_tempo              = lerpf(45.0, 70.0, spd_t)
@@ -578,9 +616,9 @@ func _update_music_targets() -> void:
 			_swell_depth            = 0.20
 
 		MusicState.ATMOSPHERE:
-			_target_bass_volume     = 0.14
+			_target_bass_volume     = 0.16
 			_target_arp_volume      = 0.035
-			_target_perc_volume     = 0.04      # soft offbeat hats
+			_target_perc_volume     = 0.28      # soft offbeat hats — ethereal but audible
 			_target_filter_cutoff   = 1000.0
 			_target_reverb_mix      = 0.6
 			_arp_tempo              = 50.0
@@ -596,9 +634,9 @@ func _update_music_targets() -> void:
 			_swell_depth            = 0.25
 
 		MusicState.SURFACE:
-			_target_bass_volume     = 0.12
+			_target_bass_volume     = 0.15
 			_target_arp_volume      = 0.045
-			_target_perc_volume     = 0.07      # proper groove
+			_target_perc_volume     = 0.40      # proper groove — full and punchy
 			_target_filter_cutoff   = 1400.0
 			_target_reverb_mix      = 0.45
 			_arp_tempo              = 55.0
@@ -614,9 +652,9 @@ func _update_music_targets() -> void:
 			_swell_depth            = 0.15
 
 		MusicState.COMBAT:
-			_target_bass_volume     = 0.16
+			_target_bass_volume     = 0.18
 			_target_arp_volume      = 0.06
-			_target_perc_volume     = lerpf(0.08, 0.12, _combat_tension)
+			_target_perc_volume     = lerpf(0.42, 0.55, _combat_tension)
 			_target_filter_cutoff   = lerpf(1600.0, 3000.0, _combat_tension)
 			_target_reverb_mix      = 0.25
 			_arp_tempo              = lerpf(60.0, 80.0, _combat_tension)
@@ -692,7 +730,45 @@ func _sin_lut(phase: float) -> float:
 	return _sin_table[int(phase * 256.0) & 255]
 
 # =====================================================================
+#  BASS PULSE RETRIGGER
+# =====================================================================
+
+func _get_bass_groove() -> Array:
+	match current_state:
+		MusicState.DEEP_SPACE: return BASS_GROOVE_SPACE
+		MusicState.CRUISING:   return BASS_GROOVE_CRUISE
+		MusicState.ATMOSPHERE: return BASS_GROOVE_ATMO
+		MusicState.SURFACE:    return BASS_GROOVE_SURFACE
+		MusicState.COMBAT:     return BASS_GROOVE_COMBAT
+		_:                     return BASS_GROOVE_SPACE
+
+func _retrigger_bass_pulse() -> void:
+	_bass_step_count = (_bass_step_count + 1) % 16
+
+	# Look up velocity from the current state's groove pattern
+	var pattern := _get_bass_groove()
+	var vel: float = pattern[_bass_step_count]
+	if vel < 0.05:
+		return   # rest step — leave envelope decaying, no retrigger
+
+	# Per-step harmonic brightness: gives each note a unique timbre
+	_bass_harm_level = randf_range(0.25, 1.0)
+
+	_bass_pulse_env = vel
+	# Decay fills 65% of the 16th-note step — short gap ensures rhythmic definition
+	var step_dur := 60.0 / _arp_tempo / 4.0
+	_bass_pulse_decay = pow(0.01, 1.0 / (step_dur * 0.65 * _sample_rate))
+
+# =====================================================================
 #  BASS / PAD BUFFER FILL
+#  Three layers:
+#    1. PULSING BASS — fundamental + 2nd/3rd harmonics, retriggered envelope
+#       per 8th note. Centered for punch. Harmonics use wave-equation
+#       insight: 2nd harmonic = tbl[phase*512], 3rd = tbl[phase*768],
+#       no extra phase accumulators needed.
+#    2. SUSTAINED PAD — detuned oscillator, continuous with breathing LFO,
+#       stereo-spread for atmosphere.
+#    3. SUB — half-frequency sine, continuous, centered for warmth.
 # =====================================================================
 
 func _fill_bass_buffer() -> void:
@@ -702,15 +778,24 @@ func _fill_bass_buffer() -> void:
 	if frames <= 0:
 		return
 
-	var lfo := _sin_lut(_lfo_phase) * 0.25 + 0.75
+	# Harmonic LFO: global timbral drift (~0.08 Hz, ~12s cycle)
+	_harmonic_lfo_phase = fmod(_harmonic_lfo_phase + 0.08 * float(frames) / _sample_rate, 1.0)
+	var harm_lfo := _sin_lut(_harmonic_lfo_phase) * 0.3 + 0.5   # 0.2..0.8
+	# Combine slow LFO with per-step brightness (set each retrigger) for timbral movement
+	var harm_mix := clampf(harm_lfo * _bass_harm_level, 0.0, 1.0)
+
+	# Pad breathing LFO (continuous, slow)
+	var pad_lfo := _sin_lut(_lfo_phase) * 0.25 + 0.75
 	_lfo_phase = fmod(_lfo_phase + 0.12 * float(frames) / _sample_rate, 1.0)
 
 	var swell_env := 1.0 - _swell_depth + _swell_depth * sin(_swell_phase * PI)
 
-	var vol   := _bass_volume * lfo * swell_env
-	var freq1 := _bass_freq_actual
-	var freq2 := _bass_freq_actual * _bass_detune
-	var fsub  := _bass_freq_actual * 0.5
+	var vol   := _bass_volume * swell_env
+	# PULSING BASS uses _bass_freq directly — snaps to chord root, no portamento.
+	# PAD and SUB use _bass_freq_actual — glides smoothly (portamento) for warmth.
+	var freq_pulse := _bass_freq
+	var freq_pad   := _bass_freq_actual * _bass_detune
+	var freq_sub   := _bass_freq_actual * 0.5
 	var inv_r := 1.0 / _sample_rate
 
 	var p1  := _bass_phase_1
@@ -718,29 +803,48 @@ func _fill_bass_buffer() -> void:
 	var ps  := _bass_phase_sub
 	var tbl := _sin_table
 	var sw  := _stereo_width
+	var bpe := _bass_pulse_env
+	var bpd := _bass_pulse_decay
 
 	for i in frames:
+		# ── LAYER 1: PULSING BASS — snaps to chord root, retriggered per 16th note ──
 		var osc1 := tbl[int(p1 * 256.0) & 255]
-		var osc2 := tbl[int(p2 * 256.0) & 255]
-		var sub  := tbl[int(ps * 256.0) & 255]
+		# 2nd harmonic (octave above): phase × 2, amplitude 1/2 (wave equation 1/n)
+		var harm2 := tbl[int(p1 * 512.0) & 255]
+		# 3rd harmonic (octave + fifth): phase × 3, amplitude 1/3
+		var harm3 := tbl[int(p1 * 768.0) & 255]
+		# Blend: fundamental always present, harmonics scaled by per-step brightness
+		var bass_raw := osc1 + harm2 * (0.50 * harm_mix) + harm3 * (0.33 * harm_mix)
+		var pulse_s  := bass_raw * bpe * 0.44   # envelope shapes attack/decay
 
-		var left  := (osc1 * (0.35 + sw * 0.15) + osc2 * (0.35 - sw * 0.15) + sub * 0.30) * vol
-		var right := (osc1 * (0.35 - sw * 0.15) + osc2 * (0.35 + sw * 0.15) + sub * 0.30) * vol
+		# ── LAYER 2: SUSTAINED PAD — detuned, continuous, portamento glide ──
+		var pad := tbl[int(p2 * 256.0) & 255] * pad_lfo * 0.20
 
+		# ── LAYER 3: SUB — half-freq sine, continuous, centered for weight ──
+		var sub := tbl[int(ps * 256.0) & 255] * 0.24
+
+		# Mix: pulse + sub centered for punch; pad stereo-spread for spatial width
+		var center := (pulse_s + sub) * vol
+		var left  := center + pad * (0.5 + sw * 0.28) * vol
+		var right := center + pad * (0.5 - sw * 0.28) * vol
+
+		# Stinger overlay
 		if _stinger_env > 0.001:
 			var st := tbl[int(_stinger_phase * 256.0) & 255] * _stinger_env * _stinger_vol
 			left += st
 			right += st
 			_stinger_phase = fmod(_stinger_phase + _stinger_freq * inv_r, 1.0)
 
-		p1 = fmod(p1 + freq1 * inv_r, 1.0)
-		p2 = fmod(p2 + freq2 * inv_r, 1.0)
-		ps = fmod(ps + fsub  * inv_r, 1.0)
+		p1 = fmod(p1 + freq_pulse * inv_r, 1.0)
+		p2 = fmod(p2 + freq_pad   * inv_r, 1.0)
+		ps = fmod(ps + freq_sub   * inv_r, 1.0)
+		bpe *= bpd
 		_drone_playback.push_frame(Vector2(left, right))
 
 	_bass_phase_1   = p1
 	_bass_phase_2   = p2
 	_bass_phase_sub = ps
+	_bass_pulse_env = bpe
 
 # =====================================================================
 #  ARPEGGIATOR

@@ -398,7 +398,7 @@ func _ready() -> void:
 	_sfx_ship_thruster = AudioStreamPlayer.new()
 	_sfx_ship_thruster.bus = "Master"
 	_sfx_ship_thruster.stream = thruster_stream
-	_sfx_ship_thruster.volume_db = -28.0   # start quiet; increases with speed
+	_sfx_ship_thruster.volume_db = -40.0   # start very quiet; increases with speed
 	_sfx_ship_thruster.pitch_scale = 0.70
 	add_child(_sfx_ship_thruster)
 
@@ -444,7 +444,7 @@ func _setup_music_bus() -> void:
 		AudioServer.set_bus_name(bus_idx, "Music")
 		AudioServer.set_bus_send(bus_idx, "Master")
 
-	AudioServer.set_bus_volume_db(bus_idx, -8.0)
+	AudioServer.set_bus_volume_db(bus_idx, -2.0)
 
 	# Clear existing effects (hot-reload safety)
 	while AudioServer.get_bus_effect_count(bus_idx) > 0:
@@ -1366,7 +1366,7 @@ func update_thruster_audio(speed: float) -> void:
 	# Normalise speed: 0 = slow cruise (~100 u/s), 1 = full warp (~6000+ u/s)
 	var t := clampf((speed - 60.0) / 5940.0, 0.0, 1.0)
 	_sfx_ship_thruster.pitch_scale = lerpf(0.68, 1.38, t)
-	_sfx_ship_thruster.volume_db   = lerpf(-28.0, -16.0, t)
+	_sfx_ship_thruster.volume_db   = lerpf(-40.0, -24.0, t)
 	if not _sfx_ship_thruster.playing:
 		print("[SFX] Starting thruster (speed=", speed, " vol=", _sfx_ship_thruster.volume_db, ")")
 		_sfx_ship_thruster.play()

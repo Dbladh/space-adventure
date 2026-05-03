@@ -179,17 +179,12 @@ func get_terrain_elevation(sn: Vector3) -> float:
 			var layer_step = floor(local_geo / terrace_height) + smoothstep(0.15, 0.85, h_frac)
 			local_geo = layer_step * terrace_height
 	
-	# CONTINENTS VS OCEANS: Large-scale landmasses
+	# CONTINENTS VS OCEANS: Large-scale landmasses with varied islands
 	var c_n: float = noise.get_noise_3dv(sn * 2.2)
-	var cont_mask: float = smoothstep(-0.1, 0.1, c_n)
+	c_n += noise.get_noise_3dv(sn * 6.5) * 0.5
+	c_n += noise.get_noise_3dv(sn * 15.0) * 0.25
+	var cont_mask: float = smoothstep(-0.2, 0.2, c_n + 0.3)
 	var abyss_depth: float = SEA_LEVEL - 400.0
-	
-	# ACE METROPOLITAN DECENTRALIZATION: Hyper-Localized Culling (10-20 Small Cities)
-	# Using pow^3 to non-linearly squish the hotspots into tiny archipelagos
-	var raw_global = sin(sn.x * 1.5) * cos(sn.y * 1.4 + sn.z * 1.2)
-	var global_mask = pow(max(0.0, raw_global), 3.0) 
-	var n_nodes = pow(max(0.0, sin(sn.x * 12.0) * cos(sn.y * 11.0) * sin(sn.z * 13.0)), 2.0)
-	var major_mask = smoothstep(0.4, 0.6, n_nodes * global_mask) * cont_mask
 	
 	# Calculate natural terrain height (Continental Land vs Oceanic Abyss)
 	var elev = lerp(abyss_depth, local_geo + (SEA_LEVEL + 50.0), cont_mask)

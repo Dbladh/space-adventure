@@ -778,18 +778,13 @@ func get_terrain_elevation(sn: Vector3) -> float:
 			local_geo = layer_step * terrace_height
 	
 	var c_n: float = noise.get_noise_3dv(sn * 2.2)
-	var cont_mask: float = smoothstep(-0.1, 0.1, c_n)
+	c_n += noise.get_noise_3dv(sn * 6.5) * 0.5
+	c_n += noise.get_noise_3dv(sn * 15.0) * 0.25
+	var cont_mask: float = smoothstep(-0.2, 0.2, c_n + 0.3)
 	var S_LVL: float = -120.0
 	var abyss_depth: float = S_LVL - 400.0
 	
-	# ORGANIC MASK: Restore standard continent mask for orbital visibility.
-	var major_mask = smoothstep(-0.1, 0.1, c_n)
-	
-	# Force 'Mega-Continent' above sea level
-	var base_elev = lerp(abyss_depth, local_geo + (S_LVL + 50.0), cont_mask)
-	var island_elev = S_LVL + 850.0 + (local_geo * 0.1) 
-	var elev = lerp(base_elev, island_elev, major_mask)
-	
+	var elev = lerp(abyss_depth, local_geo + (S_LVL + 50.0), cont_mask)
 	return elev
 
 func _ensure_impostor_active(active: bool) -> void:

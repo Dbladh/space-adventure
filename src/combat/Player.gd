@@ -513,7 +513,7 @@ func _on_player_death() -> void:
 	var t = get_tree().create_timer(4.0)
 	t.timeout.connect(func(): get_tree().reload_current_scene())
 
-func _trigger_hit_flash(intensity: float) -> void:
+func _trigger_hit_flash(intensity: float, color: Color = Color.CRIMSON, shake: bool = true) -> void:
 	if not ship_model: return
 	if flash_tween: flash_tween.kill()
 	flash_tween = create_tween()
@@ -529,8 +529,13 @@ func _trigger_hit_flash(intensity: float) -> void:
 				if m is ShaderMaterial: mats.append(m)
 		nodes.append_array(n.get_children())
 	
-	for m in mats: m.set_shader_parameter("flash_intensity", intensity)
-	shake_intensity += intensity * 12.0 # Impact Jitter
+	for m in mats: 
+		m.set_shader_parameter("flash_intensity", intensity)
+		m.set_shader_parameter("flash_color", color)
+		
+	if shake:
+		shake_intensity += intensity * 12.0 # Impact Jitter
+		
 	flash_tween.tween_method(func(v): 
 		for m in mats: m.set_shader_parameter("flash_intensity", v)
 	, intensity, 0.0, 0.35).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)

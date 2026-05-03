@@ -4,6 +4,7 @@ render_mode diffuse_toon, specular_toon;
 uniform sampler2D albedo_tex : source_color;
 uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
 uniform float flash_intensity : hint_range(0.0, 1.0) = 0.0;
+uniform vec3 flash_color : source_color = vec3(1.0, 0.1, 0.0);
 
 varying vec3 v_color;
 varying vec2 v_uv;
@@ -18,8 +19,8 @@ void fragment() {
 	vec4 tex_col = texture(albedo_tex, v_uv);
 	vec3 base_col = v_color * tex_col.rgb; 
 	
-	// ACE DAMAGE FLASH: Mix albedo with Crimson Red based on impact intensity
-	ALBEDO = mix(base_col, vec3(1.0, 0.1, 0.0) * 1.5, flash_intensity);
+	// ACE DAMAGE FLASH: Mix albedo with flash_color based on impact intensity
+	ALBEDO = mix(base_col, flash_color * 1.5, flash_intensity);
 	
 	// ACE AUTO-NORMAL: Procedurally generate 3D depth from albedo intensity
 	// Adjusted Z-intensity to 0.5 to prevent 'backwards' lighting artifacts.

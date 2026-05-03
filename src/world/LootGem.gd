@@ -26,6 +26,7 @@ var spin_speed: float = 4.0
 
 # Whoosh effect during homing
 var _whoosh_player: AudioStreamPlayer3D = null
+var _has_played_whoosh: bool = false
 
 func _ready() -> void:
 	if _shared_mesh == null:
@@ -41,36 +42,39 @@ func _ready() -> void:
 	mi.material_override = mat
 	add_child(mi)
 
+
+
 	# Setup whoosh effect (3D spatial audio)
 	_whoosh_player = AudioStreamPlayer3D.new()
 	_whoosh_player.bus = "Master"
 	_whoosh_player.stream = load("res://assets/resources/audio/item_whoosh.wav")
-	_whoosh_player.volume_db = -20.0
-	_whoosh_player.max_distance = 2000.0
+	_whoosh_player.volume_db = -18.0 # Even quieter base volume
+	_whoosh_player.max_distance = 3000.0
+	_whoosh_player.unit_size = 1200.0 # Maintain spatial approach bubble
 	_whoosh_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	_whoosh_player.pitch_scale = randf_range(0.4, 0.95) # Global randf_range for distinct variation per shard
 	add_child(_whoosh_player)
 
 	# EXPLOSION VELOCITY: random direction biased upward (away from planet
 	# centre) so shards arc dramatically above the mineral before falling back
 	# to the surface.  Increased velocity from 220-420 to 380-680 so the burst
 	# feels more violent and shards spread wider across the surface.
-	var rng = RandomNumberGenerator.new(); rng.randomize()
 	var up_dir: Vector3
 	if planet:
 		up_dir = (global_position - planet.global_position).normalized()
 	else:
 		up_dir = Vector3.UP
 	var random_dir = Vector3(
-		rng.randf_range(-1.0, 1.0),
-		rng.randf_range(-0.2, 0.6),
-		rng.randf_range(-1.0, 1.0)
+		randf_range(-1.0, 1.0),
+		randf_range(-0.2, 0.6),
+		randf_range(-1.0, 1.0)
 	).normalized()
 	# 0.8 up bias (increased from 0.7) keeps the burst arc visually consistent
 	# and more upward; the random component spreads shards outward.
 	var explode_dir = (up_dir * 0.8 + random_dir * 0.8).normalized()
-	velocity = explode_dir * rng.randf_range(380.0, 680.0)
-	spin_axis = Vector3(rng.randf(), rng.randf(), rng.randf()).normalized()
-	spin_speed = rng.randf_range(3.0, 7.0)
+	velocity = explode_dir * randf_range(380.0, 680.0)
+	spin_axis = Vector3(randf(), randf(), randf()).normalized()
+	spin_speed = randf_range(3.0, 7.0)
 
 static func _build_shared_mesh() -> ArrayMesh:
 	# ACE GEOMETRY: Mini-Rupee (Emerald cut). Vertex colors omitted so per-gem
@@ -156,20 +160,10 @@ func _process(delta: float) -> void:
 
 			rotate(spin_axis, delta * (spin_speed * 2.0))
 
-			# Whoosh effect: play and modulate based on distance
-			if _whoosh_player:
-				if not _whoosh_player.playing:
-					_whoosh_player.play()
-
-				# Volume increases as it gets closer (inverse distance)
-				# At 2000 units away: very quiet, at 100 units: loud
-				var vol_factor = clampf(1.0 - (dist / 2000.0), 0.0, 1.0)
-				_whoosh_player.volume_db = -40.0 + vol_factor * 20.0  # -40dB to -20dB
-
-				# Pitch increases as it gets closer (Doppler-like effect)
-				# At 2000 units: 0.8, at 100 units: 1.4
-				var pitch_factor = clampf(dist / 2000.0, 0.0, 1.0)
-				_whoosh_player.pitch_scale = 1.4 - pitch_factor * 0.6  # 1.4 to 0.8
+			# Whoosh effect: play once when in range (1 second out) and let 3D spatial audio handle volume
+			if _whoosh_player and not _has_played_whoosh and dist < 1800.0:
+				_whoosh_player.play()
+				_has_played_whoosh = true
 
 			if dist < 80.0:
 				_on_collected()
@@ -178,6 +172,10 @@ func _on_collected() -> void:
 	# Stop whoosh effect
 	if _whoosh_player and _whoosh_player.playing:
 		_whoosh_player.stop()
+
+	# Flash the ship white without shaking
+	if target_player and target_player.has_method("_trigger_hit_flash"):
+		target_player.call("_trigger_hit_flash", 0.7, Color.WHITE, false)
 
 	# Play item collect sound
 	var music_director = get_tree().get_nodes_in_group("MusicDirector")

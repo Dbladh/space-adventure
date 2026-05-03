@@ -532,6 +532,38 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	_apply_planetary_lod_policy(mmi_l, false)
 	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; add_child(mmi_l)
 
+	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Copper", 50, 8.0)
+
+func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: String, max_count: int, sphere_r: float) -> void:
+	if _is_mobile_perf(): return
+	var proxy_script = load("res://src/world/SurfacePropProxy.gd")
+	if not proxy_script: return
+
+	var player_pos := Vector3.ZERO
+	if is_instance_valid(planet):
+		var pl = planet.get("player")
+		if is_instance_valid(pl):
+			player_pos = pl.global_position
+
+	var sphere := SphereShape3D.new()
+	sphere.radius = sphere_r
+
+	var spawned := 0
+	for i in range(points.size()):
+		if spawned >= max_count: break
+		var world_pos: Vector3 = global_transform * points[i].origin
+		if world_pos.distance_to(player_pos) > PROP_LOD_HIGH_END * 1.5:
+			continue
+		var col := CollisionShape3D.new()
+		col.shape = sphere
+		var proxy := StaticBody3D.new()
+		proxy.set_script(proxy_script)
+		proxy.add_child(col)
+		add_child(proxy)
+		proxy.position = points[i].origin
+		proxy.call("setup", mmis, i, res_type)
+		spawned += 1
+
 func _is_mobile_perf() -> bool:
 	return is_instance_valid(planet) and bool(planet.get("mobile_perf"))
 
@@ -627,6 +659,8 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 		_apply_planetary_lod_policy(mti_h, true)
 		_apply_planetary_lod_policy(mti_m, false)
 		_apply_planetary_lod_policy(mti_t, true) # Trunks only visible in High-Detail zone
+
+		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Silver", 25, 15.0)
 	else:
 		# Mid/Far Chunk: Single simplified MultiMesh
 		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true; mm.instance_count = n

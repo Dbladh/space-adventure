@@ -55,6 +55,7 @@ var health_bar_fill: ColorRect = null
 
 # WEAPONS
 var fire_cooldown: float = 0.0
+var _was_boosting: bool = false  # Track boost state for SFX trigger
 const FIRE_RATE: float = 0.09 # ACE STARFOX CADENCE: Faster, snappier pulse
 var bolt_script: GDScript = null
 var _prev_fire_key: bool = false 
@@ -783,6 +784,13 @@ func _process_ace_flight(delta: float) -> void:
 	raw_reverse = pow(clamp((raw_reverse - 0.05) / 0.95, 0.0, 1.0), 1.8)
 	# BOOST/WARP: gamepad A, keyboard Shift, OR mobile BOOST button
 	var is_warping: bool = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT) or mobile_boost
+
+	# Play boost SFX on boost activation
+	if is_warping and not _was_boosting:
+		var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
+		if md_nodes.size() > 0 and md_nodes[0].has_method("play_boost"):
+			md_nodes[0].play_boost()
+	_was_boosting = is_warping
 	# HYPERDRIVE: L1 + R1 held together = 3rd thrust tier (5× warp)
 	# L1 = JOY_BUTTON_LEFT_SHOULDER, R1 = JOY_BUTTON_RIGHT_SHOULDER
 	var is_hyperdrive: bool = is_warping \
@@ -1188,7 +1196,12 @@ func _process_ace_flight(delta: float) -> void:
 
 func _fire_alternating_cannon() -> void:
 	fire_cooldown = FIRE_RATE
-	
+
+	# Play fire SFX
+	var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
+	if md_nodes.size() > 0 and md_nodes[0].has_method("play_fire"):
+		md_nodes[0].play_fire()
+
 	var wing_up = global_transform.basis.x.normalized()
 	var main_scene = get_parent()
 	if not main_scene: return
@@ -1566,9 +1579,24 @@ func _process(delta: float) -> void:
 			fire_cooldown = 0.18 # ACE RPS NERF: 5.5 shots per second
 		_prev_fire_key = cur_fire
 
+	# Manage thrusters audio (play/stop based on whether ship is moving)
+	if in_ship:
+		var is_moving = velocity.length() > 100.0
+		var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
+		if md_nodes.size() > 0:
+			if is_moving and md_nodes[0].has_method("play_thrusters_loop"):
+				md_nodes[0].play_thrusters_loop()
+			elif not is_moving and md_nodes[0].has_method("stop_thrusters"):
+				md_nodes[0].stop_thrusters()
+
 
 
 func _trigger_explosion_inline(pos: Vector3, target: Node, normal: Vector3, is_big: bool = false) -> void:
+	# Play explosion SFX
+	var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
+	if md_nodes.size() > 0 and md_nodes[0].has_method("play_explosion"):
+		md_nodes[0].play_explosion(is_big)
+
 	_spawn_impact_flash(pos, normal)
 	# MOBILE: Skip scorch Decals entirely. Decal nodes are forward-cluster
 	# expensive on tiled-GPU chips and the retro toon aesthetic hides their absence.

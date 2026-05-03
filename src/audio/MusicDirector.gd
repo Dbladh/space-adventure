@@ -50,6 +50,16 @@ var _perc_player: AudioStreamPlayer
 var _perc_playback: AudioStreamGeneratorPlayback
 
 # =====================================================================
+#  SFX PLAYERS
+# =====================================================================
+
+var _sfx_ship_fire: AudioStreamPlayer
+var _sfx_ship_boost: AudioStreamPlayer
+var _sfx_ship_thrusters: AudioStreamPlayer
+var _sfx_explosion_small: AudioStreamPlayer
+var _sfx_explosion_big: AudioStreamPlayer
+
+# =====================================================================
 #  SYNTH ENGINE
 # =====================================================================
 
@@ -319,6 +329,33 @@ func _ready() -> void:
 	add_child(_perc_player)
 	_perc_player.play()
 	_perc_playback = _perc_player.get_stream_playback()
+
+	# SFX players (sampled audio effects for ship/combat)
+	_sfx_ship_fire = AudioStreamPlayer.new()
+	_sfx_ship_fire.bus = "Master"
+	_sfx_ship_fire.stream = load("res://assets/resources/audio/ship_fire.wav")
+	add_child(_sfx_ship_fire)
+
+	_sfx_ship_boost = AudioStreamPlayer.new()
+	_sfx_ship_boost.bus = "Master"
+	_sfx_ship_boost.stream = load("res://assets/resources/audio/ship_boost.wav")
+	add_child(_sfx_ship_boost)
+
+	_sfx_ship_thrusters = AudioStreamPlayer.new()
+	_sfx_ship_thrusters.bus = "Master"
+	_sfx_ship_thrusters.stream = load("res://assets/resources/audio/ship_thrusters.wav")
+	_sfx_ship_thrusters.volume_db = -6.0
+	add_child(_sfx_ship_thrusters)
+
+	_sfx_explosion_small = AudioStreamPlayer.new()
+	_sfx_explosion_small.bus = "Master"
+	_sfx_explosion_small.stream = load("res://assets/resources/audio/explosion_small.wav")
+	add_child(_sfx_explosion_small)
+
+	_sfx_explosion_big = AudioStreamPlayer.new()
+	_sfx_explosion_big.bus = "Master"
+	_sfx_explosion_big.stream = load("res://assets/resources/audio/explosion_big.mp3")
+	add_child(_sfx_explosion_big)
 
 	# Initialize bass frequency
 	_bass_freq = ROOT_HZ * 2.0
@@ -1066,3 +1103,31 @@ func get_state_name() -> String:
 		MusicState.SURFACE:    return "SURFACE"
 		MusicState.COMBAT:     return "COMBAT"
 	return "UNKNOWN"
+
+# =====================================================================
+#  SFX PLAYBACK
+# =====================================================================
+
+func play_fire() -> void:
+	if _sfx_ship_fire:
+		_sfx_ship_fire.stop()
+		_sfx_ship_fire.play()
+
+func play_boost() -> void:
+	if _sfx_ship_boost:
+		_sfx_ship_boost.stop()
+		_sfx_ship_boost.play()
+
+func play_thrusters_loop() -> void:
+	if _sfx_ship_thrusters and not _sfx_ship_thrusters.playing:
+		_sfx_ship_thrusters.play()
+
+func stop_thrusters() -> void:
+	if _sfx_ship_thrusters:
+		_sfx_ship_thrusters.stop()
+
+func play_explosion(is_big: bool = false) -> void:
+	var sfx = _sfx_explosion_big if is_big else _sfx_explosion_small
+	if sfx:
+		sfx.stop()
+		sfx.play()

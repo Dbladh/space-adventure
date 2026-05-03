@@ -147,6 +147,11 @@ func _process(delta: float) -> void:
 				_on_collected()
 
 func _on_collected() -> void:
+	# Play item collect sound
+	var music_director = get_tree().get_nodes_in_group("MusicDirector")
+	if music_director.size() > 0:
+		music_director[0].call("play_item_collect")
+
 	# Add to economy
 	var economy = get_node_or_null("/root/EconomyManager")
 	if economy: economy.call("add_credits", value)

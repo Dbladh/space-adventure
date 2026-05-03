@@ -59,6 +59,7 @@ var _sfx_ship_thruster: AudioStreamPlayer  # ship_thrusters.wav looped, normal m
 var _sfx_ship_boost: AudioStreamPlayer    # ship_boost.wav looped, warp/boost mode
 var _sfx_explosion_small: AudioStreamPlayer
 var _sfx_explosion_big: AudioStreamPlayer
+var _sfx_item_collect: AudioStreamPlayer  # item collect/shard pickup
 
 # Thruster fadeout state
 var _thruster_fadeout_time: float = 0.0
@@ -439,6 +440,13 @@ func _ready() -> void:
 	_sfx_explosion_big.stream = load("res://assets/resources/audio/explosion_big.mp3")
 	_sfx_explosion_big.volume_db = -4.0
 	add_child(_sfx_explosion_big)
+
+	# Item collection — shard pickup sound
+	_sfx_item_collect = AudioStreamPlayer.new()
+	_sfx_item_collect.bus = "Master"
+	_sfx_item_collect.stream = load("res://assets/resources/audio/item_collect.wav")
+	_sfx_item_collect.volume_db = -10.0
+	add_child(_sfx_item_collect)
 
 	# Initialize bass frequency
 	_bass_freq = ROOT_HZ * 2.0
@@ -1455,3 +1463,8 @@ func play_explosion(is_big: bool = false) -> void:
 	if sfx:
 		sfx.stop()
 		sfx.play()
+
+func play_item_collect() -> void:
+	if _sfx_item_collect:
+		_sfx_item_collect.stop()
+		_sfx_item_collect.play()

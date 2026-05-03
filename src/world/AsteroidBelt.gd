@@ -23,6 +23,7 @@ var mmi_phys_med: MultiMeshInstance3D # Intermediate Hazards (1.5k, Med Detail)
 var mmi_phys_high: MultiMeshInstance3D # Near-Field 'Hero' Rocks (1.5k, High Detail)
 var player: Node3D
 var _health_component_script: Script = null
+var _mine_component_script: Script = null
 var mobile_perf: bool = false
 
 # LOD CONSTANTS
@@ -45,6 +46,7 @@ func _ready() -> void:
 	rock_mesh_med = _build_faceted_rock_mesh(8) # Standard
 	rock_mesh_high = _build_faceted_rock_mesh(12) # High-Fidelity
 	_health_component_script = load("res://src/combat/HealthComponent.gd")
+	_mine_component_script = load("res://src/world/AsteroidMineComponent.gd")
 	_spawn_deterministic_belt()
 	set_process(true)
 	
@@ -214,10 +216,23 @@ func _process_physical_spawning() -> void:
 		var shape = SphereShape3D.new(); shape.radius = 6.0; collision.shape = shape
 		asteroid.add_child(collision)
 		
+		var hc = null
 		if _health_component_script:
-			var hc = Node.new(); hc.set_script(_health_component_script); hc.name = "HealthComponent"; hc.set("max_health", 100.0); asteroid.add_child(hc)
-		
-		add_child(asteroid); asteroid.add_to_group("Targets"); asteroid.add_to_group("Destructible"); asteroids.append(asteroid); coll_nodes.append(collision)
+			hc = Node.new(); hc.set_script(_health_component_script); hc.name = "HealthComponent"; hc.set("max_health", 100.0); asteroid.add_child(hc)
+
+		var mc = null
+		if _mine_component_script:
+			mc = Node3D.new(); mc.set_script(_mine_component_script); mc.name = "MineComponent"; asteroid.add_child(mc)
+
+		# Connect health depletion to mining destruction
+		if hc and mc:
+			hc.health_depleted.connect(mc._on_health_depleted)
+
+		# Delegate take_damage to HealthComponent
+		if hc:
+			asteroid.take_damage = func(amount: float) -> void: hc.take_damage(amount)
+
+		add_child(asteroid); asteroid.add_to_group("Targets"); asteroid.add_to_group("Destructible"); asteroid.add_to_group("Mineable"); asteroids.append(asteroid); coll_nodes.append(collision)
 		_spawn_idx += 1
 
 func _build_faceted_rock_mesh(sides: int) -> ArrayMesh:

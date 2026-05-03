@@ -1,5 +1,7 @@
 class_name PlanetSeedKitchen
 
+const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+
 # PlanetSeedKitchen.gd
 # Deterministic planet seed + resource list derivation from three forge ingredients.
 #

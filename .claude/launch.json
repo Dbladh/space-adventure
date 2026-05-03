@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "godot4",
+      "runtimeExecutable": "/Applications/Godot 4.app/Contents/MacOS/Godot",
+      "runtimeArgs": ["--path", ".", "--debug-server", "tcp://127.0.0.1:6006"],
+      "port": 8080
+    }
+  ]
+}

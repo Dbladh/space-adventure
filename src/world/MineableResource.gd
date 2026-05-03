@@ -1,5 +1,7 @@
 extends StaticBody3D
 
+const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+
 # MineableResource.gd
 # Managed by THE PROCEDURALIST.
 # A deterministic, low-poly mineral deposit that responds to projectile impacts.
@@ -150,12 +152,12 @@ static func _build_blocky_mesh() -> ArrayMesh:
 	var h := s * 3.5   # total height
 	var tw := s * 0.8  # top half-width (slight taper)
 	# Base corners (y=0), top corners (y=h)
-	var b := [Vector3(-w, 0, -w), Vector3(w, 0, -w), Vector3(w, 0, w), Vector3(-w, 0, w)]
-	var t := [Vector3(-tw, h, -tw), Vector3(tw, h, -tw), Vector3(tw, h, tw), Vector3(-tw, h, tw)]
+	var b: Array[Vector3] = [Vector3(-w, 0, -w), Vector3(w, 0, -w), Vector3(w, 0, w), Vector3(-w, 0, w)]
+	var t: Array[Vector3] = [Vector3(-tw, h, -tw), Vector3(tw, h, -tw), Vector3(tw, h, tw), Vector3(-tw, h, tw)]
 	# 4 side faces
 	for i in range(4):
 		var j := (i + 1) % 4
-		var n := (b[j] - b[i]).cross(t[i] - b[i]).normalized()
+		var n: Vector3 = (b[j] - b[i]).cross(t[i] - b[i]).normalized()
 		st.set_normal(n); st.set_color(col); st.add_vertex(b[i])
 		st.set_normal(n); st.set_color(col); st.add_vertex(b[j])
 		st.set_normal(n); st.set_color(col); st.add_vertex(t[i])

@@ -1,5 +1,7 @@
 extends Node
 
+const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+
 # InventoryManager.gd
 # Tracks resource stacks collected by the player.
 # Registered in Engine.set_meta("InventoryManager") so any script can reach it

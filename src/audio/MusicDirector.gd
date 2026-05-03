@@ -1477,4 +1477,3 @@ func play_item_collect() -> void:
 	if _sfx_item_collect:
 		_sfx_item_collect.stop()
 		_sfx_item_collect.play()
-

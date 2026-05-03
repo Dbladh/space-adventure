@@ -109,6 +109,7 @@ var hud_target_lead: Control = null
 var hud_threat_arrows: Array = []
 var snow_particles: CPUParticles3D = null
 var _cur_aim_point: Vector3 = Vector3.ZERO
+var auto_lock_enabled: bool = true # Auto-lock targets on mobile/when firing
 
 # MOBILE PERF: cached once at _ready so hot paths don't call OS.get_name() every frame.
 var _mobile_perf: bool = false
@@ -1351,14 +1352,17 @@ func _process(delta: float) -> void:
 			# off-screen threat arrows. Saves a second SceneTree group traversal.
 			var enemies_pool = get_tree().get_nodes_in_group("Enemies") if is_inside_tree() else []
 			if is_inside_tree():
-				var highest_dot = 0.98 # ACE PRECISION: Required 11-degree 'Close Proximity' cone
+				# Mobile needs wider lock-on cone (≈16°) vs desktop precision (11°)
+				var highest_dot = 0.95 if _mobile_perf else 0.98
 				const RADAR_RANGE_SQ := 25000.0 * 25000.0 # squared cutoff avoids sqrt per candidate
 
-				# PRECEDENCE SCAN: Prioritize Enemies over passive targets.
-				# Enemies first; Targets (asteroids, ~1800 on mobile) only scanned if no enemy locks.
+				# PRECEDENCE SCAN: Prioritize Enemies over passive targets (Targets, Mineable, Destructible).
+				# Enemies first; if no enemy found, search all mineable/destructible objects.
 				var candidate_pools = [
 					enemies_pool,
-					get_tree().get_nodes_in_group("Targets")
+					get_tree().get_nodes_in_group("Targets"),
+					get_tree().get_nodes_in_group("Mineable"),
+					get_tree().get_nodes_in_group("Destructible")
 				]
 
 				for pool in candidate_pools:
@@ -1373,10 +1377,15 @@ func _process(delta: float) -> void:
 						if dot > highest_dot:
 							highest_dot = dot
 							best_target = t
-					# If we found an enemy in the first pool, don't even look at rocks
+					# If we found an enemy in the first pool, don't even look at passive targets
 					if best_target: break
 
 			lock_on_target = best_target
+
+			# AUTO-LOCK: On mobile or when firing, automatically pin the best target
+			if auto_lock_enabled and lock_on_target and not is_instance_valid(pinned_target):
+				if _mobile_perf or mobile_fire:
+					pinned_target = lock_on_target
 
 			# FLEET THREAT TRACKER: Draw arrows for ALL off-screen enemies
 			var adversaries = enemies_pool

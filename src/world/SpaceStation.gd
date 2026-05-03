@@ -37,7 +37,7 @@ var _worlds_header: Label = null
 var _ui_visible: bool = false
 
 # Each entry: { node: Node3D, r1: String, r2: String, r3: String }
-var _active_planets: Array = []
+var _active_planets: Array[Dictionary] = []
 
 func _ready() -> void:
 	add_to_group("SpaceStation")

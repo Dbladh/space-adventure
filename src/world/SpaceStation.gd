@@ -9,8 +9,10 @@ extends Node3D
 const DOCK_RANGE: float = 200000.0
 const MAX_PLANETS: int = 3
 
-const RESOURCE_NAMES: Array = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
+const RESOURCE_NAMES: Array = ["Stone", "Wood", "Copper", "Silver", "Gold", "Platinum", "Diamond"]
 const RESOURCE_ABBREV: Dictionary = {
+	"Stone":    "St",
+	"Wood":     "Wd",
 	"Copper":   "Cu",
 	"Silver":   "Ag",
 	"Gold":     "Au",
@@ -18,6 +20,8 @@ const RESOURCE_ABBREV: Dictionary = {
 	"Diamond":  "Di",
 }
 const RESOURCE_VALUES: Dictionary = {
+	"Stone":    5,
+	"Wood":     8,
 	"Copper":   10,
 	"Silver":   50,
 	"Gold":     250,

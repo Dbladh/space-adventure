@@ -7,7 +7,7 @@ extends Node
 
 signal inventory_changed(resource_type: String, new_amount: int)
 
-const RESOURCE_NAMES: Array[String] = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
+const RESOURCE_NAMES: Array[String] = ["Stone", "Wood", "Copper", "Silver", "Gold", "Platinum", "Diamond"]
 
 var _stacks: Dictionary = {}
 

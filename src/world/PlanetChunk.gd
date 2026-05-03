@@ -431,17 +431,12 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
 			# WILDERNESS ZONE: Minerals & Nature
 			# -----------------------------------
-			# 1. MINERAL PRIORITY: Colossal Rarity (1/10th of previous)
-			if (h_v % 10000) < 3:
+			# 1. MINERAL PRIORITY: Colossal Rarity
+			if (h_v % 20000) < 3:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
-					var types = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
-					var r_pick = h_v % 100
-					var type = "Copper"
-					if r_pick > 99: type = "Diamond"
-					elif r_pick > 90: type = "Platinum"
-					elif r_pick > 75: type = "Gold"
-					elif r_pick > 45: type = "Silver"
+					# 90% Copper crystal, 10% Silver ore chunk
+					var type = "Silver" if (h_v >> 7) % 10 == 0 else "Copper"
 					
 					# ACE: Small offset (5.0) since octahedron is now tip-anchored
 					var xf = _get_object_xform(cp * (radius + h + 5.0), cp, detail_n, 1.0)
@@ -532,7 +527,7 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	_apply_planetary_lod_policy(mmi_l, false)
 	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; add_child(mmi_l)
 
-	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Copper", 50, 8.0)
+	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Stone", 50, 8.0)
 
 func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: String, max_count: int, sphere_r: float) -> void:
 	if _is_mobile_perf(): return
@@ -660,7 +655,7 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 		_apply_planetary_lod_policy(mti_m, false)
 		_apply_planetary_lod_policy(mti_t, true) # Trunks only visible in High-Detail zone
 
-		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Silver", 25, 15.0)
+		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 25, 15.0)
 	else:
 		# Mid/Far Chunk: Single simplified MultiMesh
 		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true; mm.instance_count = n

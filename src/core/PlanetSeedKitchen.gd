@@ -9,11 +9,13 @@ class_name PlanetSeedKitchen
 # = 35 distinct forgeable worlds.
 
 const RESOURCE_PRIMES: Dictionary = {
-	"Copper":   2,
-	"Silver":   3,
-	"Gold":     5,
-	"Platinum": 7,
-	"Diamond":  11,
+	"Stone":    2,
+	"Wood":     3,
+	"Copper":   5,
+	"Silver":   7,
+	"Gold":     11,
+	"Platinum": 13,
+	"Diamond":  17,
 }
 
 static func make_seed(r1: String, r2: String, r3: String) -> int:

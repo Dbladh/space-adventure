@@ -9,12 +9,12 @@ extends StaticBody3D
 # PlanetGen's death_row system frees the proxy automatically — no manual cleanup needed.
 
 const GEM_VALUE: Dictionary = {
-	"Copper": 30,
-	"Silver": 80,
+	"Stone": 15,
+	"Wood":  25,
 }
 const GEM_COLOR: Dictionary = {
-	"Copper": Color(0.48, 0.18, 0.08),
-	"Silver": Color(0.7,  0.7,  0.75),
+	"Stone": Color(0.55, 0.52, 0.48),   # grey
+	"Wood":  Color(0.45, 0.28, 0.12),   # brown
 }
 
 var resource_type: String = "Copper"

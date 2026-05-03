@@ -105,11 +105,18 @@ static func _get_or_build_mesh(type: String) -> ArrayMesh:
 	if _shared_meshes.has(type):
 		return _shared_meshes[type]
 
+	var mesh: ArrayMesh
+	if type == "Silver":
+		mesh = _build_blocky_mesh()
+	else:
+		mesh = _build_octahedron_mesh(type)
+	_shared_meshes[type] = mesh
+	return mesh
+
+static func _build_octahedron_mesh(type: String) -> ArrayMesh:
 	var col := _color_for_type(type)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	# Unit-scale octahedron — every instance scales this via mesh_inst.scale.
 	var s := _MESH_UNIT_SIZE
 	var v_top := Vector3(0, s * 5.0, 0)
 	var v_bot := Vector3(0, 0, 0)
@@ -130,10 +137,39 @@ static func _get_or_build_mesh(type: String) -> ArrayMesh:
 		st.set_normal(n_down); st.set_color(col); st.add_vertex(v_bot)
 		st.set_normal(n_down); st.set_color(col); st.add_vertex(m2)
 		st.set_normal(n_down); st.set_color(col); st.add_vertex(m1)
+	return st.commit()
 
-	var mesh := st.commit()
-	_shared_meshes[type] = mesh
-	return mesh
+static func _build_blocky_mesh() -> ArrayMesh:
+	# Silver: squat rectangular prism with a tapered top — more "ore chunk" than crystal spike.
+	var col := _color_for_type("Silver")
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var s := _MESH_UNIT_SIZE
+	var w := s * 1.3   # base half-width
+	var h := s * 3.5   # total height
+	var tw := s * 0.8  # top half-width (slight taper)
+	# Base corners (y=0), top corners (y=h)
+	var b := [Vector3(-w, 0, -w), Vector3(w, 0, -w), Vector3(w, 0, w), Vector3(-w, 0, w)]
+	var t := [Vector3(-tw, h, -tw), Vector3(tw, h, -tw), Vector3(tw, h, tw), Vector3(-tw, h, tw)]
+	# 4 side faces
+	for i in range(4):
+		var j := (i + 1) % 4
+		var n := (b[j] - b[i]).cross(t[i] - b[i]).normalized()
+		st.set_normal(n); st.set_color(col); st.add_vertex(b[i])
+		st.set_normal(n); st.set_color(col); st.add_vertex(b[j])
+		st.set_normal(n); st.set_color(col); st.add_vertex(t[i])
+		st.set_normal(n); st.set_color(col); st.add_vertex(b[j])
+		st.set_normal(n); st.set_color(col); st.add_vertex(t[j])
+		st.set_normal(n); st.set_color(col); st.add_vertex(t[i])
+	# Top face
+	st.set_normal(Vector3.UP); st.set_color(col)
+	st.add_vertex(t[0]); st.add_vertex(t[2]); st.add_vertex(t[1])
+	st.add_vertex(t[0]); st.add_vertex(t[3]); st.add_vertex(t[2])
+	# Bottom face
+	st.set_normal(Vector3.DOWN); st.set_color(col)
+	st.add_vertex(b[0]); st.add_vertex(b[1]); st.add_vertex(b[2])
+	st.add_vertex(b[0]); st.add_vertex(b[2]); st.add_vertex(b[3])
+	return st.commit()
 
 static func _color_for_type(type: String) -> Color:
 	# Static mirror of _get_resource_color() (which is instance-scoped).

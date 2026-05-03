@@ -381,8 +381,8 @@ func _setup_hardened_diag_hud() -> void:
 		var _refresh_inv = func(_type: String, _amt: int) -> void:
 			var all = inv.get_all()
 			var parts: Array[String] = []
-			var abbrev = {"Copper": "Cu", "Silver": "Ag", "Gold": "Au", "Platinum": "Pt", "Diamond": "Di"}
-			for r in ["Copper", "Silver", "Gold", "Platinum", "Diamond"]:
+			var abbrev = {"Stone": "St", "Wood": "Wd", "Copper": "Cu", "Silver": "Ag", "Gold": "Au", "Platinum": "Pt", "Diamond": "Di"}
+			for r in ["Stone", "Wood", "Copper", "Silver", "Gold", "Platinum", "Diamond"]:
 				if all.get(r, 0) > 0:
 					parts.append(abbrev[r] + ":" + str(all[r]))
 			inv_label.text = "  ".join(parts)

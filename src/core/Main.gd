@@ -271,107 +271,17 @@ func _setup_hardened_solar_genesis() -> void:
 func _setup_titan_planetary() -> void:
 	var planet_gen_script = load("res://src/world/PlanetGen.gd")
 	if planet_gen_script:
-		# -----------------------------------------------------------------------
-		# GALAXY REGISTRY — THE ARCHITECT
-		# Solar system of 4 bodies, each with a unique seed ensuring distinct
-		# terrain noise, palette, and landmark placement per celestial body.
-		# Positions form a natural inner-system arc at varied orbital inclinations.
-		# -----------------------------------------------------------------------
-
-		# PLANET 1 — Hero World (seed 1001) — Main landable planet near origin
+		# Starting world — the only planet that exists before the player forges more.
+		# Additional worlds are created at the Space Station using 3 mined resources.
 		var planet = Node3D.new(); planet.set_script(planet_gen_script)
 		planet.name = "Planet_Varn"
 		planet.set("planet_radius", 1125000.0)
 		planet.set("planet_seed", 1001)
 		planet.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(planet)
-		# Varn: 1.5Mkm forward (–Z) — the home world directly ahead at game start
 		planet.global_position = Vector3(0, 0, -1500000.0)
 		planet.add_to_group("Planet")
 		planet_ref = planet
-
-		# PLANET 2 — Tethys (seed 2002)
-		var moon = Node3D.new(); moon.set_script(planet_gen_script)
-		moon.name = "Planet_Tethys"
-		moon.set("planet_radius", 625000.0)
-		moon.set("planet_seed", 2002)
-		moon.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(moon)
-		moon.global_position = Vector3(2500000.0, 400000.0, -1800000.0)
-		moon.add_to_group("World")
-		moon.add_to_group("Planet")
-
-		# PLANET 3 — Keth (seed 3003)
-		var planet3 = Node3D.new(); planet3.set_script(planet_gen_script)
-		planet3.name = "Planet_Keth"
-		planet3.set("planet_radius", 820000.0)
-		planet3.set("planet_seed", 3003)
-		planet3.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(planet3)
-		planet3.global_position = Vector3(-3500000.0, -800000.0, 2800000.0)
-		planet3.add_to_group("World")
-		planet3.add_to_group("Planet")
-
-		# PLANET 4 — Ido (seed 4004)
-		var planet4 = Node3D.new(); planet4.set_script(planet_gen_script)
-		planet4.name = "Planet_Ido"
-		planet4.set("planet_radius", 380000.0)
-		planet4.set("planet_seed", 4004)
-		planet4.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(planet4)
-		planet4.global_position = Vector3(1800000.0, 300000.0, 450000.0)
-		planet4.add_to_group("World")
-		planet4.add_to_group("Planet")
-
-		# --- OUTER SYSTEM (Compressed) ---
-		# MOBILE: iOS/Android cap at 4 inner-system planets to keep quadtree LOD
-		# traffic, MultiMesh scatter counts, and memory pressure within A14 budgets.
-		if _mobile_perf_mode:
-			return
-
-		# PLANET 5 — Obsidia (seed 5005)
-		var planet5 = Node3D.new(); planet5.set_script(planet_gen_script)
-		planet5.name = "Planet_Obsidia"
-		planet5.set("planet_radius", 1850000.0)
-		planet5.set("planet_seed", 5005)
-		planet5.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(planet5)
-		planet5.global_position = Vector3(-5000000.0, 1500000.0, -6800000.0)
-		planet5.add_to_group("World")
-		planet5.add_to_group("Planet")
-
-		# PLANET 6 — Xylos (seed 6006)
-		var planet6 = Node3D.new(); planet6.set_script(planet_gen_script)
-		planet6.name = "Planet_Xylos"
-		planet6.set("planet_radius", 940000.0)
-		planet6.set("planet_seed", 6006)
-		planet6.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(planet6)
-		planet6.global_position = Vector3(8500000.0, -2200000.0, 5200000.0)
-		planet6.add_to_group("World")
-		planet6.add_to_group("Planet")
-
-		# PLANET 7 — Beryll (seed 7007)
-		var planet7 = Node3D.new(); planet7.set_script(planet_gen_script)
-		planet7.name = "Planet_Beryll"
-		planet7.set("planet_radius", 2400000.0)
-		planet7.set("planet_seed", 7007)
-		planet7.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(planet7)
-		planet7.global_position = Vector3(-12000000.0, 3500000.0, 11500000.0)
-		planet7.add_to_group("World")
-		planet7.add_to_group("Planet")
-
-		# PLANET 8 — Null-9 (seed 8008)
-		var planet8 = Node3D.new(); planet8.set_script(planet_gen_script)
-		planet8.name = "Planet_Null9"
-		planet8.set("planet_radius", 450000.0)
-		planet8.set("planet_seed", 8008)
-		planet8.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(planet8)
-		planet8.global_position = Vector3(4000000.0, -8500000.0, -19500000.0)
-		planet8.add_to_group("World")
-		planet8.add_to_group("Planet")
 
 func _setup_space_station() -> void:
 	var ss_script = load("res://src/world/SpaceStation.gd")

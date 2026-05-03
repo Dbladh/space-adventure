@@ -7,13 +7,11 @@ extends Node3D
 
 var poi_name: String = ""
 var poi_type: String = "station"   # "station" | "planet"
-var label_height: float = 200000.0  # local Y offset above the parent origin
+var label_height: float = 200000.0  # local Y offset — beacon column height
 var beacon_color: Color = Color(0.95, 0.85, 0.2)
 
-var _label: Label3D = null
 var _beacon_ring: MeshInstance3D = null
 var _beacon_light: OmniLight3D = null
-var _player: Node3D = null
 var _pulse_t: float = 0.0
 
 func setup(p_name: String, p_type: String, height: float, color: Color) -> void:
@@ -23,24 +21,8 @@ func setup(p_name: String, p_type: String, height: float, color: Color) -> void:
 	beacon_color = color
 
 func _ready() -> void:
-	_build_label()
 	_build_beacon()
 	set_process(true)
-
-func _build_label() -> void:
-	_label = Label3D.new()
-	_label.text = poi_name
-	_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	_label.no_depth_test = true
-	_label.pixel_size = 350.0        # visible from millions of units away
-	_label.font_size = 32
-	_label.modulate = beacon_color
-	_label.outline_size = 8
-	_label.outline_modulate = Color.BLACK
-	_label.position = Vector3(0, label_height, 0)
-	_label.visibility_range_end = 0.0   # always visible (no cutoff)
-	_label.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	add_child(_label)
 
 func _build_beacon() -> void:
 	# Vertical glowing column — a thin tall cylinder in the beacon color
@@ -75,24 +57,6 @@ func _build_beacon() -> void:
 
 func _process(delta: float) -> void:
 	_pulse_t += delta
-
-	# Resolve player lazily
-	if not _player:
-		var found = get_tree().get_nodes_in_group("Player")
-		if found.size() > 0:
-			_player = found[0]
-
-	# Update label with distance
-	if _player and _label:
-		var dist = global_position.distance_to(_player.global_position)
-		var dist_str: String
-		if dist > 1_000_000.0:
-			dist_str = "%.1f Mm" % (dist / 1_000_000.0)
-		elif dist > 1_000.0:
-			dist_str = "%.1f km" % (dist / 1_000.0)
-		else:
-			dist_str = "%.0f m" % dist
-		_label.text = poi_name + "\n" + dist_str
 
 	# Pulse the beacon column alpha and light energy
 	var pulse = (sin(_pulse_t * 1.8) + 1.0) * 0.5   # 0..1

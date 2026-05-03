@@ -38,10 +38,12 @@ func _draw() -> void:
 	var size = get_rect().size
 	var center = size / 2.0
 
-	# Calculate bearing and distance
+	# Calculate bearing and distance in player-local space so the arrow
+	# points correctly regardless of heading (fixes inverted arrow bug).
 	var to_station = nearest_station.global_position - player_node.global_position
 	var dist = to_station.length()
-	var bearing = atan2(to_station.x, to_station.z) - player_node.rotation.y
+	var local_dir = player_node.transform.basis.inverse() * to_station.normalized()
+	var bearing = atan2(local_dir.x, -local_dir.z)
 
 	# Background panel
 	var panel_rect = Rect2(0, 0, 195, 78)

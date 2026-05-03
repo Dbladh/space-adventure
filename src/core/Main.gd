@@ -293,8 +293,9 @@ func _setup_space_station() -> void:
 	station.name = "SpaceStation_Alpha"
 	station.add_to_group("SpaceStation")
 	world_root.add_child(station)
-	# Orbit Planet_Varn (at 0,0,-1500000) at a safe distance above the ring belt
-	station.global_position = Vector3(0, 80000.0, -2900000.0)
+	# Planet_Varn centre at (0,0,-1,500,000), radius 1,125,000, ring belt up to 2 Mm.
+	# Station is placed 6.5 Mm from planet centre to be clearly in open space.
+	station.global_position = Vector3(0, 0, -8000000.0)
 
 	# POI beacon so the station is visible from across the system
 	var marker_script = load("res://src/ui/POIMarker.gd")
@@ -398,8 +399,8 @@ func _setup_hardened_diag_hud() -> void:
 			inv_label.text = "  ".join(parts)
 		inv.inventory_changed.connect(_refresh_inv)
 
-	# NAVIGATION BEACON: Shows nearest space station bearing and distance
-	# Positioned below RECENTER GYRO (which ends at roughly y=90 on most screens)
+	# NAVIGATION BEACON: Compact corner widget — bearing + distance to nearest station.
+	# Positioned below RECENTER GYRO (which ends at roughly y=90 on most screens).
 	var beacon_script = load("res://src/ui/NavBeacon.gd")
 	if beacon_script:
 		var beacon = Control.new()
@@ -408,6 +409,13 @@ func _setup_hardened_diag_hud() -> void:
 		beacon.custom_minimum_size = Vector2(200, 90)
 		beacon.position = Vector2(8, 100)
 		hud_layer.add_child(beacon)
+
+	# SCREEN-SPACE POI HUD: NMS-style markers for all stations and planets.
+	var poi_hud_script = load("res://src/ui/ScreenPOIHUD.gd")
+	if poi_hud_script:
+		var poi_hud = Control.new()
+		poi_hud.set_script(poi_hud_script)
+		hud_layer.add_child(poi_hud)
 
 	# ACE NAVIGATION: Inject the tactical galaxy map into the HUD
 	var map_script = load("res://src/ui/GalaxyMapUI.gd")

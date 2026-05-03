@@ -569,7 +569,10 @@ func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: Stri
 		proxy.set_script(proxy_script)
 		proxy.add_child(col)
 		add_child(proxy)
-		proxy.position = points[i].origin
+		# Lift center above terrain so the sphere top clears coarse mobile mesh triangles.
+		# Sphere still overlaps the visual prop position (lift < radius), so manual aim works.
+		var surface_normal: Vector3 = points[i].origin.normalized()
+		proxy.position = points[i].origin + surface_normal * (sphere_r * 0.65)
 		proxy.call("setup", mmis, i, res_type)
 		spawned += 1
 

@@ -21,6 +21,7 @@ var resource_type: String = "Copper"
 var _mmis: Array = []          # MultiMeshInstance3D references
 var _instance_idx: int = -1
 var _health: int = 2
+var health: int = 2            # public alias for bolt is_dying check
 
 func _ready() -> void:
 	add_to_group("Mineable")
@@ -34,6 +35,7 @@ func setup(mmis: Array, idx: int, res_type: String) -> void:
 
 func take_damage(_amount: float) -> void:
 	_health -= 1
+	health = _health
 	if _health <= 0:
 		_on_destroyed()
 

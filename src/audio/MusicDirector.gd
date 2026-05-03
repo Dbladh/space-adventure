@@ -131,6 +131,11 @@ var _target_stereo_width: float = 0.4
 var _swell_phase: float = 0.0
 var _swell_depth: float = 0.25
 
+# Audio generation timing (for frame-rate independent audio)
+var _last_audio_time: float = 0.0
+const _MAX_AUDIO_CATCHUP: float = 0.1  # Max 100ms catchup per frame to prevent stutter
+const _MAX_FILL_FRAMES: int = 4410    # 100ms at 44.1kHz
+
 # =====================================================================
 #  KEY & SCALE SYSTEM
 #  ONE root note for everything — mood comes from mode + FX, not key changes.
@@ -619,11 +624,20 @@ func _process(delta: float) -> void:
 	# ── Update bus effects ───────────────────────────────────────────
 	_update_bus_effects()
 
-	# ── Fill audio buffers ───────────────────────────────────────────
-	_fill_bass_buffer()
-	_fill_arp_buffer()
-	_fill_perc_buffer()
-	_fill_accent_buffer()
+	# ── Fill audio buffers (time-based to be frame-rate independent) ──
+	# Calculate how much audio time has passed and needs to be generated
+	var current_time := Time.get_ticks_msec() / 1000.0
+	var time_since_last_fill := current_time - _last_audio_time
+
+	# Cap catchup to prevent stutter on long freezes
+	time_since_last_fill = minf(time_since_last_fill, _MAX_AUDIO_CATCHUP)
+
+	if time_since_last_fill > 0.0:
+		_last_audio_time = current_time
+		_fill_bass_buffer(int(time_since_last_fill * _sample_rate))
+		_fill_arp_buffer(int(time_since_last_fill * _sample_rate))
+		_fill_perc_buffer(int(time_since_last_fill * _sample_rate))
+		_fill_accent_buffer(int(time_since_last_fill * _sample_rate))
 
 # =====================================================================
 #  CHORD PROGRESSION
@@ -928,10 +942,13 @@ func _retrigger_bass_pulse() -> void:
 #    3. SUB — half-frequency sine, continuous, centered for warmth.
 # =====================================================================
 
-func _fill_bass_buffer() -> void:
+func _fill_bass_buffer(frames_hint: int = 0) -> void:
 	if not _drone_playback:
 		return
-	var frames := mini(_drone_playback.get_frames_available(), _MAX_FILL_FRAMES)
+	# Use hint if provided (time-based), otherwise use available space
+	var frames := frames_hint if frames_hint > 0 else _drone_playback.get_frames_available()
+	frames = mini(frames, _drone_playback.get_frames_available())
+	frames = mini(frames, _MAX_FILL_FRAMES)
 	if frames <= 0:
 		return
 
@@ -1057,10 +1074,12 @@ func _advance_arp_step() -> void:
 	_arp_envelope = 1.0
 	_arp_pan = 0.25 if _arp_phrase_count % 2 == 0 else -0.25
 
-func _fill_arp_buffer() -> void:
+func _fill_arp_buffer(frames_hint: int = 0) -> void:
 	if not _arp_playback:
 		return
-	var frames := mini(_arp_playback.get_frames_available(), _MAX_FILL_FRAMES)
+	var frames := frames_hint if frames_hint > 0 else _arp_playback.get_frames_available()
+	frames = mini(frames, _arp_playback.get_frames_available())
+	frames = mini(frames, _MAX_FILL_FRAMES)
 	if frames <= 0:
 		return
 
@@ -1136,10 +1155,12 @@ func _advance_perc_step() -> void:
 	if step & 4:   # hi-hat
 		_hat_env = 1.0
 
-func _fill_perc_buffer() -> void:
+func _fill_perc_buffer(frames_hint: int = 0) -> void:
 	if not _perc_playback:
 		return
-	var frames := mini(_perc_playback.get_frames_available(), _MAX_FILL_FRAMES)
+	var frames := frames_hint if frames_hint > 0 else _perc_playback.get_frames_available()
+	frames = mini(frames, _perc_playback.get_frames_available())
+	frames = mini(frames, _MAX_FILL_FRAMES)
 	if frames <= 0:
 		return
 
@@ -1275,10 +1296,12 @@ func _fire_accent() -> void:
 	_acc_p3 = 0.0
 	_acc_lfo_ph = 0.0
 
-func _fill_accent_buffer() -> void:
+func _fill_accent_buffer(frames_hint: int = 0) -> void:
 	if not _accent_playback:
 		return
-	var frames := mini(_accent_playback.get_frames_available(), _MAX_FILL_FRAMES)
+	var frames := frames_hint if frames_hint > 0 else _accent_playback.get_frames_available()
+	frames = mini(frames, _accent_playback.get_frames_available())
+	frames = mini(frames, _MAX_FILL_FRAMES)
 	if frames <= 0:
 		return
 

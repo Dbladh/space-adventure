@@ -215,7 +215,7 @@ const FILL_B := [1, 2, 4, 2, 1, 6, 2, 5]   # syncopated fill
 # 16th-note bass groove velocity patterns. 0.0 = rest, positive = hit velocity.
 # 16 steps per bar. Rests create breathing room and rhythmic personality.
 # These drive the pulsing bass independently of the arp/perc patterns.
-const BASS_GROOVE_SPACE   := [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.70, 0.0, 0.0, 0.0, 0.0, 0.55, 0.0, 0.0]
+const BASS_GROOVE_SPACE   := [1.0, 0.0, 0.0, 0.0, 0.75, 0.0, 0.0, 0.0, 0.85, 0.0, 0.0, 0.0, 0.70, 0.0, 0.55, 0.0]
 const BASS_GROOVE_CRUISE  := [1.0, 0.0, 0.55, 0.0, 0.0, 0.75, 0.0, 0.0, 0.90, 0.0, 0.55, 0.0, 0.70, 0.0, 0.50, 0.65]
 const BASS_GROOVE_ATMO    := [1.0, 0.0, 0.0, 0.60, 0.0, 0.0, 0.75, 0.0, 0.85, 0.0, 0.0, 0.65, 0.0, 0.0, 0.70, 0.0]
 const BASS_GROOVE_SURFACE := [1.0, 0.0, 0.65, 0.50, 0.80, 0.0, 0.70, 0.60, 0.90, 0.0, 0.65, 0.50, 0.75, 0.0, 0.60, 0.55]
@@ -266,6 +266,36 @@ var _bass_harm_level: float = 0.5
 # Harmonic LFO: slow global timbral drift (~0.08 Hz, ~12s per cycle)
 var _harmonic_lfo_phase: float = 0.0
 
+# =====================================================================
+#  AMBIENT ACCENT ENGINE
+#  Occasional organic events layered over the procedural base:
+#    1. STRING STAB  — 3 detuned voices, slow attack/release (2-4s)
+#    2. AMBIENT DRONE — low root tone with slow vibrato (3-6s)
+#    3. SHIMMER      — high-register bell tones, short decay (0.5-1.5s)
+#  Fires every 8-22 seconds at random; type weighted by current state.
+# =====================================================================
+
+var _accent_player: AudioStreamPlayer
+var _accent_playback: AudioStreamGeneratorPlayback
+
+var _accent_type: int = 0        # 0=idle 1=strings 2=drone 3=shimmer
+var _accent_stage: int = 0       # 0=attack 1=sustain 2=release
+var _accent_env: float = 0.0     # amplitude 0..1
+var _accent_atk_rate: float = 2.0
+var _accent_rel_rate: float = 1.5
+var _accent_sustain_t: float = 0.0
+var _accent_timer: float = 5.0   # first accent fires ~5s in
+
+var _acc_p1: float = 0.0
+var _acc_p2: float = 0.0
+var _acc_p3: float = 0.0
+var _acc_lfo_ph: float = 0.0
+var _acc_freq1: float = 220.0
+var _acc_freq2: float = 221.0
+var _acc_freq3: float = 219.0
+var _acc_vol: float = 0.0
+var _acc_pan: float = 0.0
+
 const _MAX_FILL_FRAMES := 1024
 
 # =====================================================================
@@ -290,16 +320,16 @@ func _ready() -> void:
 	for i in 1024:
 		_noise_table[i] = rng.randf_range(-1.0, 1.0)
 
-	# Compute per-sample decay rates for drum envelopes
-	_kick_decay  = pow(0.01, 1.0 / (0.07 * _sample_rate))   # 70ms kick
-	_snare_decay = pow(0.01, 1.0 / (0.10 * _sample_rate))   # 100ms snare
-	_hat_decay   = pow(0.01, 1.0 / (0.03 * _sample_rate))   # 30ms hat (crisp)
+	# Electronic drum decays — tighter than acoustic for punchy digital feel
+	_kick_decay  = pow(0.01, 1.0 / (0.065 * _sample_rate))  # 65ms kick (tight)
+	_snare_decay = pow(0.01, 1.0 / (0.055 * _sample_rate))  # 55ms snare (snappy)
+	_hat_decay   = pow(0.01, 1.0 / (0.012 * _sample_rate))  # 12ms hat (very crisp)
 
 	_setup_music_bus()
 
-	# Bass/pad generator
+	# Bass/pad generator — goes to BassLine bus (DRY — no reverb, obvious punch)
 	_drone_player = AudioStreamPlayer.new()
-	_drone_player.bus = "Music"
+	_drone_player.bus = "BassLine"
 	var drone_stream := AudioStreamGenerator.new()
 	drone_stream.mix_rate = _sample_rate
 	drone_stream.buffer_length = 0.15
@@ -319,9 +349,9 @@ func _ready() -> void:
 	_arp_player.play()
 	_arp_playback = _arp_player.get_stream_playback()
 
-	# Percussion generator
+	# Percussion generator — goes to Perc bus (DRY — no reverb, electronic punch)
 	_perc_player = AudioStreamPlayer.new()
-	_perc_player.bus = "Music"
+	_perc_player.bus = "Perc"
 	var perc_stream := AudioStreamGenerator.new()
 	perc_stream.mix_rate = _sample_rate
 	perc_stream.buffer_length = 0.15
@@ -329,6 +359,17 @@ func _ready() -> void:
 	add_child(_perc_player)
 	_perc_player.play()
 	_perc_playback = _perc_player.get_stream_playback()
+
+	# Accent generator — goes to Music bus so it gets reverb/delay treatment
+	_accent_player = AudioStreamPlayer.new()
+	_accent_player.bus = "Music"
+	var accent_stream := AudioStreamGenerator.new()
+	accent_stream.mix_rate = _sample_rate
+	accent_stream.buffer_length = 0.20   # slightly longer buffer for smooth attack
+	_accent_player.stream = accent_stream
+	add_child(_accent_player)
+	_accent_player.play()
+	_accent_playback = _accent_player.get_stream_playback()
 
 	# SFX players (sampled audio effects for ship/combat)
 	_sfx_ship_fire = AudioStreamPlayer.new()
@@ -362,7 +403,23 @@ func _ready() -> void:
 	_bass_freq_actual = _bass_freq
 	_advance_chord()
 
+func _setup_aux_bus(bus_name: String, volume_db: float) -> void:
+	# Creates a dry aux bus with no effects — used for bass and percussion.
+	var bus_idx := AudioServer.get_bus_index(bus_name)
+	if bus_idx == -1:
+		AudioServer.add_bus()
+		bus_idx = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(bus_idx, bus_name)
+		AudioServer.set_bus_send(bus_idx, "Master")
+	AudioServer.set_bus_volume_db(bus_idx, volume_db)
+	while AudioServer.get_bus_effect_count(bus_idx) > 0:
+		AudioServer.remove_bus_effect(bus_idx, 0)
+
 func _setup_music_bus() -> void:
+	# Dry buses for bass (no reverb smear) and percussion (no reverb wash)
+	_setup_aux_bus("BassLine", -4.0)   # slightly hotter than music
+	_setup_aux_bus("Perc", -3.0)       # drums hit harder when dry
+
 	var bus_idx := AudioServer.get_bus_index("Music")
 	if bus_idx == -1:
 		AudioServer.add_bus()
@@ -376,13 +433,13 @@ func _setup_music_bus() -> void:
 	while AudioServer.get_bus_effect_count(bus_idx) > 0:
 		AudioServer.remove_bus_effect(bus_idx, 0)
 
-	# 0: REVERB
+	# 0: REVERB — reduced wet so pads breathe without drowning
 	var reverb := AudioEffectReverb.new()
-	reverb.room_size = 0.88
-	reverb.damping = 0.25
+	reverb.room_size = 0.80
+	reverb.damping = 0.35
 	reverb.spread = 0.9
-	reverb.wet = 0.4
-	reverb.dry = 0.6
+	reverb.wet = 0.25   # was 0.40 — less wash on pads/arp
+	reverb.dry = 0.75
 	AudioServer.add_bus_effect(bus_idx, reverb)
 
 	# 1: LOW-PASS FILTER (swept by LFO)
@@ -497,6 +554,29 @@ func _process(delta: float) -> void:
 	_arp_envelope = maxf(_arp_envelope - delta * 2.5, 0.0)
 	_stinger_env  = maxf(_stinger_env  - delta * 4.0, 0.0)
 
+	# ── Ambient accent timer ─────────────────────────────────────────
+	if _accent_type == 0:
+		_accent_timer -= delta
+		if _accent_timer <= 0.0:
+			_fire_accent()
+	else:
+		match _accent_stage:
+			0:   # attack
+				_accent_env += _accent_atk_rate * delta
+				if _accent_env >= 1.0:
+					_accent_env = 1.0
+					_accent_stage = 1
+			1:   # sustain
+				_accent_sustain_t -= delta
+				if _accent_sustain_t <= 0.0:
+					_accent_stage = 2
+			2:   # release
+				_accent_env -= _accent_rel_rate * delta
+				if _accent_env <= 0.0:
+					_accent_env = 0.0
+					_accent_type = 0
+					_accent_timer = randf_range(8.0, 22.0)
+
 	# ── Update bus effects ───────────────────────────────────────────
 	_update_bus_effects()
 
@@ -504,6 +584,7 @@ func _process(delta: float) -> void:
 	_fill_bass_buffer()
 	_fill_arp_buffer()
 	_fill_perc_buffer()
+	_fill_accent_buffer()
 
 # =====================================================================
 #  CHORD PROGRESSION
@@ -616,7 +697,7 @@ func _poll_game_state() -> void:
 func _update_music_targets() -> void:
 	match current_state:
 		MusicState.DEEP_SPACE:
-			_target_bass_volume     = 0.12
+			_target_bass_volume     = 0.20      # raised — bass is now on dry BassLine bus
 			_target_arp_volume      = 0.025
 			_target_perc_volume     = 0.30      # sparse kick — audible but distant
 			_target_filter_cutoff   = 500.0
@@ -635,7 +716,7 @@ func _update_music_targets() -> void:
 
 		MusicState.CRUISING:
 			var spd_t := clampf(_ship_speed / 5000.0, 0.0, 1.0)
-			_target_bass_volume     = 0.15
+			_target_bass_volume     = 0.22
 			_target_arp_volume      = 0.04
 			_target_perc_volume     = lerpf(0.30, 0.40, spd_t)
 			_target_filter_cutoff   = lerpf(700.0, 2200.0, spd_t)
@@ -653,7 +734,7 @@ func _update_music_targets() -> void:
 			_swell_depth            = 0.20
 
 		MusicState.ATMOSPHERE:
-			_target_bass_volume     = 0.16
+			_target_bass_volume     = 0.22
 			_target_arp_volume      = 0.035
 			_target_perc_volume     = 0.28      # soft offbeat hats — ethereal but audible
 			_target_filter_cutoff   = 1000.0
@@ -671,7 +752,7 @@ func _update_music_targets() -> void:
 			_swell_depth            = 0.25
 
 		MusicState.SURFACE:
-			_target_bass_volume     = 0.15
+			_target_bass_volume     = 0.22
 			_target_arp_volume      = 0.045
 			_target_perc_volume     = 0.40      # proper groove — full and punchy
 			_target_filter_cutoff   = 1400.0
@@ -689,7 +770,7 @@ func _update_music_targets() -> void:
 			_swell_depth            = 0.15
 
 		MusicState.COMBAT:
-			_target_bass_volume     = 0.18
+			_target_bass_volume     = 0.25
 			_target_arp_volume      = 0.06
 			_target_perc_volume     = lerpf(0.42, 0.55, _combat_tension)
 			_target_filter_cutoff   = lerpf(1600.0, 3000.0, _combat_tension)
@@ -817,9 +898,9 @@ func _fill_bass_buffer() -> void:
 
 	# Harmonic LFO: global timbral drift (~0.08 Hz, ~12s cycle)
 	_harmonic_lfo_phase = fmod(_harmonic_lfo_phase + 0.08 * float(frames) / _sample_rate, 1.0)
-	var harm_lfo := _sin_lut(_harmonic_lfo_phase) * 0.3 + 0.5   # 0.2..0.8
-	# Combine slow LFO with per-step brightness (set each retrigger) for timbral movement
-	var harm_mix := clampf(harm_lfo * _bass_harm_level, 0.0, 1.0)
+	var harm_lfo := _sin_lut(_harmonic_lfo_phase) * 0.25 + 0.75  # 0.5..1.0
+	# Floor at 0.45 so 2nd harmonic (130 Hz) is ALWAYS audible on all speakers
+	var harm_mix := clampf(harm_lfo * _bass_harm_level, 0.45, 1.0)
 
 	# Pad breathing LFO (continuous, slow)
 	var pad_lfo := _sin_lut(_lfo_phase) * 0.25 + 0.75
@@ -852,7 +933,7 @@ func _fill_bass_buffer() -> void:
 		var harm3 := tbl[int(p1 * 768.0) & 255]
 		# Blend: fundamental always present, harmonics scaled by per-step brightness
 		var bass_raw := osc1 + harm2 * (0.50 * harm_mix) + harm3 * (0.33 * harm_mix)
-		var pulse_s  := bass_raw * bpe * 0.44   # envelope shapes attack/decay
+		var pulse_s  := bass_raw * bpe * 0.62   # boosted — bass is now on dry bus
 
 		# ── LAYER 2: SUSTAINED PAD — detuned, continuous, portamento glide ──
 		var pad := tbl[int(p2 * 256.0) & 255] * pad_lfo * 0.20
@@ -1042,31 +1123,39 @@ func _fill_perc_buffer() -> void:
 	for i in frames:
 		var s := 0.0
 
-		# KICK: sine with pitch sweep (150Hz → 40Hz as envelope decays)
+		# KICK: 808-style — steep exponential sweep, click transient at onset
 		if ke > 0.001:
-			var kick_freq := 40.0 + 110.0 * ke   # sweeps down
+			var kick_freq := 30.0 + 200.0 * (ke * ke)   # quadratic = fast initial drop
 			kp = fmod(kp + kick_freq * inv_r, 1.0)
-			s += tbl[int(kp * 256.0) & 255] * ke * KICK_VOL
+			var kick_body := tbl[int(kp * 256.0) & 255] * ke
+			# Noise click only on the very first 3% of the envelope (attack transient)
+			var click := ntbl[ni & 1023] * maxf(ke - 0.97, 0.0) * 33.0
+			ni = (ni + 1) & 1023
+			s += (kick_body + click) * KICK_VOL
 			ke *= kd
 
-		# SNARE: noise (60%) + 200Hz sine (40%), medium decay
+		# SNARE: electronic clap-style — 90% noise, 10% tone, hard envelope
 		if se > 0.001:
-			var snare_tone := tbl[int(sp * 256.0) & 255] * 0.4
-			var snare_noise := ntbl[ni & 1023] * 0.6
-			s += (snare_tone + snare_noise) * se * SNARE_VOL
-			sp = fmod(sp + 200.0 * inv_r, 1.0)
+			# pow(se, 0.5) shapes envelope to have more attack bite
+			var snap := pow(se, 0.5)
+			var snare_tone  := tbl[int(sp * 256.0) & 255] * 0.10
+			var snare_noise := ntbl[ni & 1023] * 0.90
+			s += (snare_tone + snare_noise) * snap * SNARE_VOL
+			sp = fmod(sp + 180.0 * inv_r, 1.0)
 			se *= sd
 			ni = (ni + 1) & 1023
 
-		# HI-HAT: pure noise, very fast decay (crisp)
+		# HI-HAT: pure noise, 12ms tight decay (electronic machine precision)
 		if he > 0.001:
 			s += ntbl[ni & 1023] * he * HAT_VOL
 			he *= hd
 			ni = (ni + 1) & 1023
 
+		# Soft clip for analog saturation feel (clamp before vol to avoid harshness)
+		s = clampf(s * 1.4, -1.0, 1.0)
 		s *= vol
-		# Slight stereo spread on perc (hat slightly right, snare slightly left)
-		_perc_playback.push_frame(Vector2(s * 1.05, s * 0.95))
+		# Snare panned slightly left, hat slightly right — electronic stereo field
+		_perc_playback.push_frame(Vector2(s * 1.08, s * 0.92))
 
 	_kick_env  = ke
 	_kick_phase = kp
@@ -1074,6 +1163,135 @@ func _fill_perc_buffer() -> void:
 	_snare_phase = sp
 	_hat_env   = he
 	_noise_idx = ni
+
+# =====================================================================
+#  AMBIENT ACCENT ENGINE
+# =====================================================================
+
+func _fire_accent() -> void:
+	# Pick accent type weighted by current music state
+	var roll := randf()
+	match current_state:
+		MusicState.DEEP_SPACE:
+			# Mostly drones and strings — vast, empty feel
+			_accent_type = 2 if roll < 0.55 else (1 if roll < 0.85 else 3)
+		MusicState.CRUISING:
+			# Mostly strings and shimmers — forward motion, sparkle
+			_accent_type = 1 if roll < 0.45 else (3 if roll < 0.75 else 2)
+		MusicState.ATMOSPHERE:
+			# Even mix — dreamy and layered
+			_accent_type = 1 if roll < 0.40 else (2 if roll < 0.70 else 3)
+		MusicState.SURFACE:
+			# Shimmers and strings — warm, alive
+			_accent_type = 3 if roll < 0.45 else (1 if roll < 0.80 else 2)
+		MusicState.COMBAT:
+			# Shimmers only (drones and strings too calm for combat)
+			_accent_type = 3 if roll < 0.70 else 1
+		_:
+			_accent_type = 1
+
+	# Base frequency: two octaves above chord root (sits in the high register,
+	# well clear of the bass and arp)
+	var base := _bass_freq * 4.0
+
+	match _accent_type:
+		1:  # STRINGS: 3 detuned unison voices, slow attack and release
+			_acc_freq1 = base
+			_acc_freq2 = base * 1.0028   # +5 cents
+			_acc_freq3 = base * 0.9972   # -5 cents
+			_acc_vol   = 0.038
+			_accent_atk_rate   = 1.0 / 0.45    # 450ms attack
+			_accent_sustain_t  = randf_range(1.5, 3.2)
+			_accent_rel_rate   = 1.0 / 0.75    # 750ms release
+		2:  # DRONE: single low root with slow vibrato
+			_acc_freq1 = ROOT_HZ * _chord_root_ratio   # same octave as bass root
+			_acc_freq2 = 0.0
+			_acc_freq3 = 0.0
+			_acc_vol   = 0.040
+			_accent_atk_rate   = 1.0 / 0.90    # 900ms attack
+			_accent_sustain_t  = randf_range(2.0, 5.0)
+			_accent_rel_rate   = 1.0 / 1.20    # 1.2s release
+		3:  # SHIMMER: two high bell partials
+			_acc_freq1 = base * 2.0             # 4 octaves above bass
+			_acc_freq2 = _acc_freq1 * 1.498     # perfect 5th above
+			_acc_freq3 = 0.0
+			_acc_vol   = 0.028
+			_accent_atk_rate   = 1.0 / 0.04    # 40ms sharp attack
+			_accent_sustain_t  = randf_range(0.0, 0.25)
+			_accent_rel_rate   = 1.0 / 0.55    # 550ms bell decay
+
+	_acc_pan   = randf_range(-0.45, 0.45)
+	_accent_stage = 0
+	_accent_env   = 0.0
+	_acc_p1 = 0.0
+	_acc_p2 = 0.0
+	_acc_p3 = 0.0
+	_acc_lfo_ph = 0.0
+
+func _fill_accent_buffer() -> void:
+	if not _accent_playback:
+		return
+	var frames := mini(_accent_playback.get_frames_available(), _MAX_FILL_FRAMES)
+	if frames <= 0:
+		return
+
+	if _accent_type == 0 or _accent_env < 0.001:
+		for i in frames:
+			_accent_playback.push_frame(Vector2.ZERO)
+		return
+
+	var inv_r  := 1.0 / _sample_rate
+	var tbl    := _sin_table
+	var vol    := _acc_vol * _accent_env
+	var pan_l  := clampf(1.0 - _acc_pan, 0.0, 1.5)
+	var pan_r  := clampf(1.0 + _acc_pan, 0.0, 1.5)
+	var p1 := _acc_p1
+	var p2 := _acc_p2
+	var p3 := _acc_p3
+	var lpph := _acc_lfo_ph
+
+	match _accent_type:
+		1:  # STRINGS — 3 detuned voices, saw + sine for warmth
+			var f1 := _acc_freq1;  var f2 := _acc_freq2;  var f3 := _acc_freq3
+			for i in frames:
+				var saw1 := p1 * 2.0 - 1.0
+				var sin1 := tbl[int(p1 * 256.0) & 255]
+				var sin2 := tbl[int(p2 * 256.0) & 255]
+				var sin3 := tbl[int(p3 * 256.0) & 255]
+				# Blend: centre voice is saw+sine for texture; side voices pure sine
+				var s := ((saw1 * 0.35 + sin1 * 0.65) + sin2 + sin3) * 0.333 * vol
+				_accent_playback.push_frame(Vector2(s * pan_l, s * pan_r))
+				p1 = fmod(p1 + f1 * inv_r, 1.0)
+				p2 = fmod(p2 + f2 * inv_r, 1.0)
+				p3 = fmod(p3 + f3 * inv_r, 1.0)
+
+		2:  # DRONE — single sine with gentle vibrato (0.25 Hz, ±1.5%)
+			var f1 := _acc_freq1
+			for i in frames:
+				var vibrato := tbl[int(lpph * 256.0) & 255] * 0.015
+				lpph = fmod(lpph + 0.25 * inv_r, 1.0)
+				p1 = fmod(p1 + f1 * (1.0 + vibrato) * inv_r, 1.0)
+				var s := tbl[int(p1 * 256.0) & 255] * vol
+				_accent_playback.push_frame(Vector2(s * pan_l, s * pan_r))
+
+		3:  # SHIMMER — two bell partials, fundamental + perfect 5th
+			var f1 := _acc_freq1;  var f2 := _acc_freq2
+			for i in frames:
+				var sin1 := tbl[int(p1 * 256.0) & 255]
+				var sin2 := tbl[int(p2 * 256.0) & 255] * 0.45  # quieter 5th partial
+				var s := (sin1 + sin2) * vol
+				_accent_playback.push_frame(Vector2(s * pan_l, s * pan_r))
+				p1 = fmod(p1 + f1 * inv_r, 1.0)
+				p2 = fmod(p2 + f2 * inv_r, 1.0)
+
+		_:
+			for i in frames:
+				_accent_playback.push_frame(Vector2.ZERO)
+
+	_acc_p1 = p1
+	_acc_p2 = p2
+	_acc_p3 = p3
+	_acc_lfo_ph = lpph
 
 # =====================================================================
 #  PUBLIC API

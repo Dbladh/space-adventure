@@ -27,7 +27,7 @@ const RESOURCE_VALUES: Dictionary = {
 
 var _player: Node3D = null
 var _ui_layer: CanvasLayer = null
-var _panel: Panel = null
+var _panel: Control = null
 var _inv_label: Label = null
 var _creds_label: Label = null
 var _forge_slots: Array = []          # Array[OptionButton]

@@ -230,6 +230,11 @@ func _on_mined() -> void:
 	if economy:
 		economy.call("add_credits", 1)
 
+	# Musical stinger: harmonic burst tuned to the resource type
+	var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
+	if md_nodes.size() > 0 and md_nodes[0].has_method("play_mining_stinger"):
+		md_nodes[0].play_mining_stinger(resource_type)
+
 	var gem_script = load("res://src/world/LootGem.gd")
 	if not gem_script:
 		queue_free()

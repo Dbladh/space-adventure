@@ -1574,9 +1574,10 @@ func _process(delta: float) -> void:
 
 	# Update thruster audio — pitch and volume scale with ship speed
 	if in_ship:
+		var is_boosting = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT) or mobile_boost
 		var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
 		if md_nodes.size() > 0 and md_nodes[0].has_method("update_thruster_audio"):
-			md_nodes[0].update_thruster_audio(velocity.length())
+			md_nodes[0].update_thruster_audio(velocity.length(), is_boosting)
 
 
 

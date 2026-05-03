@@ -1356,16 +1356,20 @@ func play_fire() -> void:
 		_sfx_ship_fire.stop()
 		_sfx_ship_fire.play()
 
-func update_thruster_audio(speed: float) -> void:
+func update_thruster_audio(speed: float, is_boosting: bool) -> void:
 	if not _sfx_ship_thruster:
 		return
-	if speed < 60.0:
+
+	# Only play thruster when actively boosting
+	if not is_boosting:
 		if _sfx_ship_thruster.playing:
 			_sfx_ship_thruster.stop()
 		return
+
 	# Normalise speed: 0 = slow cruise (~100 u/s), 1 = full warp (~6000+ u/s)
 	var t := clampf((speed - 60.0) / 5940.0, 0.0, 1.0)
-	_sfx_ship_thruster.pitch_scale = lerpf(0.68, 1.75, t)
+	# Extended pitch range: 0.5 to 2.2 for more dramatic pitch variation
+	_sfx_ship_thruster.pitch_scale = lerpf(0.5, 2.2, t)
 	_sfx_ship_thruster.volume_db   = lerpf(-48.0, -28.0, t)
 	if not _sfx_ship_thruster.playing:
 		print("[SFX] Starting thruster (speed=", speed, " vol=", _sfx_ship_thruster.volume_db, ")")

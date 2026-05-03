@@ -98,6 +98,9 @@ func _ready() -> void:
 	
 	# 5.5 STELLAR DEBRIS: Asteroid Belt
 	_setup_asteroid_belt()
+
+	# 5.6 SPACE STATION
+	_setup_space_station()
 	
 	# 6. TITAN TELEMETRY HUD (F3)
 	_setup_hardened_diag_hud()
@@ -369,6 +372,16 @@ func _setup_titan_planetary() -> void:
 		planet8.global_position = Vector3(4000000.0, -8500000.0, -19500000.0)
 		planet8.add_to_group("World")
 		planet8.add_to_group("Planet")
+
+func _setup_space_station() -> void:
+	var ss_script = load("res://src/world/SpaceStation.gd")
+	if not ss_script: return
+	var station := Node3D.new()
+	station.set_script(ss_script)
+	station.name = "SpaceStation_Alpha"
+	world_root.add_child(station)
+	# Orbit Planet_Varn (at 0,0,-1500000) at a safe distance above the ring belt
+	station.global_position = Vector3(0, 80000.0, -2900000.0)
 
 func _setup_asteroid_belt() -> void:
 	var belt_script = load("res://src/world/AsteroidBelt.gd")

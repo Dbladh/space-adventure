@@ -415,6 +415,8 @@ func _setup_hardened_diag_hud() -> void:
 	if poi_hud_script:
 		var poi_hud = Control.new()
 		poi_hud.set_script(poi_hud_script)
+		poi_hud.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		poi_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		hud_layer.add_child(poi_hud)
 
 	# ACE NAVIGATION: Inject the tactical galaxy map into the HUD

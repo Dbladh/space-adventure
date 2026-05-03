@@ -31,10 +31,23 @@ func _process(_delta: float) -> void:
 		_refresh_pois()
 	if not _camera:
 		_camera = get_viewport().get_camera_3d()
+		if not _camera:
+			# Fallback: walk the tree for any active Camera3D
+			var cams = get_tree().get_nodes_in_group("Player")
+			for c in cams:
+				var cam = _find_camera(c)
+				if cam: _camera = cam; break
 	if not _player:
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0: _player = found[0]
 	queue_redraw()
+
+func _find_camera(node: Node) -> Camera3D:
+	if node is Camera3D: return node
+	for child in node.get_children():
+		var result = _find_camera(child)
+		if result: return result
+	return null
 
 func _refresh_pois() -> void:
 	_pois.clear()
@@ -58,7 +71,8 @@ func _refresh_pois() -> void:
 # ---------------------------------------------------------------------------
 func _draw() -> void:
 	if not _camera or not _player: return
-	var vp = get_rect().size
+	# Use viewport rect — get_rect().size is (0,0) when Control has no explicit size
+	var vp = get_viewport_rect().size
 	if vp.x < 2.0: return
 
 	var planets = get_tree().get_nodes_in_group("Planet")
@@ -126,6 +140,7 @@ func _draw() -> void:
 
 # ---------------------------------------------------------------------------
 func _clamp_to_edge(wpos: Vector3, vp: Vector2, behind: bool) -> Vector2:
+	# vp is already get_viewport_rect().size passed in from _draw()
 	var cen  = vp * 0.5
 	var raw: Vector2
 	if behind:

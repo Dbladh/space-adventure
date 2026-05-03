@@ -1385,8 +1385,27 @@ func update_thruster_audio(speed: float, is_boosting: bool) -> void:
 	# Normalise speed: 0 = slow cruise (~100 u/s), 1 = full warp (~6000+ u/s)
 	var t := clampf((speed - 60.0) / 5940.0, 0.0, 1.0)
 
+	# THRUSTER: always plays when moving (independent of boost)
+	_thruster_fadeout_time = 0.0
+	_thruster_target_pitch = lerpf(0.8, 1.4, t)
+	_thruster_target_volume = lerpf(-36.0, -20.0, t)
+
+	if speed > 100.0:
+		if not _sfx_ship_thruster.playing:
+			_sfx_ship_thruster.play()
+		_sfx_ship_thruster.pitch_scale = _thruster_target_pitch
+		_sfx_ship_thruster.volume_db = _thruster_target_volume
+	elif _sfx_ship_thruster.playing:
+		# Fade out when moving slowly
+		_thruster_fadeout_time += get_physics_process_delta_time()
+		var fade_progress := clampf(_thruster_fadeout_time / THRUSTER_FADEOUT_DURATION, 0.0, 1.0)
+		_sfx_ship_thruster.pitch_scale = lerpf(_thruster_target_pitch, 0.4, fade_progress)
+		_sfx_ship_thruster.volume_db = lerpf(_thruster_target_volume, -80.0, fade_progress)
+		if fade_progress >= 1.0:
+			_sfx_ship_thruster.stop()
+
+	# BOOST: layers on top of thrusters when active
 	if is_boosting:
-		# BOOST MODE: play boost sound, starts very low and increases gradually
 		_boost_fadeout_time = 0.0
 
 		# Gradual boost increase: much slower acceleration of pitch/volume
@@ -1400,38 +1419,7 @@ func update_thruster_audio(speed: float, is_boosting: bool) -> void:
 
 		_sfx_ship_boost.pitch_scale = _boost_target_pitch
 		_sfx_ship_boost.volume_db = _boost_target_volume
-
-		# Fade out thruster
-		if _sfx_ship_thruster.playing:
-			_thruster_fadeout_time += get_physics_process_delta_time()
-			var fade_progress := clampf(_thruster_fadeout_time / THRUSTER_FADEOUT_DURATION, 0.0, 1.0)
-			_sfx_ship_thruster.pitch_scale = lerpf(_thruster_target_pitch, 0.4, fade_progress)
-			_sfx_ship_thruster.volume_db = lerpf(_thruster_target_volume, -80.0, fade_progress)
-			if fade_progress >= 1.0:
-				_sfx_ship_thruster.stop()
 	else:
-		# NORMAL MODE: play thruster sound based on movement speed
-		_thruster_fadeout_time = 0.0
-
-		# Thruster: responsive to normal movement speed
-		# Quieter range than boost: -36dB to -20dB
-		_thruster_target_pitch = lerpf(0.8, 1.4, t)
-		_thruster_target_volume = lerpf(-36.0, -20.0, t)
-
-		if speed > 100.0:
-			if not _sfx_ship_thruster.playing:
-				_sfx_ship_thruster.play()
-			_sfx_ship_thruster.pitch_scale = _thruster_target_pitch
-			_sfx_ship_thruster.volume_db = _thruster_target_volume
-		elif _sfx_ship_thruster.playing:
-			# Fade out when moving slowly
-			_thruster_fadeout_time += get_physics_process_delta_time()
-			var fade_progress := clampf(_thruster_fadeout_time / THRUSTER_FADEOUT_DURATION, 0.0, 1.0)
-			_sfx_ship_thruster.pitch_scale = lerpf(_thruster_target_pitch, 0.4, fade_progress)
-			_sfx_ship_thruster.volume_db = lerpf(_thruster_target_volume, -80.0, fade_progress)
-			if fade_progress >= 1.0:
-				_sfx_ship_thruster.stop()
-
 		# Fade out boost when not boosting
 		if _sfx_ship_boost.playing:
 			_boost_fadeout_time += get_physics_process_delta_time()

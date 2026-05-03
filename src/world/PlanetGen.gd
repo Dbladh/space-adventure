@@ -13,6 +13,9 @@ const PlanetChunkScript := preload("res://src/world/PlanetChunk.gd")
 # Each planet must get a unique seed so terrain is distinct per celestial body!
 @export var planet_seed: int = 1234
 var mobile_perf: bool = false
+# Resources available to mine on this planet. Set externally before chunks generate.
+# Stone and Wood are always present; extras are tier-gated by how the planet was forged.
+var planet_resources: Array[String] = ["Stone", "Wood", "Copper"]
 
 # ATMOSPHERIC IDENTITY
 var sky_horizon_color: Color

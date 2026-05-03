@@ -7,12 +7,10 @@ extends Node
 
 signal inventory_changed(resource_type: String, new_amount: int)
 
-const RESOURCE_NAMES: Array[String] = ["Stone", "Wood", "Copper", "Silver", "Gold", "Platinum", "Diamond"]
-
 var _stacks: Dictionary = {}
 
 func _ready() -> void:
-	for r in RESOURCE_NAMES:
+	for r in ResourceRegistry.all_names():
 		_stacks[r] = 0
 
 func add(resource_type: String, amount: int = 1) -> void:

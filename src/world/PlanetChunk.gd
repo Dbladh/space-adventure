@@ -394,10 +394,20 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	# CPU HARDENING: Infrastructure (Metropolis) visible from ORBIT (<= 2000km).
 	# Nature remains restricted to approach zones (<= 20km).
-	if scale_factor > 2.0: return 
+	if scale_factor > 2.0: return
 	var radius_ratio: float = clamp(radius / 1000000.0, 0.3, 1.5)
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []; var g_pts: Array[Transform3D] = []; var c_pts: Array[Transform3D] = []
 	var m_pts: Array = []
+
+	# Cache the planet's mineable resource list locally — safe to read once from the
+	# background thread since planet_resources is set before chunk generation begins.
+	var _mineable: Array[String] = []
+	if is_instance_valid(planet) and "planet_resources" in planet:
+		for r in planet.get("planet_resources"):
+			if r != "Stone" and r != "Wood":
+				_mineable.append(r)
+	if _mineable.is_empty():
+		_mineable = ["Copper"]
 	
 	# ACE MESH HARDENING: Use tiered cell sizes to prevent 3.5M+ loop iterations.
 	var base_cell: float = 0.00008
@@ -435,8 +445,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			if (h_v % 20000) < 3:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
-					# 90% Copper crystal, 10% Silver ore chunk
-					var type = "Silver" if (h_v >> 7) % 10 == 0 else "Copper"
+					# Pick deterministically from this planet's resource pool
+					var type: String = _mineable[int(abs(float(h_v >> 7))) % _mineable.size()]
 					
 					# ACE: Small offset (5.0) since octahedron is now tip-anchored
 					var xf = _get_object_xform(cp * (radius + h + 5.0), cp, detail_n, 1.0)

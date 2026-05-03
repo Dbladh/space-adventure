@@ -282,6 +282,8 @@ func _setup_titan_planetary() -> void:
 		planet.global_position = Vector3(0, 0, -1500000.0)
 		planet.add_to_group("Planet")
 		planet_ref = planet
+		# Starting planet: all Tier 1 resources + Copper as first Tier 2 taste
+		planet.set("planet_resources", ["Stone", "Wood", "Neon Moss", "Silica Dust", "Copper"])
 
 func _setup_space_station() -> void:
 	var ss_script = load("res://src/world/SpaceStation.gd")
@@ -381,10 +383,9 @@ func _setup_hardened_diag_hud() -> void:
 		var _refresh_inv = func(_type: String, _amt: int) -> void:
 			var all = inv.get_all()
 			var parts: Array[String] = []
-			var abbrev = {"Stone": "St", "Wood": "Wd", "Copper": "Cu", "Silver": "Ag", "Gold": "Au", "Platinum": "Pt", "Diamond": "Di"}
-			for r in ["Stone", "Wood", "Copper", "Silver", "Gold", "Platinum", "Diamond"]:
+			for r in ResourceRegistry.all_names():
 				if all.get(r, 0) > 0:
-					parts.append(abbrev[r] + ":" + str(all[r]))
+					parts.append(ResourceRegistry.get_abbrev(r) + ":" + str(all[r]))
 			inv_label.text = "  ".join(parts)
 		inv.inventory_changed.connect(_refresh_inv)
 

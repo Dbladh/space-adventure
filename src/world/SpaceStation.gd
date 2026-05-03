@@ -9,26 +9,6 @@ extends Node3D
 const DOCK_RANGE: float = 200000.0
 const MAX_PLANETS: int = 3
 
-const RESOURCE_NAMES: Array = ["Stone", "Wood", "Copper", "Silver", "Gold", "Platinum", "Diamond"]
-const RESOURCE_ABBREV: Dictionary = {
-	"Stone":    "St",
-	"Wood":     "Wd",
-	"Copper":   "Cu",
-	"Silver":   "Ag",
-	"Gold":     "Au",
-	"Platinum": "Pt",
-	"Diamond":  "Di",
-}
-const RESOURCE_VALUES: Dictionary = {
-	"Stone":    5,
-	"Wood":     8,
-	"Copper":   10,
-	"Silver":   50,
-	"Gold":     250,
-	"Platinum": 1000,
-	"Diamond":  5000,
-}
-
 var _player: Node3D = null
 var _ui_layer: CanvasLayer = null
 var _panel: Control = null
@@ -157,8 +137,8 @@ func _build_ui() -> void:
 		var opt := OptionButton.new()
 		opt.add_theme_font_size_override("font_size", 20)
 		opt.custom_minimum_size = Vector2(130, 44)
-		for r in RESOURCE_NAMES:
-			opt.add_item(RESOURCE_ABBREV[r])
+		for r in ResourceRegistry.all_names():
+			opt.add_item(ResourceRegistry.get_abbrev(r))
 		opt.selected = i  # default: Cu / Ag / Au
 		_forge_slots.append(opt)
 		slots_hbox.add_child(opt)
@@ -221,10 +201,10 @@ func _refresh_inv_display() -> void:
 	var inv = Engine.get_meta("InventoryManager")
 	var all: Dictionary = inv.get_all()
 	var parts: Array[String] = []
-	for r in RESOURCE_NAMES:
+	for r in ResourceRegistry.all_names():
 		var amt: int = all.get(r, 0)
 		if amt > 0:
-			parts.append(RESOURCE_ABBREV[r] + ":" + str(amt))
+			parts.append(ResourceRegistry.get_abbrev(r) + ":" + str(amt))
 	_inv_label.text = "Inventory: " + ("  ".join(parts) if parts.size() > 0 else "(empty)")
 
 func _refresh_planets_ui() -> void:
@@ -247,7 +227,7 @@ func _refresh_planets_ui() -> void:
 		row.add_theme_constant_override("separation", 12)
 		_planets_container.add_child(row)
 
-		var combo: String = RESOURCE_ABBREV[entry.r1] + "+" + RESOURCE_ABBREV[entry.r2] + "+" + RESOURCE_ABBREV[entry.r3]
+		var combo: String = ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2) + "+" + ResourceRegistry.get_abbrev(entry.r3)
 		var seed_val: int = PlanetSeedKitchen.make_seed(entry.r1, entry.r2, entry.r3)
 
 		var lbl := Label.new()
@@ -304,10 +284,10 @@ func _on_sell_all() -> void:
 	var inv = Engine.get_meta("InventoryManager")
 	var econ = Engine.get_meta("EconomyManager")
 	var total: int = 0
-	for r in RESOURCE_NAMES:
+	for r in ResourceRegistry.all_names():
 		var amt: int = inv.get_amount(r)
 		if amt > 0:
-			total += amt * RESOURCE_VALUES[r]
+			total += amt * ResourceRegistry.get_value(r)
 			inv.consume(r, amt)
 	if total > 0:
 		econ.add_credits(total)
@@ -330,9 +310,9 @@ func _on_forge_planet() -> void:
 		return
 	var inv = Engine.get_meta("InventoryManager")
 
-	var r1: String = RESOURCE_NAMES[_forge_slots[0].selected]
-	var r2: String = RESOURCE_NAMES[_forge_slots[1].selected]
-	var r3: String = RESOURCE_NAMES[_forge_slots[2].selected]
+	var r1: String = ResourceRegistry.all_names()[_forge_slots[0].selected]
+	var r2: String = ResourceRegistry.all_names()[_forge_slots[1].selected]
+	var r3: String = ResourceRegistry.all_names()[_forge_slots[2].selected]
 	var cost: Dictionary = PlanetSeedKitchen.resource_cost(r1, r2, r3)
 
 	for res in cost:
@@ -345,10 +325,13 @@ func _on_forge_planet() -> void:
 
 	var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3)
 	var planet_node := _spawn_planet_node(seed_val)
+	# Set what resources this planet contains based on the forge tier
+	var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
+	planet_node.set("planet_resources", planet_res)
 	_active_planets.append({node = planet_node, r1 = r1, r2 = r2, r3 = r3})
 	_refresh_planets_ui()
 
-	var combo: String = RESOURCE_ABBREV[r1] + "+" + RESOURCE_ABBREV[r2] + "+" + RESOURCE_ABBREV[r3]
+	var combo: String = ResourceRegistry.get_abbrev(r1) + "+" + ResourceRegistry.get_abbrev(r2) + "+" + ResourceRegistry.get_abbrev(r3)
 	_set_status("Planet forged! (" + combo + ")\nSeed: " + str(seed_val), Color(0.4, 1.0, 0.6))
 
 func _on_dismantle(entry: Dictionary) -> void:
@@ -365,7 +348,7 @@ func _on_dismantle(entry: Dictionary) -> void:
 	_active_planets.erase(entry)
 	_refresh_planets_ui()
 
-	var combo: String = RESOURCE_ABBREV[entry.r1] + "+" + RESOURCE_ABBREV[entry.r2] + "+" + RESOURCE_ABBREV[entry.r3]
+	var combo: String = ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2) + "+" + ResourceRegistry.get_abbrev(entry.r3)
 	_set_status("Dismantled (" + combo + ")\nResources refunded.", Color(0.8, 0.8, 0.4))
 
 # ---------------------------------------------------------------------------
@@ -379,7 +362,7 @@ func _set_status(msg: String, col: Color) -> void:
 func _format_cost(cost: Dictionary) -> String:
 	var parts: Array[String] = []
 	for r in cost:
-		parts.append(str(cost[r]) + "× " + RESOURCE_ABBREV[r])
+		parts.append(str(cost[r]) + "× " + ResourceRegistry.get_abbrev(r))
 	return ",  ".join(parts)
 
 func _spawn_planet_node(seed_val: int) -> Node3D:

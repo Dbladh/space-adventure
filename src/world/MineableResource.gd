@@ -33,12 +33,13 @@ const _MESH_UNIT_SIZE: float = 1.0            # unit-scale octahedron geometry
 func _ready() -> void:
 	add_to_group("Mineable") # ACE: Absolute identification for projectiles
 	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
-	# ACE SCALING: Balanced Mining Integrity – Just a few shots
-	match resource_type:
-		"Silver": health = 5.0
-		"Gold": health = 8.0
-		"Platinum": health = 10.0
-		"Diamond": health = 12.0
+	# Health scales with resource tier — rarer deposits take more shots
+	var tier := ResourceRegistry.get_tier(resource_type)
+	match tier:
+		1: health = 2.0
+		2: health = 4.0
+		3: health = 7.0
+		4: health = 12.0
 		_: health = 3.0
 	max_health = health
 	
@@ -106,7 +107,7 @@ static func _get_or_build_mesh(type: String) -> ArrayMesh:
 		return _shared_meshes[type]
 
 	var mesh: ArrayMesh
-	if type == "Silver":
+	if type == "Silver" or type == "Basalt Glass":
 		mesh = _build_blocky_mesh()
 	else:
 		mesh = _build_octahedron_mesh(type)
@@ -172,15 +173,7 @@ static func _build_blocky_mesh() -> ArrayMesh:
 	return st.commit()
 
 static func _color_for_type(type: String) -> Color:
-	# Static mirror of _get_resource_color() (which is instance-scoped).
-	# Used by _get_or_build_mesh() at class scope.
-	match type:
-		"Copper":   return Color(0.48, 0.18, 0.08)
-		"Silver":   return Color(0.7, 0.7, 0.75)
-		"Gold":     return Color(1.0, 0.6, 0.0)
-		"Platinum": return Color(0.85, 0.85, 0.95)
-		"Diamond":  return Color(0.3, 0.8, 1.0)
-	return Color.GRAY
+	return ResourceRegistry.get_color(type)
 
 static func _get_or_build_shape(size: float) -> CylinderShape3D:
 	# Quantize to 5m buckets so e.g. size 87.3 and 89.6 share the same shape.
@@ -195,13 +188,7 @@ static func _get_or_build_shape(size: float) -> CylinderShape3D:
 	return cyl
 
 func _get_resource_color() -> Color:
-	match resource_type:
-		"Copper": return Color(0.48, 0.18, 0.08) # ACE: Deep Burnished Copper (High Contrast)
-		"Silver": return Color(0.7, 0.7, 0.75)
-		"Gold": return Color(1.0, 0.6, 0.0) # Richer Gold
-		"Platinum": return Color(0.85, 0.85, 0.95)
-		"Diamond": return Color(0.3, 0.8, 1.0)
-	return Color.GRAY
+	return ResourceRegistry.get_color(resource_type)
 
 func take_damage(_amount: float) -> void:
 	# print("[MINERAL] Hit Detected! Health: ", health - 1.0)

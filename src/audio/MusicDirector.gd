@@ -59,6 +59,12 @@ var _sfx_ship_thruster: AudioStreamPlayer  # ship_boost.wav looped, pitch+vol sc
 var _sfx_explosion_small: AudioStreamPlayer
 var _sfx_explosion_big: AudioStreamPlayer
 
+# Thruster fadeout state
+var _thruster_fadeout_time: float = 0.0
+var _thruster_target_volume: float = -48.0
+var _thruster_target_pitch: float = 0.5
+const THRUSTER_FADEOUT_DURATION: float = 0.3
+
 # =====================================================================
 #  SYNTH ENGINE
 # =====================================================================
@@ -1360,20 +1366,33 @@ func update_thruster_audio(speed: float, is_boosting: bool) -> void:
 	if not _sfx_ship_thruster:
 		return
 
-	# Only play thruster when actively boosting
-	if not is_boosting:
-		if _sfx_ship_thruster.playing:
-			_sfx_ship_thruster.stop()
-		return
-
 	# Normalise speed: 0 = slow cruise (~100 u/s), 1 = full warp (~6000+ u/s)
 	var t := clampf((speed - 60.0) / 5940.0, 0.0, 1.0)
-	# Extended pitch range: 0.5 to 2.2 for more dramatic pitch variation
-	_sfx_ship_thruster.pitch_scale = lerpf(0.5, 2.2, t)
-	_sfx_ship_thruster.volume_db   = lerpf(-48.0, -28.0, t)
-	if not _sfx_ship_thruster.playing:
-		print("[SFX] Starting thruster (speed=", speed, " vol=", _sfx_ship_thruster.volume_db, ")")
-		_sfx_ship_thruster.play()
+
+	if is_boosting:
+		# Active boost: update target pitch/volume based on speed
+		_thruster_fadeout_time = 0.0
+		_thruster_target_pitch = lerpf(0.5, 2.2, t)
+		_thruster_target_volume = lerpf(-48.0, -28.0, t)
+
+		if not _sfx_ship_thruster.playing:
+			_sfx_ship_thruster.play()
+
+		_sfx_ship_thruster.pitch_scale = _thruster_target_pitch
+		_sfx_ship_thruster.volume_db = _thruster_target_volume
+	else:
+		# Not boosting: smooth fadeout
+		if _sfx_ship_thruster.playing:
+			_thruster_fadeout_time += get_physics_process_delta_time()
+			var fade_progress := clampf(_thruster_fadeout_time / THRUSTER_FADEOUT_DURATION, 0.0, 1.0)
+
+			# Smoothly decrease pitch to lowest point
+			_sfx_ship_thruster.pitch_scale = lerpf(_thruster_target_pitch, 0.4, fade_progress)
+			# Smoothly fade volume down to silence
+			_sfx_ship_thruster.volume_db = lerpf(_thruster_target_volume, -80.0, fade_progress)
+
+			if fade_progress >= 1.0:
+				_sfx_ship_thruster.stop()
 
 func play_explosion(is_big: bool = false) -> void:
 	var sfx = _sfx_explosion_big if is_big else _sfx_explosion_small

@@ -9,6 +9,7 @@ var is_fullscreen: bool = false
 var player_node: Node3D = null
 var planets: Array = []
 var enemies: Array = []
+var stations: Array = []
 var base_map_size: Vector2 = Vector2(480, 480)
 var max_range: float = 6250000.0  # 6,250 km tactical range
 
@@ -19,6 +20,7 @@ func _ready() -> void:
 	set_process(true)
 	planets = get_tree().get_nodes_in_group("Planet")
 	enemies = get_tree().get_nodes_in_group("Enemy")
+	stations = get_tree().get_nodes_in_group("SpaceStation")
 
 func _draw() -> void:
 	var ms   = size if size.x > 1.0 else base_map_size
@@ -52,6 +54,23 @@ func _draw() -> void:
 			var p_name = p.name.replace("Planet_", "")
 			draw_string(font, ui_pos + Vector2(p_r + 6, 8),
 				p_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color.WHITE)
+
+	# ── Space Stations (star markers) ──────────────────────────────────
+	for s in stations:
+		if not is_instance_valid(s): continue
+		var ui_pos = _world_to_map(s.global_position, ms)
+
+		# Render as a 6-pointed star in gold
+		var s_r = 12.0 if is_fullscreen else 9.0
+		var s_col = Color(0.95, 0.85, 0.2, 0.9)  # gold
+		_draw_star(ui_pos, s_r, s_col)
+
+		# Station name: only in pause/fullscreen map
+		if is_fullscreen:
+			var font = ThemeDB.get_fallback_font()
+			var s_name = s.name.replace("SpaceStation_", "")
+			draw_string(font, ui_pos + Vector2(s_r + 6, 8),
+				s_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(0.95, 0.85, 0.2))
 
 	# ── Player ───────────────────────────────────────────────────────
 	if not player_node:
@@ -104,8 +123,18 @@ func _world_to_map(world_pos: Vector3, ms: Vector2) -> Vector2:
 		scaled = scaled.normalized() * (ms.x * 0.44)
 	return cen + scaled
 
+func _draw_star(center: Vector2, radius: float, color: Color) -> void:
+	var points = PackedVector2Array()
+	for i in range(12):
+		var angle = (i * TAU / 12.0) - TAU / 4.0
+		var dist = radius if i % 2 == 0 else radius * 0.5
+		points.append(center + Vector2(cos(angle), sin(angle)) * dist)
+	draw_colored_polygon(points, color)
+	draw_polyline(points + PackedVector2Array([points[0]]), Color.BLACK, 1.0)
+
 func _process(_delta: float) -> void:
 	if Engine.get_frames_drawn() % 60 == 0:
 		planets = get_tree().get_nodes_in_group("Planet")
 		enemies = get_tree().get_nodes_in_group("Enemy")
+		stations = get_tree().get_nodes_in_group("SpaceStation")
 	queue_redraw()

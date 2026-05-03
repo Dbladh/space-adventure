@@ -291,6 +291,7 @@ func _setup_space_station() -> void:
 	var station := Node3D.new()
 	station.set_script(ss_script)
 	station.name = "SpaceStation_Alpha"
+	station.add_to_group("SpaceStation")
 	world_root.add_child(station)
 	# Orbit Planet_Varn (at 0,0,-1500000) at a safe distance above the ring belt
 	station.global_position = Vector3(0, 80000.0, -2900000.0)
@@ -389,12 +390,21 @@ func _setup_hardened_diag_hud() -> void:
 			inv_label.text = "  ".join(parts)
 		inv.inventory_changed.connect(_refresh_inv)
 
+	# NAVIGATION BEACON: Shows nearest space station bearing and distance
+	var beacon_script = load("res://src/ui/NavBeacon.gd")
+	if beacon_script:
+		var beacon = Control.new()
+		beacon.set_script(beacon_script)
+		beacon.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		beacon.custom_minimum_size = Vector2(200, 100)
+		hud_layer.add_child(beacon)
+
 	# ACE NAVIGATION: Inject the tactical galaxy map into the HUD
 	var map_script = load("res://src/ui/GalaxyMapUI.gd")
 	if map_script:
 		map_node = Control.new()
 		map_node.set_script(map_script)
-		map_node.custom_minimum_size = Vector2(480, 480) 
+		map_node.custom_minimum_size = Vector2(480, 480)
 		hud_layer.add_child(map_node)
 		_reset_map_to_corner()
 		map_node.hide() # ACE: Hidden during normal play

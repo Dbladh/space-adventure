@@ -6,12 +6,12 @@ class_name ResourceRegistry
 
 const RESOURCES: Array[Dictionary] = [
 	# Tier 1 — Common
-	{name="Stone",           tier=1, rtype="Mineral",   value=5,    abbrev="St", color=Color(0.55, 0.52, 0.48)},
-	{name="Wood",            tier=1, rtype="Organic",   value=5,    abbrev="Wd", color=Color(0.42, 0.26, 0.10)},
+	{name="Stone",           tier=1, rtype="Mineral",   value=15,   abbrev="St", color=Color(0.55, 0.52, 0.48)},
+	{name="Wood",            tier=1, rtype="Organic",   value=15,   abbrev="Wd", color=Color(0.42, 0.26, 0.10)},
 	{name="Neon Moss",       tier=1, rtype="Organic",   value=15,   abbrev="NM", color=Color(0.10, 0.90, 0.25)},
 	{name="Silica Dust",     tier=1, rtype="Mineral",   value=15,   abbrev="Si", color=Color(0.88, 0.82, 0.62)},
 	# Tier 2 — Uncommon
-	{name="Copper",          tier=2, rtype="Metallic",  value=50,   abbrev="Cu", color=Color(0.72, 0.33, 0.15)},
+	{name="Copper",          tier=2, rtype="Metallic",  value=35,   abbrev="Cu", color=Color(0.72, 0.33, 0.15)},
 	{name="Azure Sap",       tier=2, rtype="Liquid",    value=65,   abbrev="AS", color=Color(0.10, 0.48, 0.92)},
 	{name="Basalt Glass",    tier=2, rtype="Mineral",   value=70,   abbrev="BG", color=Color(0.12, 0.10, 0.18)},
 	{name="Silver",          tier=2, rtype="Metallic",  value=100,  abbrev="Ag", color=Color(0.75, 0.75, 0.82)},

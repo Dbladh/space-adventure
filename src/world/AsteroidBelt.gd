@@ -24,6 +24,7 @@ var mmi_phys_high: MultiMeshInstance3D # Near-Field 'Hero' Rocks (1.5k, High Det
 var player: Node3D
 var _health_component_script: Script = null
 var _mine_component_script: Script = null
+var _asteroid_script: Script = null
 var mobile_perf: bool = false
 
 # LOD CONSTANTS
@@ -47,6 +48,7 @@ func _ready() -> void:
 	rock_mesh_high = _build_faceted_rock_mesh(12) # High-Fidelity
 	_health_component_script = load("res://src/combat/HealthComponent.gd")
 	_mine_component_script = load("res://src/world/AsteroidMineComponent.gd")
+	_asteroid_script = load("res://src/world/Asteroid.gd")
 	_spawn_deterministic_belt()
 	set_process(true)
 	
@@ -202,6 +204,8 @@ func _process_physical_spawning() -> void:
 		var dist = _rng.randf_range(inner_radius, outer_radius)
 		var h = pow(_rng.randf_range(-1.0, 1.0), 2.0) * (thickness * 0.8)
 		var asteroid = StaticBody3D.new()
+		if _asteroid_script:
+			asteroid.set_script(_asteroid_script)
 		asteroid.position = Vector3(cos(angle) * dist, h, sin(angle) * dist)
 		asteroid.rotation = Vector3(_rng.randf() * TAU, _rng.randf() * TAU, _rng.randf() * TAU)
 		var s_roll = _rng.randf()
@@ -228,9 +232,8 @@ func _process_physical_spawning() -> void:
 		if hc and mc:
 			hc.health_depleted.connect(mc._on_health_depleted)
 
-		# Delegate take_damage to HealthComponent
-		if hc:
-			asteroid.take_damage = func(amount: float) -> void: hc.take_damage(amount)
+		# Health and Mining components are added as children; 
+		# Asteroid.gd forwards take_damage() to HealthComponent automatically.
 
 		add_child(asteroid); asteroid.add_to_group("Targets"); asteroid.add_to_group("Destructible"); asteroid.add_to_group("Mineable"); asteroids.append(asteroid); coll_nodes.append(collision)
 		_spawn_idx += 1

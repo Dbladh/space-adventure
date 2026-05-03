@@ -441,8 +441,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
 			# WILDERNESS ZONE: Minerals & Nature
 			# -----------------------------------
-			# 1. MINERAL PRIORITY: Colossal Rarity
-			if (h_v % 20000) < 3:
+			# 1. MINERAL PRIORITY: Colossal Rarity (reduced Copper spawning)
+			if (h_v % 30000) < 1:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
 					# Pick deterministically from this planet's resource pool
@@ -537,7 +537,7 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	_apply_planetary_lod_policy(mmi_l, false)
 	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; add_child(mmi_l)
 
-	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Stone", 50, 8.0)
+	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Stone", 120, 8.0)
 
 func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: String, max_count: int, sphere_r: float) -> void:
 	if _is_mobile_perf(): return
@@ -665,7 +665,7 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 		_apply_planetary_lod_policy(mti_m, false)
 		_apply_planetary_lod_policy(mti_t, true) # Trunks only visible in High-Detail zone
 
-		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 25, 15.0)
+		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 60, 15.0)
 	else:
 		# Mid/Far Chunk: Single simplified MultiMesh
 		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true; mm.instance_count = n

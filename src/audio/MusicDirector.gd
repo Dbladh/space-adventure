@@ -57,9 +57,13 @@ var _sfx_ship_fire: AudioStreamPlayer
 var _sfx_ship_idle: AudioStreamPlayer    # constant low hum, always looping
 var _sfx_ship_thruster: AudioStreamPlayer  # ship_thrusters.wav looped, normal movement
 var _sfx_ship_boost: AudioStreamPlayer    # ship_boost.wav looped, warp/boost mode
+var _sfx_ship_boost_start: AudioStreamPlayer  # boost initialization sound
 var _sfx_explosion_small: AudioStreamPlayer
 var _sfx_explosion_big: AudioStreamPlayer
 var _sfx_item_collect: AudioStreamPlayer  # item collect/shard pickup
+
+# Boost state tracking (for one-shot start sound)
+var _was_boosting: bool = false
 
 # Thruster fadeout state
 var _thruster_fadeout_time: float = 0.0
@@ -427,6 +431,13 @@ func _ready() -> void:
 	_sfx_ship_boost.volume_db = -56.0
 	_sfx_ship_boost.pitch_scale = 0.4
 	add_child(_sfx_ship_boost)
+
+	# Boost start sound — plays once when boost is initiated
+	_sfx_ship_boost_start = AudioStreamPlayer.new()
+	_sfx_ship_boost_start.bus = "Master"
+	_sfx_ship_boost_start.stream = load("res://assets/resources/audio/ship_boost_start.wav")
+	_sfx_ship_boost_start.volume_db = -12.0
+	add_child(_sfx_ship_boost_start)
 
 	# Explosions — proportionally louder than music to feel impactful
 	_sfx_explosion_small = AudioStreamPlayer.new()
@@ -1435,6 +1446,10 @@ func update_thruster_audio(speed: float, is_boosting: bool) -> void:
 
 	# BOOST: layers on top of thrusters when active
 	if is_boosting:
+		# Play boost start sound only on transition (not every frame)
+		if not _was_boosting:
+			play_boost_start()
+		_was_boosting = true
 		_boost_fadeout_time = 0.0
 
 		# Gradual boost increase: much slower acceleration of pitch/volume
@@ -1449,6 +1464,9 @@ func update_thruster_audio(speed: float, is_boosting: bool) -> void:
 		_sfx_ship_boost.pitch_scale = _boost_target_pitch
 		_sfx_ship_boost.volume_db = _boost_target_volume
 	else:
+		# Reset boost state for next activation
+		_was_boosting = false
+
 		# Fade out boost when not boosting
 		if _sfx_ship_boost.playing:
 			_boost_fadeout_time += get_physics_process_delta_time()
@@ -1468,3 +1486,8 @@ func play_item_collect() -> void:
 	if _sfx_item_collect:
 		_sfx_item_collect.stop()
 		_sfx_item_collect.play()
+
+func play_boost_start() -> void:
+	if _sfx_ship_boost_start:
+		_sfx_ship_boost_start.stop()
+		_sfx_ship_boost_start.play()

@@ -23,6 +23,9 @@ var surface_dist: float = 0.0
 var spin_axis: Vector3 = Vector3.UP
 var spin_speed: float = 4.0
 
+# Whoosh effect during homing
+var _whoosh_player: AudioStreamPlayer3D = null
+
 func _ready() -> void:
 	if _shared_mesh == null:
 		_shared_mesh = _build_shared_mesh()
@@ -36,6 +39,15 @@ func _ready() -> void:
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mi.material_override = mat
 	add_child(mi)
+
+	# Setup whoosh effect (3D spatial audio)
+	_whoosh_player = AudioStreamPlayer3D.new()
+	_whoosh_player.bus = "Master"
+	_whoosh_player.stream = load("res://assets/resources/audio/item_whoosh.wav")
+	_whoosh_player.volume_db = -20.0
+	_whoosh_player.max_distance = 2000.0
+	_whoosh_player.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+	add_child(_whoosh_player)
 
 	# EXPLOSION VELOCITY: random direction biased upward (away from planet
 	# centre) so shards arc dramatically above the mineral before falling back
@@ -143,10 +155,29 @@ func _process(delta: float) -> void:
 
 			rotate(spin_axis, delta * (spin_speed * 2.0))
 
+			# Whoosh effect: play and modulate based on distance
+			if _whoosh_player:
+				if not _whoosh_player.playing:
+					_whoosh_player.play()
+
+				# Volume increases as it gets closer (inverse distance)
+				# At 2000 units away: very quiet, at 100 units: loud
+				var vol_factor = clampf(1.0 - (dist / 2000.0), 0.0, 1.0)
+				_whoosh_player.volume_db = -40.0 + vol_factor * 20.0  # -40dB to -20dB
+
+				# Pitch increases as it gets closer (Doppler-like effect)
+				# At 2000 units: 0.8, at 100 units: 1.4
+				var pitch_factor = clampf(dist / 2000.0, 0.0, 1.0)
+				_whoosh_player.pitch_scale = 1.4 - pitch_factor * 0.6  # 1.4 to 0.8
+
 			if dist < 80.0:
 				_on_collected()
 
 func _on_collected() -> void:
+	# Stop whoosh effect
+	if _whoosh_player and _whoosh_player.playing:
+		_whoosh_player.stop()
+
 	# Play item collect sound
 	var music_director = get_tree().get_nodes_in_group("MusicDirector")
 	if music_director.size() > 0:

@@ -28,6 +28,8 @@ var _ui_visible: bool = false
 var _active_planets: Array[Dictionary] = []
 
 func _ready() -> void:
+	# ALWAYS so the Close button and _process work even when tree is paused for docking
+	process_mode = PROCESS_MODE_ALWAYS
 	add_to_group("SpaceStation")
 	_build_visual()
 	_build_ui()
@@ -117,6 +119,8 @@ func _build_visual() -> void:
 func _build_ui() -> void:
 	_ui_layer = CanvasLayer.new()
 	_ui_layer.layer = 130
+	# ALWAYS so buttons remain interactive while the gameplay tree is paused
+	_ui_layer.process_mode = PROCESS_MODE_ALWAYS
 	add_child(_ui_layer)
 
 	# Use a ScrollContainer so the panel adapts to variable planet list height
@@ -324,10 +328,16 @@ func _show_ui() -> void:
 	_refresh_inv_display()
 	_refresh_planets_ui()
 	_forge_status.text = ""
+	# Hide all gameplay HUD and freeze the world while docked
+	get_tree().call_group("GameHUD", "hide")
+	get_tree().paused = true
 
 func _hide_ui() -> void:
 	_ui_visible = false
 	_panel.hide()
+	# Restore gameplay HUD and unpause
+	get_tree().paused = false
+	get_tree().call_group("GameHUD", "show")
 
 # ---------------------------------------------------------------------------
 # ACTIONS

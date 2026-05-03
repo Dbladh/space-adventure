@@ -289,9 +289,10 @@ func _setup_space_station() -> void:
 	# Planet_Varn: centre (0,0,-1,500,000), radius 1,125,000m, belt to ~2,625,000m.
 	# Stations are ~300 km across so the POI beacon height must exceed their radius.
 
-	# 1. Orbital — just outside Planet_Varn's atmosphere (~1,350 km from centre)
+	# 1. Orbital — directly above Planet_Varn, 1.3 Mm from centre (130 km above atmosphere).
+	#    Positioned along +Y from the planet so it's visible from the player's spawn at origin.
 	_spawn_station("Orbital",
-		Vector3(1_350_000, 250_000, -1_500_000),
+		Vector3(0, 1_300_000, -1_500_000),
 		Color(0.3, 1.0, 0.5))   # green — the "home" station
 
 	# 2. Alpha — deep space along -Z, far from the belt
@@ -372,7 +373,8 @@ func _setup_deep_space_minerals() -> void:
 
 func _setup_hardened_diag_hud() -> void:
 	hud_layer = CanvasLayer.new()
-	hud_layer.layer = 125 
+	hud_layer.layer = 125
+	hud_layer.add_to_group("GameHUD")
 	diag_label = Label.new()
 	# ACE: Safe Area Padding for iPhone 15 (Dynamic Island fallback)
 	diag_label.position = Vector2(80, 40)

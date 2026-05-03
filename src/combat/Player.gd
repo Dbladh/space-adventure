@@ -214,7 +214,9 @@ func _setup_ace_camera() -> void:
 	_setup_thruster_trails()
 
 func _setup_combat_hud() -> void:
-	var hud = CanvasLayer.new(); hud.name = "CombatHUD"; hud.layer = 125; add_child(hud)
+	var hud = CanvasLayer.new(); hud.name = "CombatHUD"; hud.layer = 125
+	hud.add_to_group("GameHUD")
+	add_child(hud)
 	
 	# ACE VISOR: Create a high-fidelity dynamic targeting circle
 	hud_reticle = Control.new()

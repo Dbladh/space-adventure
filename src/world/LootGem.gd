@@ -184,6 +184,6 @@ func _on_collected() -> void:
 		music_director[0].call("play_item_collect")
 
 	# Add to economy
-	var economy = get_node_or_null("/root/EconomyManager")
-	if economy: economy.call("add_credits", value)
+	if Engine.has_meta("EconomyManager"):
+		Engine.get_meta("EconomyManager").add_credits(value)
 	queue_free()

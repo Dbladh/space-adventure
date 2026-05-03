@@ -27,6 +27,10 @@ const RESOURCE_VALUES: Dictionary = {
 
 const RESOURCE_TITLES: Array = ["Copper", "Silver", "Gold", "Platinum", "Diamond"]
 
+func add_credits(amount: int) -> void:
+	credits += amount
+	emit_signal("currency_changed", credits)
+
 func add_resource(type: String, amount: int = 1) -> void:
 	if inventory.has(type):
 		inventory[type] += amount

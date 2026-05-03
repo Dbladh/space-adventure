@@ -226,9 +226,8 @@ func _on_mined() -> void:
 	var pos_hash = hash(global_position.round())
 	_destroyed_positions[pos_hash] = true
 
-	var economy = get_node_or_null("/root/EconomyManager")
-	if economy:
-		economy.call("add_credits", 1)
+	if Engine.has_meta("EconomyManager"):
+		Engine.get_meta("EconomyManager").add_credits(1)
 
 	# Musical stinger: harmonic burst tuned to the resource type
 	var md_nodes = get_tree().get_nodes_in_group("MusicDirector")

@@ -115,20 +115,37 @@ func _spawn_deterministic_belt() -> void:
 
 var proc_idx: int = 0
 const BATCH_SIZE: int = 32
+var _cleanup_counter: int = 0
+
+func _cleanup_destroyed_asteroids() -> void:
+	_cleanup_counter += 1
+	if _cleanup_counter < 10: return
+	_cleanup_counter = 0
+
+	var i = asteroids.size() - 1
+	while i >= 0:
+		if not is_instance_valid(asteroids[i]):
+			asteroids.remove_at(i)
+			coll_nodes.remove_at(i)
+			if proc_idx > i: proc_idx -= 1
+		i -= 1
 
 func _process(delta: float) -> void:
 	if _is_spawning_phys:
 		_process_physical_spawning()
 		return
 
-	if not player: 
+	if not player:
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0: player = found[0]
 		return
 
+	# Periodically clean up destroyed asteroids
+	_cleanup_destroyed_asteroids()
+
 	var p_pos = player.global_position
 	var dist_to_planet = p_pos.distance_to(global_position)
-	
+
 	# STELLAR HIBERNATION: Beyond 4,000km, we disable the individual rock loop.
 	# Also, HIDE BELT if we are deep in the atmosphere (sub-250km altitude)
 	if dist_to_planet < 1375000.0:
@@ -136,10 +153,10 @@ func _process(delta: float) -> void:
 		return
 	elif not visible:
 		show()
-		
+
 	if dist_to_planet > STELLAR_CUTOFF:
 		return
-	
+
 	# PERFORMANCE: Update a smaller slice each frame so the belt LOD stays smooth
 	# without turning per-frame visibility bookkeeping into a spike.
 	# MOBILE: Tighter batch (16) — with a 30fps cap we have twice as much wall
@@ -147,21 +164,22 @@ func _process(delta: float) -> void:
 	# sweeps all 150 rocks in <10 frames.
 	var final_batch = 16 if mobile_perf else (64 if dist_to_planet < 2200000.0 else 32)
 	for k in range(final_batch):
+		if asteroids.is_empty(): break
 		proc_idx = (proc_idx + 1) % asteroids.size()
 		var a = asteroids[proc_idx]
-		if not is_instance_valid(a): continue 
-		
+		if not is_instance_valid(a): continue
+
 		var dist_sq = a.global_position.distance_squared_to(p_pos)
 		var coll = coll_nodes[proc_idx]
-		
+
 		# MANUAL LOD STATE MACHINE
 		if dist_sq < HIDE_LOD_DIST * HIDE_LOD_DIST:
 			# SHOW LOGIC: Swapping between Med/High based on 12km threshold
 			var use_high = dist_sq < 12000.0 * 12000.0
-			
+
 			mmi_phys_high.multimesh.set_instance_transform(proc_idx, a.transform if use_high else Transform3D().scaled(Vector3.ZERO))
 			mmi_phys_med.multimesh.set_instance_transform(proc_idx, a.transform if not use_high else Transform3D().scaled(Vector3.ZERO))
-			
+
 			# PHYSICS LOD: Enable collision only within 80km
 			coll.disabled = dist_sq > PHYSICS_LOD_DIST * PHYSICS_LOD_DIST
 		else:

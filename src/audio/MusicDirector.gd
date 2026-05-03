@@ -382,23 +382,23 @@ func _ready() -> void:
 
 	# Idle hum — looping, very low-level ambient background at all times
 	var idle_stream = load("res://assets/resources/audio/ship_idle.wav")
-	if idle_stream is AudioStreamWAV:
-		idle_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	print("[SFX] ship_idle.wav loaded: ", idle_stream)
 	_sfx_ship_idle = AudioStreamPlayer.new()
 	_sfx_ship_idle.bus = "Master"
 	_sfx_ship_idle.stream = idle_stream
-	_sfx_ship_idle.volume_db = -28.0   # barely audible — atmospheric texture only
+	_sfx_ship_idle.volume_db = -28.0   # barely audible ambient hum
+	_sfx_ship_idle.stream_paused = false
 	add_child(_sfx_ship_idle)
+	print("[SFX] ship_idle: stream loaded, playing")
 	_sfx_ship_idle.play()
+	print("[SFX] ship_idle playing: ", _sfx_ship_idle.playing)
 
 	# Thruster engine (uses ship_boost.wav) — loops while moving, pitch+vol scale with speed
 	var thruster_stream = load("res://assets/resources/audio/ship_boost.wav")
-	if thruster_stream is AudioStreamWAV:
-		thruster_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
 	_sfx_ship_thruster = AudioStreamPlayer.new()
 	_sfx_ship_thruster.bus = "Master"
 	_sfx_ship_thruster.stream = thruster_stream
-	_sfx_ship_thruster.volume_db = -20.0   # start quiet; updated by update_thruster_audio()
+	_sfx_ship_thruster.volume_db = -28.0   # start quiet; increases with speed
 	_sfx_ship_thruster.pitch_scale = 0.70
 	add_child(_sfx_ship_thruster)
 
@@ -1366,8 +1366,9 @@ func update_thruster_audio(speed: float) -> void:
 	# Normalise speed: 0 = slow cruise (~100 u/s), 1 = full warp (~6000+ u/s)
 	var t := clampf((speed - 60.0) / 5940.0, 0.0, 1.0)
 	_sfx_ship_thruster.pitch_scale = lerpf(0.68, 1.38, t)
-	_sfx_ship_thruster.volume_db   = lerpf(-20.0, -7.0, t)
+	_sfx_ship_thruster.volume_db   = lerpf(-28.0, -16.0, t)
 	if not _sfx_ship_thruster.playing:
+		print("[SFX] Starting thruster (speed=", speed, " vol=", _sfx_ship_thruster.volume_db, ")")
 		_sfx_ship_thruster.play()
 
 func play_explosion(is_big: bool = false) -> void:

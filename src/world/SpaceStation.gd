@@ -18,7 +18,11 @@ var _ui_layer: CanvasLayer = null
 var _panel: Control = null
 var _inv_label: Label = null
 var _creds_label: Label = null
-var _forge_slots: Array = []          # Array[OptionButton]
+var _forge_slots: Array = []          # Array[OptionButton] (legacy, unused)
+var _forge_selected: Array[String] = []  # Up to 3 chosen resource names
+var _forge_card_grid: GridContainer = null
+var _forge_slot_labels: Array = []    # 3 Label nodes showing chosen slots
+var _forge_btn: Button = null
 var _forge_status: Label = null
 var _planets_container: VBoxContainer = null
 var _worlds_header: Label = null
@@ -29,6 +33,47 @@ var _cinematic_active: bool = false
 
 # Each entry: { node: Node3D, r1: String, r2: String, r3: String }
 static var _active_planets: Array[Dictionary] = []
+
+class ForgeSlot extends PanelContainer:
+	var slot_index: int = 0
+	var station_ref: Node = null
+	func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
+		return typeof(data) == TYPE_DICTIONARY and data.has("type") and data["type"] == "resource"
+	func _drop_data(_at_position: Vector2, data: Variant) -> void:
+		station_ref._on_card_pressed(data["res"])
+	func _get_drag_data(_at_position: Vector2) -> Variant:
+		if slot_index >= station_ref._forge_selected.size(): return null
+		var r: String = station_ref._forge_selected[slot_index]
+		var preview := PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = station_ref._tier_color(ResourceRegistry.get_tier(r)).darkened(0.5)
+		sb.content_margin_left = 10; sb.content_margin_right = 10
+		sb.content_margin_top = 4; sb.content_margin_bottom = 4
+		preview.add_theme_stylebox_override("panel", sb)
+		var lbl := Label.new()
+		lbl.text = ResourceRegistry.get_abbrev(r)
+		preview.add_child(lbl)
+		set_drag_preview(preview)
+		station_ref._on_remove_slot(slot_index)
+		return {"type": "removed_resource", "res": r}
+
+class ResourceCard extends PanelContainer:
+	var resource_id: String = ""
+	var available_count: int = 0
+	var station_ref: Node = null
+	func _get_drag_data(_at_position: Vector2) -> Variant:
+		if available_count <= 0 or station_ref._forge_selected.size() >= 3: return null
+		var preview := PanelContainer.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = station_ref._tier_color(ResourceRegistry.get_tier(resource_id)).darkened(0.5)
+		sb.content_margin_left = 10; sb.content_margin_right = 10
+		sb.content_margin_top = 4; sb.content_margin_bottom = 4
+		preview.add_theme_stylebox_override("panel", sb)
+		var lbl := Label.new()
+		lbl.text = ResourceRegistry.get_abbrev(resource_id)
+		preview.add_child(lbl)
+		set_drag_preview(preview)
+		return {"type": "resource", "res": resource_id}
 
 func _ready() -> void:
 	# ALWAYS so the Close button and _process work even when tree is paused for docking
@@ -192,42 +237,80 @@ func _build_ui() -> void:
 
 	# ---- Forge ----
 	var forge_title := Label.new()
-	forge_title.text = "— FORGE PLANET —\nChoose 3 resources (consumed on forge)"
+	forge_title.text = "— FORGE PLANET —\nSelect 3 resources to consume"
 	forge_title.add_theme_font_size_override("font_size", 20)
 	forge_title.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
 	forge_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	forge_title.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(forge_title)
 
-	var slots_hbox := HBoxContainer.new()
-	slots_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	slots_hbox.add_theme_constant_override("separation", 16)
-	vbox.add_child(slots_hbox)
+	# ── Selected slots row ──────────────────────────────────────────────
+	var slots_row := HBoxContainer.new()
+	slots_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	slots_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(slots_row)
 
 	for i in range(3):
-		var opt := OptionButton.new()
-		opt.add_theme_font_size_override("font_size", 20)
-		opt.custom_minimum_size = Vector2(130, 44)
-		for r in ResourceRegistry.all_names():
-			opt.add_item(ResourceRegistry.get_abbrev(r))
-		opt.selected = i  # default: Cu / Ag / Au
-		_forge_slots.append(opt)
-		slots_hbox.add_child(opt)
+		var slot_panel := ForgeSlot.new()
+		slot_panel.slot_index = i
+		slot_panel.station_ref = self
+		
+		var slot_sb := StyleBoxFlat.new()
+		slot_sb.bg_color = Color(0.08, 0.08, 0.15)
+		slot_sb.border_color = Color(0.4, 0.4, 0.6)
+		slot_sb.set_border_width_all(2)
+		slot_sb.set_corner_radius_all(6)
+		slot_sb.content_margin_left = 6; slot_sb.content_margin_right = 6
+		slot_sb.content_margin_top = 4;  slot_sb.content_margin_bottom = 4
+		slot_panel.add_theme_stylebox_override("panel", slot_sb)
+		slot_panel.custom_minimum_size = Vector2(90, 40)
+
+		var slot_vb := VBoxContainer.new()
+		slot_vb.alignment = BoxContainer.ALIGNMENT_CENTER
+		slot_panel.add_child(slot_vb)
+
+		var slot_lbl := Label.new()
+		slot_lbl.text = "[ SLOT " + str(i + 1) + " ]"
+		slot_lbl.add_theme_font_size_override("font_size", 14)
+		slot_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
+		slot_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		slot_vb.add_child(slot_lbl)
+		_forge_slot_labels.append(slot_lbl)
+
+		# Keep the array populated for legacy sync, but hide the remove btn
+		var remove_btn := Button.new()
+		remove_btn.visible = false
+		_forge_slots.append(remove_btn)
+
+		slots_row.add_child(slot_panel)
 
 	_forge_status = Label.new()
 	_forge_status.text = ""
-	_forge_status.add_theme_font_size_override("font_size", 18)
+	_forge_status.add_theme_font_size_override("font_size", 15)
 	_forge_status.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
 	_forge_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_forge_status.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(_forge_status)
 
-	var forge_btn := Button.new()
-	forge_btn.text = "FORGE PLANET"
-	forge_btn.add_theme_font_size_override("font_size", 26)
-	forge_btn.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
-	forge_btn.pressed.connect(_on_forge_planet)
-	vbox.add_child(forge_btn)
+	# ── Resource card grid ──────────────────────────────────────────────
+	var card_title := Label.new()
+	card_title.text = "Available Resources:"
+	card_title.add_theme_font_size_override("font_size", 16)
+	card_title.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	vbox.add_child(card_title)
+
+	_forge_card_grid = GridContainer.new()
+	_forge_card_grid.columns = 3
+	_forge_card_grid.add_theme_constant_override("h_separation", 8)
+	_forge_card_grid.add_theme_constant_override("v_separation", 8)
+	vbox.add_child(_forge_card_grid)
+
+	_forge_btn = Button.new()
+	_forge_btn.text = "FORGE PLANET"
+	_forge_btn.add_theme_font_size_override("font_size", 26)
+	_forge_btn.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
+	_forge_btn.pressed.connect(_on_forge_planet)
+	vbox.add_child(_forge_btn)
 
 	vbox.add_child(HSeparator.new())
 
@@ -277,6 +360,126 @@ func _refresh_inv_display() -> void:
 		if amt > 0:
 			parts.append(ResourceRegistry.get_abbrev(r) + ":" + str(amt))
 	_inv_label.text = "Inventory: " + ("  ".join(parts) if parts.size() > 0 else "(empty)")
+	_rebuild_forge_cards()
+
+func _tier_color(tier: int) -> Color:
+	match tier:
+		1: return Color(0.75, 0.75, 0.75)   # Common — grey
+		2: return Color(0.35, 0.85, 1.0)    # Uncommon — blue
+		3: return Color(0.6,  0.3,  1.0)    # Rare — purple
+		4: return Color(1.0,  0.55, 0.05)   # Legendary — gold
+		_: return Color(0.55, 0.55, 0.55)
+
+func _rebuild_forge_cards() -> void:
+	if not _forge_card_grid: return
+	for c in _forge_card_grid.get_children(): c.queue_free()
+	if not Engine.has_meta("InventoryManager"): return
+
+	var inv = Engine.get_meta("InventoryManager")
+	var any_shown := false
+
+	for r in ResourceRegistry.all_names():
+		var amt: int = inv.get_amount(r)
+		if amt <= 0: continue
+		any_shown = true
+
+		var tier := ResourceRegistry.get_tier(r)
+		var rarity_col := _tier_color(tier)
+
+		# Count how many times this resource is already selected
+		var selected_count := _forge_selected.count(r)
+		var available := amt - selected_count
+
+		# Card outer panel
+		var card := ResourceCard.new()
+		card.resource_id = r
+		card.available_count = available
+		card.station_ref = self
+		
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = rarity_col.darkened(0.65)
+		sb.border_color = rarity_col
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(6)
+		sb.content_margin_left = 6; sb.content_margin_right = 6
+		sb.content_margin_top = 4;  sb.content_margin_bottom = 4
+		card.add_theme_stylebox_override("panel", sb)
+		card.custom_minimum_size = Vector2(100, 46)
+
+		var vb := VBoxContainer.new()
+		vb.alignment = BoxContainer.ALIGNMENT_CENTER
+		vb.add_theme_constant_override("separation", -2)
+		card.add_child(vb)
+
+		# Resource name
+		var name_lbl := Label.new()
+		name_lbl.text = ResourceRegistry.get_abbrev(r)
+		name_lbl.add_theme_font_size_override("font_size", 15)
+		name_lbl.add_theme_color_override("font_color", rarity_col)
+		name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vb.add_child(name_lbl)
+
+		# Qty + tier badge row
+		var sub_row := HBoxContainer.new()
+		sub_row.alignment = BoxContainer.ALIGNMENT_CENTER
+		vb.add_child(sub_row)
+
+		var qty_lbl := Label.new()
+		qty_lbl.text = "x" + str(amt)
+		if selected_count > 0:
+			qty_lbl.text += " (" + str(available) + " left)"
+		qty_lbl.add_theme_font_size_override("font_size", 12)
+		qty_lbl.add_theme_color_override("font_color", Color(0.8, 0.8, 0.8))
+		sub_row.add_child(qty_lbl)
+
+		# Greyed out if none available or slots full
+		var can_pick := available > 0 and _forge_selected.size() < 3
+		if not can_pick:
+			sb.bg_color = Color(0.08, 0.08, 0.1)
+			sb.border_color = Color(0.25, 0.25, 0.3)
+			name_lbl.add_theme_color_override("font_color", Color(0.35, 0.35, 0.35))
+		elif available > 0:
+			card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+
+		_forge_card_grid.add_child(card)
+
+	if not any_shown:
+		var empty_lbl := Label.new()
+		empty_lbl.text = "(no eligible resources in inventory)"
+		empty_lbl.add_theme_font_size_override("font_size", 16)
+		empty_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+		_forge_card_grid.add_child(empty_lbl)
+
+func _on_card_pressed(r: String) -> void:
+	if _forge_selected.size() >= 3: return
+	if not Engine.has_meta("InventoryManager"): return
+	var inv = Engine.get_meta("InventoryManager")
+	if inv.get_amount(r) - _forge_selected.count(r) <= 0: return
+	_forge_selected.append(r)
+	_update_slot_display()
+	_rebuild_forge_cards()
+
+func _on_remove_slot(idx: int) -> void:
+	if idx >= _forge_selected.size(): return
+	_forge_selected.remove_at(idx)
+	_update_slot_display()
+	_rebuild_forge_cards()
+
+func _update_slot_display() -> void:
+	for i in range(3):
+		var lbl: Label = _forge_slot_labels[i]
+		if i < _forge_selected.size():
+			var r := _forge_selected[i]
+			var tier := ResourceRegistry.get_tier(r)
+			var col := _tier_color(tier)
+			lbl.text = ResourceRegistry.get_abbrev(r)
+			lbl.add_theme_color_override("font_color", col)
+		else:
+			lbl.text = "[ SLOT " + str(i + 1) + " ]"
+			lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
+	# Enable forge button only when all 3 slots filled
+	if _forge_btn:
+		_forge_btn.disabled = _forge_selected.size() < 3
 
 func _refresh_planets_ui() -> void:
 	for child in _planets_container.get_children():
@@ -390,6 +593,7 @@ func _show_ui() -> void:
 	_refresh_inv_display()
 	_refresh_planets_ui()
 	_forge_status.text = ""
+	_update_slot_display()
 	# Hide all gameplay HUD and freeze the world while docked
 	for node in get_tree().get_nodes_in_group("GameHUD"):
 		if node is CanvasLayer:
@@ -456,13 +660,17 @@ func _on_forge_planet() -> void:
 		_set_status("Max " + str(MAX_PLANETS) + " planets reached.\nDismantle one first.", Color(1.0, 0.5, 0.3))
 		return
 
+	if _forge_selected.size() < 3:
+		_set_status("Select 3 resources first.", Color(1.0, 0.5, 0.3))
+		return
+
 	if not Engine.has_meta("InventoryManager"):
 		return
 	var inv = Engine.get_meta("InventoryManager")
 
-	var r1: String = ResourceRegistry.all_names()[_forge_slots[0].selected]
-	var r2: String = ResourceRegistry.all_names()[_forge_slots[1].selected]
-	var r3: String = ResourceRegistry.all_names()[_forge_slots[2].selected]
+	var r1: String = _forge_selected[0]
+	var r2: String = _forge_selected[1]
+	var r3: String = _forge_selected[2]
 	var cost: Dictionary = PlanetSeedKitchen.resource_cost(r1, r2, r3)
 
 	for res in cost:
@@ -474,23 +682,21 @@ func _on_forge_planet() -> void:
 	var p_ui = load("res://src/ui/PlanetPlacementUI.gd").new()
 	_ui_layer.add_child(p_ui)
 	_panel.hide()
-	
+
 	p_ui.placement_canceled.connect(func():
 		_panel.show()
 	)
-	
+
 	p_ui.placement_confirmed.connect(func(pos: Vector3, p_name: String):
 		_hide_ui() # Close station UI immediately
 		_cinematic_active = true
 		_prompt_btn.hide()
-		
+
 		# 1. Consume resources
 		for res in cost:
 			inv.consume(res, cost[res])
-		
+
 		# 2. Spawn planet immediately (it will start generating in background)
-		# Salt with position hash so identical resource combos placed at different
-		# locations always produce a unique planet appearance.
 		var pos_salt: int = hash(pos.round()) & 0x7FFFFFFF
 		var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3) + (_active_planets.size() * 777) + pos_salt
 		var planet_node := _spawn_planet_node(seed_val, pos, p_name)
@@ -498,14 +704,18 @@ func _on_forge_planet() -> void:
 		planet_node.set("planet_resources", planet_res)
 		_active_planets.append({node = planet_node, r1 = r1, r2 = r2, r3 = r3})
 		_refresh_planets_ui()
-		
-		# 3. Trigger Dramatic Forge Cinematic
+
+		# 3. Clear selection for next forge
+		_forge_selected.clear()
+		_update_slot_display()
+
+		# 4. Trigger Dramatic Forge Cinematic
 		var cine_script = load("res://src/ui/ForgeCinematic.gd")
 		var cinematic = cine_script.new()
 		get_tree().root.add_child(cinematic)
-		
+
 		cinematic.setup(pos, _player, planet_node)
-		
+
 		cinematic.completed.connect(func():
 			_cinematic_active = false
 			var combo: String = ResourceRegistry.get_abbrev(r1) + "+" + ResourceRegistry.get_abbrev(r2) + "+" + ResourceRegistry.get_abbrev(r3)

@@ -608,10 +608,11 @@ func _process_on_foot(delta: float) -> void:
 	
 	# CITIZEN-PILOT: Full Orbit Camera Sync (Joy & Mouse)
 	# Applies both Yaw/Pitch to allow looking up/down while on-foot
-	var rs_x = Input.get_joy_axis(0, JOY_AXIS_RIGHT_X)
-	var rs_y = Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
-	if abs(rs_x) > 0.1: cam_orbit.x -= rs_x * cam_orbit_sensitivity * delta * 2.5
-	if abs(rs_y) > 0.1: cam_orbit.y -= rs_y * cam_orbit_sensitivity * delta * 2.5
+	if not _mobile_perf:
+		var rs_x = Input.get_joy_axis(0, JOY_AXIS_RIGHT_X)
+		var rs_y = Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
+		if abs(rs_x) > 0.1: cam_orbit.x -= rs_x * cam_orbit_sensitivity * delta * 2.5
+		if abs(rs_y) > 0.1: cam_orbit.y -= rs_y * cam_orbit_sensitivity * delta * 2.5
 	cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
 	
 	if cam_pivot:
@@ -975,14 +976,15 @@ func _process_ace_flight(delta: float) -> void:
 		turb_v = turb_v.lerp(Vector3.ZERO, 15.0 * delta)
 	
 	# ORBIT CAMERA ROTATION (Right Stick & Mouse)
-	const CAM_DEAD = 0.15
-	var rs_x = Input.get_joy_axis(0, JOY_AXIS_RIGHT_X)
-	var rs_y = Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
-	if abs(rs_x) < CAM_DEAD: rs_x = 0.0
-	if abs(rs_y) < CAM_DEAD: rs_y = 0.0
-	
-	if abs(rs_x) > 0.01: cam_orbit.x -= rs_x * cam_orbit_sensitivity * delta * 2.0
-	if abs(rs_y) > 0.01: cam_orbit.y -= rs_y * cam_orbit_sensitivity * delta * 2.0
+	if not _mobile_perf:
+		const CAM_DEAD = 0.15
+		var rs_x = Input.get_joy_axis(0, JOY_AXIS_RIGHT_X)
+		var rs_y = Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y)
+		if abs(rs_x) < CAM_DEAD: rs_x = 0.0
+		if abs(rs_y) < CAM_DEAD: rs_y = 0.0
+		
+		if abs(rs_x) > 0.01: cam_orbit.x -= rs_x * cam_orbit_sensitivity * delta * 2.0
+		if abs(rs_y) > 0.01: cam_orbit.y -= rs_y * cam_orbit_sensitivity * delta * 2.0
 	cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2) 
 	
 	# SHADOWGLASS 30FPS SYNC: Only update visual nodes every 33.3ms

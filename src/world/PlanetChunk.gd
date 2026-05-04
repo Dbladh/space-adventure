@@ -463,8 +463,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 						var h_t = get_terrain_elevation(cp)
 						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
 							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
-							# ACE: Occasional interactive/mineable tree
-							if h_v % 40 < 1:
+							# ACE: Very rare interactive/mineable tree (1 in 500)
+							if h_v % 500 < 1:
 								m_pts.append([xform, "Wood"])
 							else:
 								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
@@ -473,8 +473,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 						var h_r = get_terrain_elevation(cp)
 						if h_r > -150.0:
 							var r_xf = _get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0)
-							# ACE: Occasional interactive/mineable rock (Stone)
-							if h_v % 60 < 1:
+							# ACE: Very rare interactive/mineable rock (1 in 800)
+							if h_v % 800 < 1:
 								m_pts.append([_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 8.0), "Stone"])
 							else:
 								r_pts.append(r_xf)

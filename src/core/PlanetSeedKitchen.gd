@@ -12,25 +12,88 @@ const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
 #   All planets always have Stone and Wood as base resources.
 
 const RESOURCE_PRIMES: Dictionary = {
-	"Stone":          2,
-	"Wood":           3,
-	"Neon Moss":      5,
-	"Silica Dust":    7,
-	"Copper":         11,
-	"Azure Sap":      13,
-	"Basalt Glass":   17,
-	"Silver":         19,
-	"Gold":           23,
-	"Platinum":       29,
-	"Prismatic Alloy":31,
-	"Nebula Core":    37,
+	"Stone":            2,
+	"Wood":             3,
+	"Neon Moss":        5,
+	"Silica Dust":      7,
+	"Copper":           11,
+	"Azure Sap":        13,
+	"Basalt Glass":     17,
+	"Silver":           19,
+	"Gold":             23,
+	"Platinum":         29,
+	"Prismatic Alloy":  31,
+	"Nebula Core":      37,
+	"Carbon Fiber":     41,
+	"Organic Sludge":   43,
+	"Living Resin":     47,
+	"Primal Fruit":     53,
+	"Diamond":          59,
+	"Iron":             61,
+	"Titanium":         67,
 }
 
 static func make_seed(r1: String, r2: String, r3: String) -> int:
-	var p1: int = RESOURCE_PRIMES.get(r1, 2)
-	var p2: int = RESOURCE_PRIMES.get(r2, 3)
-	var p3: int = RESOURCE_PRIMES.get(r3, 5)
+	# Use explicit prime if registered, else hash the name to a stable odd number.
+	var p1: int = RESOURCE_PRIMES.get(r1, (hash(r1) & 0x7FFFFFFF) | 1)
+	var p2: int = RESOURCE_PRIMES.get(r2, (hash(r2) & 0x7FFFFFFF) | 1)
+	var p3: int = RESOURCE_PRIMES.get(r3, (hash(r3) & 0x7FFFFFFF) | 1)
 	return p1 * p2 * p3
+
+# ─── PLANET RANKING ──────────────────────────────────────────────────────────
+# Returns { label, color, score } where score is 0–100.
+# Rank tiers: F → D → C → B → A → S → SS → ★ LEGENDARY
+static func rank_planet(r1: String, r2: String, r3: String, seed_val: int) -> Dictionary:
+	var t1 := ResourceRegistry.get_tier(r1)
+	var t2 := ResourceRegistry.get_tier(r2)
+	var t3 := ResourceRegistry.get_tier(r3)
+
+	# 1. Resource score  (0–60): average tier × 20 capped at 60
+	var avg_tier: float = (t1 + t2 + t3) / 3.0
+	var resource_score: float = clampf(avg_tier * 20.0, 0.0, 60.0)
+
+	# 2. Rarity bonus (0–20): extra points for having Tier 4 or Tier 3 inputs
+	var rarity_bonus: float = 0.0
+	for t in [t1, t2, t3]:
+		if t == 4: rarity_bonus += 7.0
+		elif t == 3: rarity_bonus += 3.0
+	rarity_bonus = minf(rarity_bonus, 20.0)
+
+	# 3. Cosmic variance bonus (0–20): seed-derived exotic properties
+	#    Oversized planet (seed % 11 == 0) = +8
+	#    Rare palette roll (seed % 7 == 0)  = +6
+	#    Unique orbit distance (seed % 5 == 0) = +3
+	#    Crystalline terrain (seed % 3 == 0)   = +3
+	var cosmic: float = 0.0
+	if seed_val % 11 == 0: cosmic += 8.0
+	if seed_val % 7  == 0: cosmic += 6.0
+	if seed_val % 5  == 0: cosmic += 3.0
+	if seed_val % 3  == 0: cosmic += 3.0
+	cosmic = minf(cosmic, 20.0)
+
+	var score: float = resource_score + rarity_bonus + cosmic
+
+	# Map score → rank tier
+	var label: String
+	var color: Color
+	if score >= 97:
+		label = "★ LEGENDARY"; color = Color(1.0, 0.55, 0.05)   # fiery orange-gold
+	elif score >= 85:
+		label = "SS";          color = Color(0.95, 0.2,  0.9)    # neon magenta
+	elif score >= 70:
+		label = "S";           color = Color(0.35, 0.85, 1.0)    # electric blue
+	elif score >= 55:
+		label = "A";           color = Color(0.45, 1.0,  0.45)   # bright green
+	elif score >= 40:
+		label = "B";           color = Color(0.55, 0.55, 1.0)    # soft purple
+	elif score >= 25:
+		label = "C";           color = Color(0.85, 0.85, 0.85)   # light grey
+	elif score >= 12:
+		label = "D";           color = Color(0.6,  0.55, 0.45)   # tan/brown
+	else:
+		label = "F";           color = Color(0.5,  0.5,  0.5)    # mid grey
+
+	return { "label": label, "color": color, "score": int(score) }
 
 # Returns the full resource list for a forged planet — always Stone+Wood plus
 # 2-4 extras drawn deterministically from the pool unlocked by the forge tier.

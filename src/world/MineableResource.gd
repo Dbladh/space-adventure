@@ -35,6 +35,8 @@ const _MESH_UNIT_SIZE: float = 1.0            # unit-scale octahedron geometry
 
 func _ready() -> void:
 	add_to_group("Mineable") # ACE: Absolute identification for projectiles
+	collision_layer = 4       # Layer 4: mineable props (scanned by main laser ray)
+	collision_mask = 0        # Minerals don't need to detect anything themselves
 	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
 	# Health scales with resource tier — rarer deposits take more shots
 	var tier := ResourceRegistry.get_tier(resource_type)
@@ -61,7 +63,13 @@ func _generate_low_poly_node() -> void:
 	rng.seed = hash(str(global_position) + resource_type)
 
 	var col = _get_resource_color()
-	size = rng.randf_range(80.0, 160.0) # (80m - 160m)
+	# ACE: Flora resources (Wood, Stone, Carbon Fiber) are tree/bush scale.
+	# Mineral deposits (Copper, Iron, Diamond etc.) are large geological formations.
+	var is_flora := resource_type in ["Wood", "Stone", "Carbon Fiber", "Living Resin", "Organic Sludge", "Primal Fruit"]
+	if is_flora:
+		size = rng.randf_range(8.0, 14.0)
+	else:
+		size = rng.randf_range(80.0, 160.0) # (80m - 160m)
 	if resource_type == "Diamond": size *= 1.4
 
 	# Mesh: shared per type, scale brings unit geometry up to actual mineral size.
@@ -91,11 +99,10 @@ func _generate_low_poly_node() -> void:
 	add_child(mesh_inst)
 	set_process(true)
 
-	# Collision shape: shared CylinderShape3D from the size-bucket cache.
-	# Position remains per-instance so the collider matches the visual scale exactly.
+	# Collision shape — flora gets a larger radius for easier shooting.
 	var shape = CollisionShape3D.new()
-
-	shape.shape = _get_or_build_shape(size)
+	shape.shape = _get_or_build_shape(size, is_flora)
+	# Center the cylinder at object midpoint
 	shape.position = Vector3(0, size * 2.5, 0)
 	add_child(shape)
 
@@ -104,7 +111,7 @@ func _generate_low_poly_node() -> void:
 # -------------------------------------------------------------------
 
 func get_target_center() -> Vector3:
-	# Returns the visual center of the mineral for aiming reticle snapping.
+	# Returns the visual centre of this resource for aiming reticle snapping.
 	return global_transform * Vector3(0, size * 2.5, 0)
 
 # -------------------------------------------------------------------
@@ -223,16 +230,22 @@ static func _build_blocky_mesh() -> ArrayMesh:
 static func _color_for_type(type: String) -> Color:
 	return ResourceRegistry.get_color(type)
 
-static func _get_or_build_shape(size: float) -> CylinderShape3D:
-	# Quantize to 5m buckets so e.g. size 87.3 and 89.6 share the same shape.
-	# Visual mismatch is at most 2.5m on a 100m+ object — imperceptible.
+static func _get_or_build_shape(size: float, is_flora: bool = false) -> CylinderShape3D:
+	# Quantize to 5m buckets so nearby sizes share the same shape.
 	var bucket := int(size / 5.0) * 5
-	if _shared_shapes.has(bucket):
-		return _shared_shapes[bucket]
+	var key := str(bucket) + ("_flora" if is_flora else "")
+	if _shared_shapes.has(key):
+		return _shared_shapes[key]
 	var cyl := CylinderShape3D.new()
-	cyl.height = float(bucket) * 5.0
-	cyl.radius = float(bucket) * 1.1
-	_shared_shapes[bucket] = cyl
+	if is_flora:
+		# Flora (trees, rocks) need a large hit cylinder so they're easy to shoot.
+		# Height spans the full object; radius is generous for reliable collision.
+		cyl.height = float(bucket) * 8.0
+		cyl.radius = float(bucket) * 4.0
+	else:
+		cyl.height = float(bucket) * 5.0
+		cyl.radius = float(bucket) * 1.1
+	_shared_shapes[key] = cyl
 	return cyl
 
 func _get_resource_color() -> Color:

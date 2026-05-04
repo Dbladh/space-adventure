@@ -129,7 +129,7 @@ func _ready() -> void:
 	self.add_to_group("Player")
 	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
 	_ray_q = PhysicsRayQueryParameters3D.new()
-	_ray_q.collision_mask = 1 | 2
+	_ray_q.collision_mask = 1 | 2 | 4  # terrain + ship + mineable props
 	_ray_q.exclude = [self]
 	_proxy_ray_q = PhysicsRayQueryParameters3D.new()
 	_proxy_ray_q.collision_mask = 32  # layer 6: SurfacePropProxy only, bypasses terrain
@@ -1362,12 +1362,10 @@ func _process(delta: float) -> void:
 			# off-screen threat arrows. Saves a second SceneTree group traversal.
 			var enemies_pool = get_tree().get_nodes_in_group("Enemies") if is_inside_tree() else []
 			if is_inside_tree():
-				# Mobile needs wider lock-on cone (≈16°) vs desktop precision (11°)
+				# Enemies use tight cone (~11°); mineable/passive use wider cone (~28°)
 				var highest_dot = 0.95 if _mobile_perf else 0.98
-				const RADAR_RANGE_SQ := 25000.0 * 25000.0 # squared cutoff avoids sqrt per candidate
+				const RADAR_RANGE_SQ := 25000.0 * 25000.0
 
-				# PRECEDENCE SCAN: Prioritize Enemies over passive targets (Targets, Mineable, Destructible).
-				# Enemies first; if no enemy found, search all mineable/destructible objects.
 				var candidate_pools = [
 					enemies_pool,
 					get_tree().get_nodes_in_group("Targets"),
@@ -1375,17 +1373,37 @@ func _process(delta: float) -> void:
 					get_tree().get_nodes_in_group("Destructible")
 				]
 
-				for pool in candidate_pools:
+				# Visibility raycast — skip targets occluded by terrain
+				var vis_query = PhysicsRayQueryParameters3D.new()
+				vis_query.collision_mask = 1  # terrain only
+				vis_query.exclude = [self]
+				var space = get_world_3d().direct_space_state
+
+				for pool_idx in range(candidate_pools.size()):
+					var pool = candidate_pools[pool_idx]
+					# Wider cone for passive mineable/destructible targets
+					var pool_dot_thresh = highest_dot if pool_idx < 2 else 0.82
 					for t in pool:
 						if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
-						var d_v = (t.global_position - global_position)
+						# Use target center for aim calculation if available
+						var aim_pos: Vector3 = t.get_target_center() if t.has_method("get_target_center") else t.global_position
+						var d_v = (aim_pos - global_position)
 						var d_sq = d_v.length_squared()
 						if d_sq > RADAR_RANGE_SQ: continue
 						if d_sq < 0.0001: continue
-						# Defer the sqrt+normalize until we know the candidate is in range
-						var dot = fwd.dot(d_v / sqrt(d_sq))
-						if dot > highest_dot:
-							highest_dot = dot
+						var d_len := sqrt(d_sq)
+						var dot = fwd.dot(d_v / d_len)
+						if dot < pool_dot_thresh: continue
+						# VISIBILITY CHECK: skip targets behind terrain
+						vis_query.from = global_position
+						vis_query.to = aim_pos
+						var vis_result = space.intersect_ray(vis_query)
+						if vis_result and is_instance_valid(vis_result.collider) and vis_result.collider != t:
+							continue  # occluded — skip
+						# PREFER CLOSER TARGETS: bias dot score by proximity
+						var score = dot + (1.0 - clamp(d_len / 5000.0, 0.0, 1.0)) * 0.1
+						if score > highest_dot:
+							highest_dot = score
 							best_target = t
 					# If we found an enemy in the first pool, don't even look at passive targets
 					if best_target: break

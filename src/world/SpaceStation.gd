@@ -295,14 +295,34 @@ func _refresh_planets_ui() -> void:
 
 	for entry in _active_planets:
 		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 12)
+		row.add_theme_constant_override("separation", 10)
 		_planets_container.add_child(row)
 
 		var combo: String = ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2) + "+" + ResourceRegistry.get_abbrev(entry.r3)
 		var seed_val: int = PlanetSeedKitchen.make_seed(entry.r1, entry.r2, entry.r3)
+		var rank: Dictionary = PlanetSeedKitchen.rank_planet(entry.r1, entry.r2, entry.r3, seed_val)
 
+		# ── Rank Badge ──────────────────────────────────────────────────
+		var badge_panel := PanelContainer.new()
+		var badge_sb := StyleBoxFlat.new()
+		badge_sb.bg_color = rank.color.darkened(0.55)
+		badge_sb.border_color = rank.color
+		badge_sb.set_border_width_all(2)
+		badge_sb.set_corner_radius_all(6)
+		badge_sb.content_margin_left = 8; badge_sb.content_margin_right = 8
+		badge_sb.content_margin_top = 2;  badge_sb.content_margin_bottom = 2
+		badge_panel.add_theme_stylebox_override("panel", badge_sb)
+
+		var badge_lbl := Label.new()
+		badge_lbl.text = rank.label
+		badge_lbl.add_theme_font_size_override("font_size", 16)
+		badge_lbl.add_theme_color_override("font_color", rank.color)
+		badge_panel.add_child(badge_lbl)
+		row.add_child(badge_panel)
+
+		# ── Planet name + combo ─────────────────────────────────────────
 		var lbl := Label.new()
-		lbl.text = combo + "  (seed " + str(seed_val) + ")"
+		lbl.text = combo
 		lbl.add_theme_font_size_override("font_size", 18)
 		lbl.add_theme_color_override("font_color", Color(0.8, 0.9, 0.8))
 		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -469,7 +489,10 @@ func _on_forge_planet() -> void:
 			inv.consume(res, cost[res])
 		
 		# 2. Spawn planet immediately (it will start generating in background)
-		var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3) + (_active_planets.size() * 777)
+		# Salt with position hash so identical resource combos placed at different
+		# locations always produce a unique planet appearance.
+		var pos_salt: int = hash(pos.round()) & 0x7FFFFFFF
+		var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3) + (_active_planets.size() * 777) + pos_salt
 		var planet_node := _spawn_planet_node(seed_val, pos, p_name)
 		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
 		planet_node.set("planet_resources", planet_res)

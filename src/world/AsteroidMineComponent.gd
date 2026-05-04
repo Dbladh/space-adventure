@@ -7,7 +7,7 @@ const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
 # Attached as a child of asteroid nodes and handles damage/destruction.
 
 var asteroid_parent: Node3D = null
-var _health: int = 3  # Asteroids need more hits than rocks
+var _health: int = 4  # Asteroids need more hits than rocks
 var destroyed: bool = false
 
 # Tier-weighted drop probabilities (higher tier = lower chance)
@@ -49,11 +49,13 @@ func _on_destroyed() -> void:
 
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
-	var count: int = rng.randi_range(1, 3)
+	var count_stone: int = rng.randi_range(4, 8)
+	var count_rare: int = rng.randi_range(0, 2)
 
-	# First gem is always Stone (guaranteed), then add weighted rare drops
-	var resource_types: Array[String] = ["Stone"]
-	for i in range(count - 1):
+	var resource_types: Array[String] = []
+	for i in range(count_stone):
+		resource_types.append("Stone")
+	for i in range(count_rare):
 		resource_types.append(_pick_weighted_resource(rng))
 
 	var spawn_origin = asteroid_parent.global_position

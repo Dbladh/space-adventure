@@ -22,10 +22,13 @@ var _forge_slots: Array = []          # Array[OptionButton]
 var _forge_status: Label = null
 var _planets_container: VBoxContainer = null
 var _worlds_header: Label = null
+var _prompt_btn: Button = null
 var _ui_visible: bool = false
+var _in_range: bool = false
+var _cinematic_active: bool = false
 
 # Each entry: { node: Node3D, r1: String, r2: String, r3: String }
-var _active_planets: Array[Dictionary] = []
+static var _active_planets: Array[Dictionary] = []
 
 func _ready() -> void:
 	# ALWAYS so the Close button and _process work even when tree is paused for docking
@@ -139,6 +142,19 @@ func _build_ui() -> void:
 	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_theme_constant_override("separation", 10)
 	scroll.add_child(vbox)
+
+	_prompt_btn = Button.new()
+	_prompt_btn.text = "DOCK STATION [E]"
+	_prompt_btn.add_theme_font_size_override("font_size", 24)
+	_prompt_btn.add_theme_color_override("font_color", Color(0.3, 1.0, 0.5))
+	_prompt_btn.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
+	_prompt_btn.offset_top = -140
+	_prompt_btn.offset_bottom = -90
+	_prompt_btn.offset_left = -160
+	_prompt_btn.offset_right = 160
+	_prompt_btn.pressed.connect(_on_dock_pressed)
+	_prompt_btn.hide()
+	_ui_layer.add_child(_prompt_btn)
 
 	# ---- Title ----
 	var title := Label.new()
@@ -317,10 +333,36 @@ func _process(delta: float) -> void:
 		return
 
 	var dist: float = global_position.distance_to(_player.global_position)
-	if dist < DOCK_RANGE and not _ui_visible:
-		_show_ui()
-	elif dist >= DOCK_RANGE and _ui_visible:
-		_hide_ui()
+	if dist < DOCK_RANGE:
+		if not _in_range:
+			_in_range = true
+			if not _ui_visible and not _cinematic_active:
+				_prompt_btn.show()
+	else:
+		if _in_range:
+			_in_range = false
+			_prompt_btn.hide()
+			if _ui_visible:
+				_hide_ui()
+
+func _input(event: InputEvent) -> void:
+	if _ui_visible:
+		if event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
+			_hide_ui()
+			get_viewport().set_input_as_handled()
+		return
+
+	if _in_range and not _ui_visible:
+		if event is InputEventKey and event.keycode == KEY_E and event.pressed and not event.echo:
+			_on_dock_pressed()
+			get_viewport().set_input_as_handled()
+		elif event is InputEventJoypadButton and event.button_index == JOY_BUTTON_X and event.pressed:
+			_on_dock_pressed()
+			get_viewport().set_input_as_handled()
+
+func _on_dock_pressed() -> void:
+	_prompt_btn.hide()
+	_show_ui()
 
 func _show_ui() -> void:
 	_ui_visible = true
@@ -329,7 +371,14 @@ func _show_ui() -> void:
 	_refresh_planets_ui()
 	_forge_status.text = ""
 	# Hide all gameplay HUD and freeze the world while docked
-	get_tree().call_group("GameHUD", "hide")
+	for node in get_tree().get_nodes_in_group("GameHUD"):
+		if node is CanvasLayer:
+			node.visible = false
+			for child in node.get_children():
+				if child.has_method("hide"):
+					child.hide()
+		elif node.has_method("hide"):
+			node.hide()
 	get_tree().paused = true
 	# Enable mouse cursor for UI interaction
 	if _player and _player.has_method("unlock_mouse"):
@@ -338,9 +387,19 @@ func _show_ui() -> void:
 func _hide_ui() -> void:
 	_ui_visible = false
 	_panel.hide()
+	if _in_range:
+		_prompt_btn.show()
+
 	# Restore gameplay HUD and unpause
 	get_tree().paused = false
-	get_tree().call_group("GameHUD", "show")
+	for node in get_tree().get_nodes_in_group("GameHUD"):
+		if node is CanvasLayer:
+			node.visible = true
+			for child in node.get_children():
+				if child.has_method("show"):
+					child.show()
+		elif node.has_method("show"):
+			node.show()
 	# Lock mouse cursor back for gameplay
 	if _player and _player.has_method("lock_mouse"):
 		_player.lock_mouse()
@@ -391,19 +450,45 @@ func _on_forge_planet() -> void:
 			_set_status("Need: " + _format_cost(cost) + "\nNot enough resources.", Color(1.0, 0.5, 0.3))
 			return
 
-	for res in cost:
-		inv.consume(res, cost[res])
-
-	var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3)
-	var planet_node := _spawn_planet_node(seed_val)
-	# Set what resources this planet contains based on the forge tier
-	var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
-	planet_node.set("planet_resources", planet_res)
-	_active_planets.append({node = planet_node, r1 = r1, r2 = r2, r3 = r3})
-	_refresh_planets_ui()
-
-	var combo: String = ResourceRegistry.get_abbrev(r1) + "+" + ResourceRegistry.get_abbrev(r2) + "+" + ResourceRegistry.get_abbrev(r3)
-	_set_status("Planet forged! (" + combo + ")\nSeed: " + str(seed_val), Color(0.4, 1.0, 0.6))
+	# Launch Placement UI
+	var p_ui = load("res://src/ui/PlanetPlacementUI.gd").new()
+	_ui_layer.add_child(p_ui)
+	_panel.hide()
+	
+	p_ui.placement_canceled.connect(func():
+		_panel.show()
+	)
+	
+	p_ui.placement_confirmed.connect(func(pos: Vector3, p_name: String):
+		_hide_ui() # Close station UI immediately
+		_cinematic_active = true
+		_prompt_btn.hide()
+		
+		# 1. Consume resources
+		for res in cost:
+			inv.consume(res, cost[res])
+		
+		# 2. Spawn planet immediately (it will start generating in background)
+		var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3) + (_active_planets.size() * 777)
+		var planet_node := _spawn_planet_node(seed_val, pos, p_name)
+		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
+		planet_node.set("planet_resources", planet_res)
+		_active_planets.append({node = planet_node, r1 = r1, r2 = r2, r3 = r3})
+		_refresh_planets_ui()
+		
+		# 3. Trigger Dramatic Forge Cinematic
+		var cine_script = load("res://src/ui/ForgeCinematic.gd")
+		var cinematic = cine_script.new()
+		get_tree().root.add_child(cinematic)
+		
+		cinematic.setup(pos, _player, planet_node)
+		
+		cinematic.completed.connect(func():
+			_cinematic_active = false
+			var combo: String = ResourceRegistry.get_abbrev(r1) + "+" + ResourceRegistry.get_abbrev(r2) + "+" + ResourceRegistry.get_abbrev(r3)
+			_set_status("Planet " + p_name + " forged! (" + combo + ")", Color(0.4, 1.0, 0.6))
+		)
+	)
 
 func _on_dismantle(entry: Dictionary) -> void:
 	if is_instance_valid(entry.node):
@@ -436,17 +521,10 @@ func _format_cost(cost: Dictionary) -> String:
 		parts.append(str(cost[r]) + "× " + ResourceRegistry.get_abbrev(r))
 	return ",  ".join(parts)
 
-func _spawn_planet_node(seed_val: int) -> Node3D:
+func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String) -> Node3D:
 	var pg_script = load("res://src/world/PlanetGen.gd")
 	if not pg_script:
 		return Node3D.new()
-
-	var rng := RandomNumberGenerator.new()
-	rng.seed = seed_val
-	var angle: float = rng.randf() * TAU
-	var dist: float = rng.randf_range(4000000.0, 8000000.0)
-	var height: float = rng.randf_range(-500000.0, 500000.0)
-	var spawn_pos := global_position + Vector3(cos(angle) * dist, height, sin(angle) * dist)
 
 	var base_radius: float = 600000.0 + float(seed_val % 1200) * 500.0
 	if seed_val % 11 == 0:
@@ -454,7 +532,7 @@ func _spawn_planet_node(seed_val: int) -> Node3D:
 
 	var planet := Node3D.new()
 	planet.set_script(pg_script)
-	planet.name = "Planet_Forged_" + str(seed_val)
+	planet.name = "Planet_" + custom_name.replace(" ", "_")
 	planet.set("planet_seed", seed_val)
 	planet.set("planet_radius", base_radius)
 
@@ -464,7 +542,7 @@ func _spawn_planet_node(seed_val: int) -> Node3D:
 	else:
 		get_tree().root.add_child(planet)
 
-	planet.global_position = spawn_pos
+	planet.global_position = custom_pos
 	planet.add_to_group("Planet")
 	planet.add_to_group("ForgedPlanet")
 	return planet

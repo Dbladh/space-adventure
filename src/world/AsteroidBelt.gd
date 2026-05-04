@@ -222,7 +222,7 @@ func _process_physical_spawning() -> void:
 		
 		var hc = null
 		if _health_component_script:
-			hc = Node.new(); hc.set_script(_health_component_script); hc.name = "HealthComponent"; hc.set("max_health", 100.0); asteroid.add_child(hc)
+			hc = Node.new(); hc.set_script(_health_component_script); hc.name = "HealthComponent"; hc.set("max_health", 4.0); asteroid.add_child(hc)
 
 		var mc = null
 		if _mine_component_script:

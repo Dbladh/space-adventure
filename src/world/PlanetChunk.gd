@@ -441,8 +441,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
 			# WILDERNESS ZONE: Minerals & Nature
 			# -----------------------------------
-			# 1. MINERAL PRIORITY: Colossal Rarity (Copper scattered throughout planet)
-			if (h_v % 25000) < 3:
+			# 1. MINERAL PRIORITY: Extreme Rarity — sparse legendary deposits
+			if (h_v % 50000) < 1:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
 					# Pick deterministically from this planet's resource pool
@@ -463,12 +463,21 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 						var h_t = get_terrain_elevation(cp)
 						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
 							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
-							t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
+							# ACE: Occasional interactive/mineable tree
+							if h_v % 40 < 1:
+								m_pts.append([xform, "Wood"])
+							else:
+								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
 				elif cluster_n < -0.20:
 					if (h_v % 1000) < int(200 * DebugSettings.rock_mult * _nat_scale):
 						var h_r = get_terrain_elevation(cp)
 						if h_r > -150.0:
-							r_pts.append(_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0))
+							var r_xf = _get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0)
+							# ACE: Occasional interactive/mineable rock (Stone)
+							if h_v % 60 < 1:
+								m_pts.append([_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 8.0), "Stone"])
+							else:
+								r_pts.append(r_xf)
 
 	
 	# MOBILE: Grass is the single biggest CPU win on iOS (15-25ms in the worst
@@ -498,10 +507,15 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 						var g_prox = 1.0 - smoothstep(0.0, 1.1, g_dist)
 						var g_mask = smoothstep(0.32, 0.48, g_cn + g_prox * 0.85)
 						
-						if g_mask < 0.1 and noise.get_noise_3dv(cp * 3000.0) > 0.35:
-							var h = get_terrain_elevation(cp)
-							if h > -150.0 and (h + sin(cp.x * 12000.0)*300.0) < 1300.0:
-								g_pts.append(_get_grass_xform(cp * (radius + max(h, SEA_LEVEL - 50.0)), cp, fmod(float(h_v), 10.0)/10.0))
+						if g_mask > 0.65:
+							var h_g = get_terrain_elevation(cp)
+							if h_g > -50.0:
+								var g_xf = _get_object_xform(cp * (radius + h_g), cp, 0.0, 3.5)
+								# ACE: Occasional mineable grass clump (Carbon Fiber)
+								if h_v % 120 < 1:
+									m_pts.append([g_xf, "Carbon Fiber"])
+								else:
+									g_pts.append(g_xf)
 	
 	# BUFFER DATA FOR MAIN THREAD COMMIT
 	_t_pts = t_pts; _r_pts = r_pts; _g_pts = g_pts; _c_pts = c_pts; _m_pts = m_pts
@@ -1789,14 +1803,19 @@ func _spawn_minerals(data: Array) -> void:
 	var m_script = _get_res("res://src/world/MineableResource.gd")
 	if not m_script: return
 
+	# Guard against chunk recycling: sleep_and_reset() keeps the chunk in the
+	# scene tree (just hides it), so is_inside_tree() stays true even after the
+	# chunk is reassigned to a new position via ensure_chunk().  Capture the
+	# offset now and bail after each await if the chunk has been reused.
+	var initial_offset := offset
+
 	var mobile := OS.has_feature("mobile") or OS.get_name() == "iOS"
 	var per_frame: int = 3 if mobile else 6
 	var counter: int = 0
 
 	for item in data:
-		# Defensive: chunk may have been freed between awaits when the player
-		# moves out of range.  Bail out early to avoid touching freed memory.
-		if not is_inside_tree(): return
+		# Bail if chunk was freed OR recycled to a different position.
+		if not is_inside_tree() or offset != initial_offset: return
 
 		var xf: Transform3D = item[0]
 		var type: String = item[1]
@@ -1822,6 +1841,7 @@ func _spawn_minerals(data: Array) -> void:
 			# Yield to the engine so this frame's other work (rendering,
 			# physics, input, prop tasks) can run before we spawn more.
 			await get_tree().process_frame
+			if not is_inside_tree() or offset != initial_offset: return
 
 static var c_r: ArrayMesh
 static var c_t_l: ArrayMesh

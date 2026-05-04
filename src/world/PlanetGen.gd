@@ -262,6 +262,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		c_mesh.radial_segments = 64; c_mesh.rings = 32
 	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 	uniform vec3 sun_dir;
+	uniform vec3 horizon_color;
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
@@ -288,18 +289,21 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		
 		float cam_dist = length(CAMERA_POSITION_WORLD - v_world_pos);
 		float proximity = smoothstep(50.0, 12000.0, cam_dist);
-		float active_threshold = mix(-0.2, 0.45, proximity);
+		// Wispy clouds: threshold is higher, so only peaks of noise become clouds
+		float active_threshold = mix(0.1, 0.65, proximity);
 
 		float dot_nl = dot(v_normal, sun_dir);
 		float terminator = smoothstep(-0.2, 0.2, dot_nl); 
-		vec3 day_col = vec3(1.0); // Clean White
+		
+		// Tint clouds slightly with the planet's atmospheric color for variety
+		vec3 cloud_base = mix(vec3(1.0), horizon_color, 0.3);
 		
 		if (cloud_mask > active_threshold) {
-			ALBEDO = day_col;
-			// Keep clouds visible from surface (inside the sphere)
-			ALPHA = 0.95 * mix(0.4, 1.0, terminator);
+			ALBEDO = cloud_base;
+			// Softer, more transparent clouds (max 0.7 instead of 0.95)
+			ALPHA = 0.7 * smoothstep(active_threshold, active_threshold + 0.1, cloud_mask) * mix(0.2, 1.0, terminator);
 		} else { 
-			ALPHA = 0.0;
+			discard;
 		}
 		
 		// CELESTIAL HIBERNATION: Fully transparent if extremely distant
@@ -309,6 +313,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	c_inst.material_override.render_priority = 5
 	var sun_dir = Vector3(0.5, 0.5, 0.707).normalized()
 	c_inst.material_override.set_shader_parameter("sun_dir", sun_dir)
+	c_inst.material_override.set_shader_parameter("horizon_color", Vector3(sky_horizon_color.r, sky_horizon_color.g, sky_horizon_color.b))
 	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
 	
@@ -885,7 +890,8 @@ class QuadTreeNode:
 		for child in children:
 			child.ensure_chunk()
 			if child.chunk and child.chunk.has_signal("generation_completed"):
-				child.chunk.generation_completed.connect(_on_child_gen_done, CONNECT_ONE_SHOT)
+				if not child.chunk.generation_completed.is_connected(_on_child_gen_done):
+					child.chunk.generation_completed.connect(_on_child_gen_done, CONNECT_ONE_SHOT)
 	
 	func _on_child_gen_done() -> void:
 		_ready_children += 1
@@ -897,7 +903,8 @@ class QuadTreeNode:
 		# CRITICAL: Wait for the parent to be ready before killing high-detail children!
 		ensure_chunk()
 		if chunk and chunk.has_signal("generation_completed"):
-			chunk.generation_completed.connect(_on_parent_ready_for_merge, CONNECT_ONE_SHOT)
+			if not chunk.generation_completed.is_connected(_on_parent_ready_for_merge):
+				chunk.generation_completed.connect(_on_parent_ready_for_merge, CONNECT_ONE_SHOT)
 
 	func _on_parent_ready_for_merge() -> void:
 		if children.is_empty(): return

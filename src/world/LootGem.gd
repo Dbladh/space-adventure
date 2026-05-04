@@ -151,12 +151,13 @@ func _process(delta: float) -> void:
 			var dir = (target_player.global_position - global_position).normalized()
 			var dist = global_position.distance_to(target_player.global_position)
 
-			# RATCHET & CLANK MAGNETIC PULL: speed inversely proportional to
-			# distance — close shards rip toward the ship, distant ones drift
-			# in.  Clamps prevent both glacial drift at long range and missile
-			# overshoot at point-blank range.
-			var speed = clamp(9000.0 / (dist + 10.0), 1800.0, 28000.0)
-			global_position += dir * speed * delta
+			# GUARANTEED CATCH-UP: Shards match player speed + distance scaling
+			# so they never get left behind by a boosting Starhawk.
+			var p_vel: float = target_player.velocity.length() if target_player.get("velocity") != null else 0.0
+			var speed: float = p_vel + 2000.0 + (dist * 4.0)
+			
+			var move_dist: float = speed * delta
+			global_position += dir * move_dist
 
 			rotate(spin_axis, delta * (spin_speed * 2.0))
 
@@ -165,7 +166,7 @@ func _process(delta: float) -> void:
 				_whoosh_player.play()
 				_has_played_whoosh = true
 
-			if dist < 80.0:
+			if dist < 120.0 or dist <= move_dist:
 				_on_collected()
 
 func _on_collected() -> void:

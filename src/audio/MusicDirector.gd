@@ -46,6 +46,8 @@ var _drone_player: AudioStreamPlayer
 var _drone_playback: AudioStreamGeneratorPlayback
 var _arp_player: AudioStreamPlayer
 var _arp_playback: AudioStreamGeneratorPlayback
+var _arp2_player: AudioStreamPlayer
+var _arp2_playback: AudioStreamGeneratorPlayback
 var _perc_player: AudioStreamPlayer
 var _perc_playback: AudioStreamGeneratorPlayback
 
@@ -91,8 +93,9 @@ var _bass_phase_sub: float = 0.0
 var _lfo_phase: float = 0.0
 var _filter_lfo_phase: float = 0.0
 
-# Arp oscillator
+# Arp oscillators
 var _arp_phase: float = 0.0
+var _arp2_phase: float = 0.0
 
 # Current parameters (smoothly interpolated)
 var _bass_freq: float = 130.82
@@ -158,15 +161,15 @@ const SCALE_MAJOR_PENT := [1.0, 1.122, 1.260, 1.498, 1.682]
 # Used for: COMBAT only
 const SCALE_DORIAN := [1.0, 1.122, 1.189, 1.335, 1.498, 1.682, 1.782]
 
-# 8-chord progressions (indices into scale) — longer = less repetitive
+# Extended 16-chord progressions for much less repetition
 # Major pentatonic progressions (uplifting, adventurous)
-const PROG_SPACE   := [0, 3, 4, 2, 0, 4, 3, 2]   # open, wandering
-const PROG_CRUISE  := [0, 4, 3, 0, 2, 4, 3, 2]   # driving, forward momentum
-const PROG_ATMO    := [0, 2, 4, 3, 0, 2, 3, 4]   # dreamy, mysterious
-const PROG_SURFACE := [0, 3, 2, 4, 0, 3, 4, 2]   # warm, grounded
+const PROG_SPACE   := [0, 3, 4, 2, 0, 4, 3, 2,  0, 2, 4, 3, 0, 4, 2, 1]   # open, wandering
+const PROG_CRUISE  := [0, 4, 3, 0, 2, 4, 3, 2,  0, 2, 3, 4, 2, 3, 4, 1]   # driving, forward momentum
+const PROG_ATMO    := [0, 2, 4, 3, 0, 2, 3, 4,  0, 3, 2, 4, 0, 4, 2, 3]   # dreamy, mysterious
+const PROG_SURFACE := [0, 3, 2, 4, 0, 3, 4, 2,  0, 4, 3, 2, 0, 2, 3, 4]   # warm, grounded
 
 # Dorian progression (heroic tension)
-const PROG_COMBAT  := [0, 3, 4, 2, 0, 4, 5, 3]   # tense but driving
+const PROG_COMBAT  := [0, 3, 4, 2, 0, 4, 5, 3,  0, 2, 3, 5, 4, 3, 2, 4]   # tense but driving
 
 # =====================================================================
 #  CHORD PROGRESSION
@@ -194,6 +197,12 @@ var _arp_phrase_count: int = 0
 var _arp_pan: float = 0.0
 var _arp_accent: float = 0.85
 
+var _arp2_current_freq: float = 440.0
+var _arp2_envelope: float = 0.0
+var _arp2_vol: float = 0.0
+var _arp2_target_vol: float = 0.0
+var _arp2_vol_lfo_phase: float = 0.0
+
 const ACCENT_PATTERN := [0.85, 0.50, 0.70, 0.45, 0.80, 0.55, 0.65, 0.50]
 
 # =====================================================================
@@ -214,9 +223,9 @@ var _hat_decay: float = 0.997
 var _noise_idx: int = 0
 
 # Per-drum volumes (relative to _perc_volume master)
-const KICK_VOL  := 0.30
-const SNARE_VOL := 0.14
-const HAT_VOL   := 0.08
+const KICK_VOL  := 0.42
+const SNARE_VOL := 0.20
+const HAT_VOL   := 0.12
 
 # Percussion step tracking
 var _perc_step_timer: float = 0.0
@@ -239,11 +248,11 @@ const FILL_B := [1, 2, 4, 2, 1, 6, 2, 5]   # syncopated fill
 # 16th-note bass groove velocity patterns. 0.0 = rest, positive = hit velocity.
 # 16 steps per bar. Rests create breathing room and rhythmic personality.
 # These drive the pulsing bass independently of the arp/perc patterns.
-const BASS_GROOVE_SPACE   := [1.0, 0.0, 0.0, 0.0, 0.75, 0.0, 0.0, 0.0, 0.85, 0.0, 0.0, 0.0, 0.70, 0.0, 0.55, 0.0]
-const BASS_GROOVE_CRUISE  := [1.0, 0.0, 0.55, 0.0, 0.0, 0.75, 0.0, 0.0, 0.90, 0.0, 0.55, 0.0, 0.70, 0.0, 0.50, 0.65]
-const BASS_GROOVE_ATMO    := [1.0, 0.0, 0.0, 0.60, 0.0, 0.0, 0.75, 0.0, 0.85, 0.0, 0.0, 0.65, 0.0, 0.0, 0.70, 0.0]
-const BASS_GROOVE_SURFACE := [1.0, 0.0, 0.65, 0.50, 0.80, 0.0, 0.70, 0.60, 0.90, 0.0, 0.65, 0.50, 0.75, 0.0, 0.60, 0.55]
-const BASS_GROOVE_COMBAT  := [1.0, 0.65, 0.0, 0.75, 0.90, 0.0, 0.70, 0.80, 1.0, 0.60, 0.0, 0.75, 0.85, 0.0, 0.70, 0.65]
+const BASS_GROOVE_SPACE   := [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+const BASS_GROOVE_CRUISE  := [1.0, 0.7, 0.9, 0.7, 1.0, 0.7, 0.9, 0.7, 1.0, 0.7, 0.9, 0.7, 1.0, 0.7, 0.9, 0.7]
+const BASS_GROOVE_ATMO    := [1.0, 0.6, 0.7, 0.5, 1.0, 0.6, 0.7, 0.5, 1.0, 0.6, 0.7, 0.5, 1.0, 0.6, 0.7, 0.5]
+const BASS_GROOVE_SURFACE := [1.0, 0.8, 0.9, 0.7, 1.0, 0.8, 0.9, 0.7, 1.0, 0.8, 0.9, 0.7, 1.0, 0.8, 0.9, 0.7]
+const BASS_GROOVE_COMBAT  := [1.0, 0.8, 1.0, 0.8, 1.0, 0.8, 1.0, 0.8, 1.0, 0.8, 1.0, 0.8, 1.0, 0.8, 1.0, 0.8]
 
 # =====================================================================
 #  LOOKUP TABLES
@@ -283,6 +292,7 @@ var _bass_step_timer: float = 0.0      # synced to 16th-note grid
 
 # 16th-note step counter (0..15); initialized so first increment = step 0 (downbeat)
 var _bass_step_count: int = 15
+var _master_step_counter: int = 0
 
 # Per-step harmonic brightness: randomized each retrigger → each note has unique timbre.
 var _bass_harm_level: float = 0.5
@@ -370,6 +380,17 @@ func _ready() -> void:
 	add_child(_arp_player)
 	_arp_player.play()
 	_arp_playback = _arp_player.get_stream_playback()
+
+	# Arp2 generator (Triangle, fast)
+	_arp2_player = AudioStreamPlayer.new()
+	_arp2_player.bus = "Music"
+	var arp2_stream := AudioStreamGenerator.new()
+	arp2_stream.mix_rate = _sample_rate
+	arp2_stream.buffer_length = 0.15
+	_arp2_player.stream = arp2_stream
+	add_child(_arp2_player)
+	_arp2_player.play()
+	_arp2_playback = _arp2_player.get_stream_playback()
 
 	# Percussion generator — goes to Perc bus (DRY — no reverb, electronic punch)
 	_perc_player = AudioStreamPlayer.new()
@@ -584,30 +605,33 @@ func _process(delta: float) -> void:
 		_chord_timer -= _chord_duration
 		_advance_chord()
 
-	# ── Arpeggiator step clock (8th notes) ───────────────────────────
-	_arp_step_timer += delta
-	var arp_step_dur := 60.0 / _arp_tempo / 2.0
-	if _arp_step_timer >= arp_step_dur:
-		_arp_step_timer -= arp_step_dur
-		_advance_arp_step()
-
-	# ── Percussion step clock (8th notes, same tempo as arp) ─────────
-	_perc_step_timer += delta
-	var perc_step_dur := 60.0 / _arp_tempo / 2.0
-	if _perc_step_timer >= perc_step_dur:
-		_perc_step_timer -= perc_step_dur
-		_advance_perc_step()
-
-	# ── Bass pulse step clock (16th notes — 2× denser than arp/perc) ────
+	# ── Master Step Clock (16th notes) ───────────────────────────
+	# Drives Bass, Arp, and Percussion from a single synchronized counter
 	_bass_step_timer += delta
-	var bass_step_dur := 60.0 / _arp_tempo / 4.0   # 16th notes
-	if _bass_step_timer >= bass_step_dur:
-		_bass_step_timer -= bass_step_dur
+	var step_dur := 60.0 / _arp_tempo / 4.0   # 16th notes
+	while _bass_step_timer >= step_dur:
+		_bass_step_timer -= step_dur
+		
+		# 16th note triggers (Bass, Arp2)
 		_retrigger_bass_pulse()
+		_advance_arp2_step()
+		
+		# 8th note triggers (Arp, Perc) happen every 2nd 16th note step
+		_master_step_counter += 1
+		if _master_step_counter % 2 == 0:
+			_advance_arp_step()
+			_advance_perc_step()
 
 	# Decay envelopes — arp uses tempo-proportional rate so notes fill ~75% of each step
 	_arp_envelope = maxf(_arp_envelope - delta * _arp_decay_rate, 0.0)
+	_arp2_envelope = maxf(_arp2_envelope - delta * (_arp_decay_rate * 2.0), 0.0)
 	_stinger_env  = maxf(_stinger_env  - delta * 4.0, 0.0)
+
+	# Fading LFO for Arp2
+	_arp2_vol_lfo_phase = fmod(_arp2_vol_lfo_phase + delta * 0.03, 1.0)
+	var arp2_lfo_val = sin(_arp2_vol_lfo_phase * TAU) * 0.5 + 0.5
+	_arp2_target_vol = arp2_lfo_val * arp2_lfo_val * _arp_volume * 0.6  # Lower volume
+	_arp2_vol = lerp(_arp2_vol, _arp2_target_vol, 2.0 * delta)
 
 	# ── Ambient accent timer ─────────────────────────────────────────
 	if _accent_type == 0:
@@ -630,7 +654,7 @@ func _process(delta: float) -> void:
 				if _accent_env <= 0.0:
 					_accent_env = 0.0
 					_accent_type = 0
-					_accent_timer = randf_range(8.0, 22.0)
+					_accent_timer = randf_range(3.0, 9.0) # More frequent accents
 
 	# ── Update bus effects ───────────────────────────────────────────
 	_update_bus_effects()
@@ -645,10 +669,12 @@ func _process(delta: float) -> void:
 
 	if time_since_last_fill > 0.0:
 		_last_audio_time = current_time
-		_fill_bass_buffer(int(time_since_last_fill * _sample_rate))
-		_fill_arp_buffer(int(time_since_last_fill * _sample_rate))
-		_fill_perc_buffer(int(time_since_last_fill * _sample_rate))
-		_fill_accent_buffer(int(time_since_last_fill * _sample_rate))
+		var frames := int(time_since_last_fill * _sample_rate)
+		_fill_bass_buffer(frames)
+		_fill_arp_buffer(frames)
+		_fill_arp2_buffer(frames)
+		_fill_perc_buffer(frames)
+		_fill_accent_buffer(frames)
 
 # =====================================================================
 #  CHORD PROGRESSION
@@ -761,92 +787,92 @@ func _poll_game_state() -> void:
 func _update_music_targets() -> void:
 	match current_state:
 		MusicState.DEEP_SPACE:
-			_target_bass_volume     = 0.20      # raised — bass is now on dry BassLine bus
-			_target_arp_volume      = 0.025
-			_target_perc_volume     = 0.30      # sparse kick — audible but distant
-			_target_filter_cutoff   = 500.0
-			_target_reverb_mix      = 0.55
-			_arp_tempo              = 35.0
+			_target_bass_volume     = 0.20
+			_target_arp_volume      = 0.005     # drastically lower
+			_target_perc_volume     = 0.02      # drastically lower
+			_target_filter_cutoff   = 250.0     # extreme muffled
+			_target_reverb_mix      = 0.95      # massive reverb
+			_arp_tempo              = 35.0      # slower
 			_chord_duration         = 8.0
 			_bass_detune            = 1.003
 			_target_delay_feedback  = 0.35
 			_target_delay_mix       = 0.30
 			_target_chorus_rate     = 0.3
 			_target_chorus_depth    = 3.0
-			_target_stereo_width    = 0.6
+			_target_stereo_width    = 0.75
 			_filter_lfo_rate        = 0.04
 			_filter_lfo_depth       = 0.35
 			_swell_depth            = 0.30
 
 		MusicState.CRUISING:
 			var spd_t := clampf(_ship_speed / 5000.0, 0.0, 1.0)
-			_target_bass_volume     = 0.22
+			_target_bass_volume     = 0.25
 			_target_arp_volume      = 0.04
-			_target_perc_volume     = lerpf(0.30, 0.40, spd_t)
-			_target_filter_cutoff   = lerpf(700.0, 2200.0, spd_t)
-			_target_reverb_mix      = 0.4
-			_arp_tempo              = lerpf(45.0, 70.0, spd_t)
+			_target_perc_volume     = lerpf(0.35, 0.45, spd_t)
+			_target_filter_cutoff   = lerpf(1200.0, 3000.0, spd_t)
+			_target_reverb_mix      = 0.50
+			_arp_tempo              = lerpf(50.0, 75.0, spd_t)
 			_chord_duration         = lerpf(6.0, 4.0, spd_t)
 			_bass_detune            = 1.005
 			_target_delay_feedback  = lerpf(0.30, 0.20, spd_t)
 			_target_delay_mix       = lerpf(0.25, 0.18, spd_t)
 			_target_chorus_rate     = lerpf(0.4, 0.6, spd_t)
-			_target_chorus_depth    = lerpf(2.5, 1.5, spd_t)
-			_target_stereo_width    = 0.5
+			_target_chorus_depth    = lerpf(3.0, 2.0, spd_t)
+			_target_stereo_width    = 0.65
 			_filter_lfo_rate        = lerpf(0.06, 0.10, spd_t)
 			_filter_lfo_depth       = 0.25
 			_swell_depth            = 0.20
 
 		MusicState.ATMOSPHERE:
-			_target_bass_volume     = 0.22
-			_target_arp_volume      = 0.035
-			_target_perc_volume     = 0.28      # soft offbeat hats — ethereal but audible
-			_target_filter_cutoff   = 1000.0
-			_target_reverb_mix      = 0.6
-			_arp_tempo              = 50.0
-			_chord_duration         = 6.0
+			_target_bass_volume     = 0.25
+			_target_arp_volume      = 0.045
+			_target_perc_volume     = 0.35      # soft offbeat hats — ethereal but audible
+			_target_filter_cutoff   = 1500.0
+			_target_reverb_mix      = 0.70
+			_arp_tempo              = 70.0
+			_chord_duration         = 5.0
 			_bass_detune            = 1.008
 			_target_delay_feedback  = 0.32
 			_target_delay_mix       = 0.28
 			_target_chorus_rate     = 0.35
 			_target_chorus_depth    = 3.5
-			_target_stereo_width    = 0.65
+			_target_stereo_width    = 0.80
 			_filter_lfo_rate        = 0.05
 			_filter_lfo_depth       = 0.30
 			_swell_depth            = 0.25
 
 		MusicState.SURFACE:
-			_target_bass_volume     = 0.22
-			_target_arp_volume      = 0.045
-			_target_perc_volume     = 0.40      # proper groove — full and punchy
-			_target_filter_cutoff   = 1400.0
-			_target_reverb_mix      = 0.45
-			_arp_tempo              = 55.0
-			_chord_duration         = 5.0
+			_target_bass_volume     = 0.28
+			_target_arp_volume      = 0.08
+			_target_perc_volume     = 0.65      # proper groove — full and punchy
+			_target_filter_cutoff   = 3000.0
+			_target_reverb_mix      = 0.55
+			_arp_tempo              = 90.0
+			_chord_duration         = 4.0
 			_bass_detune            = 1.004
 			_target_delay_feedback  = 0.22
 			_target_delay_mix       = 0.20
 			_target_chorus_rate     = 0.45
 			_target_chorus_depth    = 2.0
-			_target_stereo_width    = 0.45
+			_target_stereo_width    = 0.65
 			_filter_lfo_rate        = 0.07
 			_filter_lfo_depth       = 0.20
 			_swell_depth            = 0.15
 
 		MusicState.COMBAT:
-			_target_bass_volume     = 0.25
-			_target_arp_volume      = 0.06
-			_target_perc_volume     = lerpf(0.42, 0.55, _combat_tension)
-			_target_filter_cutoff   = lerpf(1600.0, 3000.0, _combat_tension)
-			_target_reverb_mix      = 0.25
-			_arp_tempo              = lerpf(60.0, 80.0, _combat_tension)
-			_chord_duration         = lerpf(4.0, 2.5, _combat_tension)
+			_target_bass_volume     = 0.30
+			_target_arp_volume      = 0.075
+			_target_perc_volume     = lerpf(0.55, 0.70, _combat_tension)
+			_target_filter_cutoff   = lerpf(2200.0, 4500.0, _combat_tension)
+			_target_reverb_mix      = 0.35
+			_arp_tempo              = lerpf(85.0, 115.0, _combat_tension)
+			_chord_duration         = lerpf(3.0, 2.0, _combat_tension)
 			_bass_detune            = 1.01
 			_target_delay_feedback  = lerpf(0.18, 0.12, _combat_tension)
 			_target_delay_mix       = lerpf(0.15, 0.10, _combat_tension)
 			_target_chorus_rate     = 0.6
 			_target_chorus_depth    = 1.0
-			_target_stereo_width    = 0.3
+			_target_stereo_width    = 0.50
 			_filter_lfo_rate        = lerpf(0.08, 0.14, _combat_tension)
 			_filter_lfo_depth       = lerpf(0.15, 0.10, _combat_tension)
 			_swell_depth            = 0.10
@@ -1010,6 +1036,11 @@ func _fill_bass_buffer(frames_hint: int = 0) -> void:
 
 		# Mix: pulse + sub centered for punch; pad stereo-spread for spatial width
 		var center := (pulse_s + sub) * vol
+		
+		# Growl/Distortion effect (hard clipping + saturation) for a harder hitting bass
+		center = clampf(center * 1.5, -1.0, 1.0)
+		center = sin(center * PI * 0.5)
+
 		var left  := center + pad * (0.5 + sw * 0.28) * vol
 		var right := center + pad * (0.5 - sw * 0.28) * vol
 
@@ -1120,6 +1151,46 @@ func _fill_arp_buffer(frames_hint: int = 0) -> void:
 		_arp_playback.push_frame(Vector2(s * pan_l, s * pan_r))
 
 	_arp_phase = phase
+
+func _advance_arp2_step() -> void:
+	if _arp_note_pool.is_empty():
+		return
+	
+	var idx = _master_step_counter % _arp_note_pool.size()
+	var ratio: float = _arp_note_pool[idx]
+	
+	# Twice as fast, higher pitch
+	_arp2_current_freq = ROOT_HZ * ratio * 4.0
+	_arp2_envelope = 1.0
+
+func _fill_arp2_buffer(frames_hint: int = 0) -> void:
+	if not _arp2_playback:
+		return
+	var frames := frames_hint if frames_hint > 0 else _arp2_playback.get_frames_available()
+	frames = mini(frames, _arp2_playback.get_frames_available())
+	frames = mini(frames, _MAX_FILL_FRAMES)
+	if frames <= 0:
+		return
+
+	var freq  := _arp2_current_freq
+	var inv_r := 1.0 / _sample_rate
+	var vol   := _arp2_vol * _arp2_envelope
+	var phase := _arp2_phase
+	var pan_l := 1.4
+	var pan_r := 0.6
+
+	if vol < 0.0005:
+		for i in frames:
+			_arp2_playback.push_frame(Vector2.ZERO)
+		return
+
+	for i in frames:
+		phase = fmod(phase + freq * inv_r, 1.0)
+		var tri = 1.0 - abs(fmod(phase + 0.25, 1.0) * 4.0 - 2.0)
+		var s = tri * vol
+		_arp2_playback.push_frame(Vector2(s * pan_l, s * pan_r))
+
+	_arp2_phase = phase
 
 # =====================================================================
 #  PERCUSSION ENGINE
@@ -1252,20 +1323,20 @@ func _fire_accent() -> void:
 	var roll := randf()
 	match current_state:
 		MusicState.DEEP_SPACE:
-			# Mostly drones and strings — vast, empty feel
-			_accent_type = 2 if roll < 0.55 else (1 if roll < 0.85 else 3)
+			# Mostly drones and telemetry — vast, empty sci-fi feel
+			_accent_type = 2 if roll < 0.40 else (4 if roll < 0.75 else 1)
 		MusicState.CRUISING:
-			# Mostly strings and shimmers — forward motion, sparkle
-			_accent_type = 1 if roll < 0.45 else (3 if roll < 0.75 else 2)
+			# Mostly strings and telemetry — forward motion, tech sparkle
+			_accent_type = 1 if roll < 0.45 else (4 if roll < 0.75 else 3)
 		MusicState.ATMOSPHERE:
 			# Even mix — dreamy and layered
-			_accent_type = 1 if roll < 0.40 else (2 if roll < 0.70 else 3)
+			_accent_type = 1 if roll < 0.35 else (2 if roll < 0.70 else 3)
 		MusicState.SURFACE:
 			# Shimmers and strings — warm, alive
-			_accent_type = 3 if roll < 0.45 else (1 if roll < 0.80 else 2)
+			_accent_type = 3 if roll < 0.45 else (1 if roll < 0.80 else 4)
 		MusicState.COMBAT:
-			# Shimmers only (drones and strings too calm for combat)
-			_accent_type = 3 if roll < 0.70 else 1
+			# Shimmers and Telemetry
+			_accent_type = 3 if roll < 0.60 else (4 if roll < 0.85 else 1)
 		_:
 			_accent_type = 1
 
@@ -1274,14 +1345,14 @@ func _fire_accent() -> void:
 	var base := _bass_freq * 4.0
 
 	match _accent_type:
-		1:  # STRINGS: 3 detuned unison voices, slow attack and release
+		1:  # STRINGS: 3 detuned unison/octave voices, full sound
 			_acc_freq1 = base
 			_acc_freq2 = base * 1.0028   # +5 cents
-			_acc_freq3 = base * 0.9972   # -5 cents
-			_acc_vol   = 0.038
-			_accent_atk_rate   = 1.0 / 0.45    # 450ms attack
-			_accent_sustain_t  = randf_range(1.5, 3.2)
-			_accent_rel_rate   = 1.0 / 0.75    # 750ms release
+			_acc_freq3 = base * 0.4986   # an octave down, detuned
+			_acc_vol   = 0.065           # louder and richer
+			_accent_atk_rate   = 1.0 / 0.8     # 800ms attack
+			_accent_sustain_t  = randf_range(3.0, 5.0)
+			_accent_rel_rate   = 1.0 / 1.5     # 1.5s release
 		2:  # DRONE: single low root with slow vibrato
 			_acc_freq1 = ROOT_HZ * _chord_root_ratio   # same octave as bass root
 			_acc_freq2 = 0.0
@@ -1298,6 +1369,14 @@ func _fire_accent() -> void:
 			_accent_atk_rate   = 1.0 / 0.04    # 40ms sharp attack
 			_accent_sustain_t  = randf_range(0.0, 0.25)
 			_accent_rel_rate   = 1.0 / 0.55    # 550ms bell decay
+		4:  # TELEMETRY: sci-fi computer/scanner sounds
+			_acc_freq1 = base * 1.5
+			_acc_freq2 = 0.0
+			_acc_freq3 = 0.0
+			_acc_vol   = 0.035
+			_accent_atk_rate   = 1.0 / 0.1     # 100ms attack
+			_accent_sustain_t  = randf_range(1.0, 2.5)
+			_accent_rel_rate   = 1.0 / 0.8     # 800ms decay
 
 	_acc_pan   = randf_range(-0.45, 0.45)
 	_accent_stage = 0
@@ -1364,6 +1443,16 @@ func _fill_accent_buffer(frames_hint: int = 0) -> void:
 				_accent_playback.push_frame(Vector2(s * pan_l, s * pan_r))
 				p1 = fmod(p1 + f1 * inv_r, 1.0)
 				p2 = fmod(p2 + f2 * inv_r, 1.0)
+				
+		4:  # TELEMETRY — fast sci-fi scanner / FM sweep
+			var f1 := _acc_freq1
+			for i in frames:
+				var fm = sin(lpph * TAU) * 2.0
+				var freq = f1 * (1.0 + fm)
+				lpph = fmod(lpph + 4.0 * inv_r, 1.0) # fast 4Hz modulation
+				p1 = fmod(p1 + freq * inv_r, 1.0)
+				var s := tbl[int(p1 * 256.0) & 255] * vol
+				_accent_playback.push_frame(Vector2(s * pan_l, s * pan_r))
 
 		_:
 			for i in frames:

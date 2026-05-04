@@ -13,6 +13,7 @@ var flash_timer: float = 0.0 # ACE: Damage feedback persistence
 var health_bar: ProgressBar = null
 var hud_sprite: Sprite3D = null # ACE: Distance-culled HUD element
 var mesh_inst: MeshInstance3D = null
+var size: float = 100.0
 var _visual_tick: int = 0
 # MOBILE PERF cached at _ready — disables OmniLight3D + SubViewport HUD
 # (each mineral would otherwise own a light and a transparent SubViewport).
@@ -60,7 +61,7 @@ func _generate_low_poly_node() -> void:
 	rng.seed = hash(str(global_position) + resource_type)
 
 	var col = _get_resource_color()
-	var size = rng.randf_range(80.0, 160.0) # (80m - 160m)
+	size = rng.randf_range(80.0, 160.0) # (80m - 160m)
 	if resource_type == "Diamond": size *= 1.4
 
 	# Mesh: shared per type, scale brings unit geometry up to actual mineral size.
@@ -93,9 +94,18 @@ func _generate_low_poly_node() -> void:
 	# Collision shape: shared CylinderShape3D from the size-bucket cache.
 	# Position remains per-instance so the collider matches the visual scale exactly.
 	var shape = CollisionShape3D.new()
+
 	shape.shape = _get_or_build_shape(size)
 	shape.position = Vector3(0, size * 2.5, 0)
 	add_child(shape)
+
+# -------------------------------------------------------------------
+#  PUBLIC API
+# -------------------------------------------------------------------
+
+func get_target_center() -> Vector3:
+	# Returns the visual center of the mineral for aiming reticle snapping.
+	return global_transform * Vector3(0, size * 2.5, 0)
 
 # -------------------------------------------------------------------
 #  STATIC SHARED-RESOURCE BUILDERS
@@ -111,10 +121,46 @@ static func _get_or_build_mesh(type: String) -> ArrayMesh:
 	var mesh: ArrayMesh
 	if type == "Silver" or type == "Basalt Glass":
 		mesh = _build_blocky_mesh()
+	elif type == "Wood" or type == "Carbon Fiber" or type == "Living Resin":
+		mesh = _build_flora_mesh(type)
 	else:
 		mesh = _build_octahedron_mesh(type)
 	_shared_meshes[type] = mesh
 	return mesh
+
+static func _build_flora_mesh(type: String) -> ArrayMesh:
+	var col := _color_for_type(type)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var s := _MESH_UNIT_SIZE
+	
+	if type == "Carbon Fiber":
+		# Grass clump mesh
+		for i in range(5):
+			var ang = i * TAU / 5.0
+			var v1 = Vector3(cos(ang)*s, 0, sin(ang)*s)
+			var v2 = Vector3(cos(ang+0.5)*s, 0, sin(ang+0.5)*s)
+			var v3 = Vector3(0, s * 4.0, 0)
+			st.set_normal(Vector3.UP); st.set_color(col); st.add_vertex(v1)
+			st.set_normal(Vector3.UP); st.set_color(col); st.add_vertex(v2)
+			st.set_normal(Vector3.UP); st.set_color(col); st.add_vertex(v3)
+	else:
+		# Tree-like trunk segment
+		var sides = 6
+		for i in range(sides):
+			var a1 = i * TAU / sides; var a2 = (i + 1) * TAU / sides
+			var b1 = Vector3(cos(a1)*s, 0, sin(a1)*s)
+			var b2 = Vector3(cos(a2)*s, 0, sin(a2)*s)
+			var t1 = Vector3(cos(a1)*s*0.7, s*5.0, sin(a1)*s*0.7)
+			var t2 = Vector3(cos(a2)*s*0.7, s*5.0, sin(a2)*s*0.7)
+			st.set_normal(b1.normalized()); st.set_color(col); st.add_vertex(b1)
+			st.set_normal(b2.normalized()); st.set_color(col); st.add_vertex(b2)
+			st.set_normal(t1.normalized()); st.set_color(col); st.add_vertex(t1)
+			st.set_normal(b2.normalized()); st.set_color(col); st.add_vertex(b2)
+			st.set_normal(t2.normalized()); st.set_color(col); st.add_vertex(t2)
+			st.set_normal(t1.normalized()); st.set_color(col); st.add_vertex(t1)
+			
+	return st.commit()
 
 static func _build_octahedron_mesh(type: String) -> ArrayMesh:
 	var col := _color_for_type(type)
@@ -280,20 +326,43 @@ func _on_mined() -> void:
 	var rng = RandomNumberGenerator.new()
 	rng.randomize()
 	var count = 10 + rng.randi_range(0, 10)  # 10-20
-	var per_value = 80
-	match resource_type:
-		"Silver": per_value = 140
-		"Gold": per_value = 260
-		"Platinum": per_value = 480
-		"Diamond": per_value = 900
+	
+	# DROPS POLICY: some resources drop secondary items (like Resin from Wood)
+	var drops: Array[Dictionary] = []
+	if resource_type == "Wood":
+		drops.append({type="Wood", weight=0.7, val=80})
+		drops.append({type="Living Resin", weight=0.25, val=150})
+		drops.append({type="Primal Fruit", weight=0.05, val=500})
+	elif resource_type == "Carbon Fiber":
+		drops.append({type="Carbon Fiber", weight=0.8, val=60})
+		drops.append({type="Organic Sludge", weight=0.2, val=30})
+	else:
+		# Standard minerals drop themselves
+		var per_val = 80
+		match resource_type:
+			"Silver": per_val = 140
+			"Gold": per_val = 260
+			"Platinum": per_val = 480
+			"Diamond": per_val = 900
+		drops.append({type=resource_type, weight=1.0, val=per_val})
 
-	var shard_col = _get_resource_color().lerp(Color.WHITE, 0.4)
 	for i in range(count):
+		# Pick a drop type based on weights
+		var roll = rng.randf()
+		var cumulative = 0.0
+		var selected_drop = drops[0]
+		for d in drops:
+			cumulative += d.weight
+			if roll <= cumulative:
+				selected_drop = d
+				break
+
 		var gem = Node3D.new()
 		gem.set_script(gem_script)
+		var shard_col = ResourceRegistry.get_color(selected_drop.type).lerp(Color.WHITE, 0.4)
 		gem.set("col", shard_col)
-		gem.set("value", per_value)
-		gem.set("resource_type", resource_type)
+		gem.set("value", selected_drop.val)
+		gem.set("resource_type", selected_drop.type)
 		gem.set("planet", nearest_p)
 		gem.set("surface_dist", min_d)
 		get_tree().root.add_child(gem)

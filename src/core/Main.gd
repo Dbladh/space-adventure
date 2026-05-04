@@ -269,40 +269,27 @@ func _setup_hardened_solar_genesis() -> void:
 	main_sun = sun
 
 func _setup_titan_planetary() -> void:
-	var planet_gen_script = load("res://src/world/PlanetGen.gd")
-	if planet_gen_script:
-		# Starting world — the only planet that exists before the player forges more.
-		# Additional worlds are created at the Space Station using 3 mined resources.
-		var planet = Node3D.new(); planet.set_script(planet_gen_script)
-		planet.name = "Planet_Varn"
-		planet.set("planet_radius", 1125000.0)
-		planet.set("planet_seed", 1001)
-		planet.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(planet)
-		planet.global_position = Vector3(0, 0, -1500000.0)
-		planet.add_to_group("Planet")
-		planet_ref = planet
-		# Starting planet: all Tier 1 resources + Copper as first Tier 2 taste
-		planet.set("planet_resources", ["Stone", "Wood", "Neon Moss", "Silica Dust", "Copper"])
+	# Starter planet has been removed per user request.
+	pass
 
 func _setup_space_station() -> void:
 	# Planet_Varn: centre (0,0,-1,500,000), radius 1,125,000m, belt to ~2,625,000m.
 	# Stations are ~300 km across so the POI beacon height must exceed their radius.
 
-	# 1. Orbital — directly above Planet_Varn, 1.3 Mm from centre (130 km above atmosphere).
-	#    Positioned along +Y from the planet so it's visible from the player's spawn at origin.
+	# 1. Orbital — Near side of Planet_Varn, offset so it doesn't trigger UI at spawn.
+	#    Positioned at ~943km from player spawn, easily visible, clearing the atmosphere.
 	_spawn_station("Orbital",
-		Vector3(0, 1_300_000, -1_500_000),
+		Vector3(800_000, 400_000, -300_000),
 		Color(0.3, 1.0, 0.5))   # green — the "home" station
 
 	# 2. Alpha — deep space along -Z, far from the belt
 	_spawn_station("Alpha",
-		Vector3(0, 0, -8_000_000),
+		Vector3(0, 0, -3_500_000),
 		Color(0.3, 0.8, 1.0))   # cyan
 
 	# 3. Beta — off in another quadrant
 	_spawn_station("Beta",
-		Vector3(-7_000_000, 600_000, -3_500_000),
+		Vector3(-3_000_000, 600_000, -2_000_000),
 		Color(0.9, 0.5, 1.0))   # purple
 
 func _spawn_station(display_name: String, pos: Vector3, beacon_col: Color) -> void:
@@ -326,21 +313,20 @@ func _spawn_station(display_name: String, pos: Vector3, beacon_col: Color) -> vo
 
 func _setup_asteroid_belt() -> void:
 	var belt_script = load("res://src/world/AsteroidBelt.gd")
-	if belt_script and planet_ref:
+	if belt_script:
 		var belt = Node3D.new(); belt.set_script(belt_script)
-		belt.name = "PlanetaryRingSystem"
+		belt.name = "DeepSpaceAsteroidBelt"
 		belt.set("belt_seed", 9999)
-		# TIGHT PLANETARY RING: Orbiting just above the surface (1,400km - 2,000km)
-		# Note: Planet 1 radius is 1,125km.
+		# DEEP SPACE BELT:
 		belt.set("inner_radius", 1400000.0)
 		belt.set("outer_radius", 2000000.0)
-		belt.set("thickness", 40000.0) # Compressed vertically for a sharp ring look
+		belt.set("thickness", 40000.0)
 		belt.set("count", 1800 if _mobile_perf_mode else 3000)
 		belt.set("mmi_count", 8000 if _mobile_perf_mode else 14000)
 		belt.set("phys_count", 240 if _mobile_perf_mode else 500)
 		belt.set("mobile_perf", _mobile_perf_mode)
 		world_root.add_child(belt)
-		belt.global_position = planet_ref.global_position
+		belt.global_position = Vector3(0, 0, -1500000.0)
 		belt.add_to_group("World")
 		
 	# DEEP SPACE SALVAGE: Rare minerals floating in the void
@@ -645,7 +631,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.keycode == KEY_ENTER: _toggle_map_fullscreen()
 		if event.keycode == KEY_F4: _toggle_debug_suite()
 		if event.keycode == KEY_R: get_tree().reload_current_scene()
-		if event.keycode == KEY_ESCAPE: toggle_pause()
+		if event.keycode == KEY_ESCAPE:
+			# ACE: Only toggle pause if no other full-screen UI is active.
+			# If the game is paused but _pause_overlay is hidden, it means
+			# a SpaceStation or Cinematic has the stage.
+			if not get_tree().paused or _pause_overlay.visible:
+				toggle_pause()
 		if event.keycode == KEY_B: 
 			if benchmark_manager: benchmark_manager.start_automated_test(_player_ref)
 

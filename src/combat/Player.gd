@@ -1,16 +1,17 @@
-
 extends CharacterBody3D
 
 # Player.gd (Celestial Final-Sync Edition)
 # Managed by THE ARCHITECT.
 
-@export var max_space_speed: float = 12000.0
-@export var max_warp_speed: float = 65000.0
-@export var max_hyperdrive_speed: float = 320000.0 # L1+R1 — Hyperdrive tier, ~5× warp
+@export var max_space_speed: float = 35000.0
+@export var max_warp_speed: float = 250000.0
+@export var max_hyperdrive_speed: float = 1000000.0 # L1+R1 — Hyperdrive tier, ~4× warp
+@export var surface_max_speed: float = 280.0
+@export var surface_warp_speed: float = 1800.0
+@export var max_deep_space_warp_speed: float = 4000000.0
 # DEEP-SPACE CRUISE: when true_altitude is well past the gravity-brake boundary the
 # warp cap auto-scales up so inter-planet hops take seconds instead of minutes.
 # 600 km/s peak → 8M-unit hop ≈ 13 s, 16M ≈ 27 s. Tune via _deep_space_warp_lerp().
-@export var max_deep_space_warp_speed: float = 1200000.0
 @export var rotation_speed: float = 2.8
 @export var roll_speed: float = 2.0
 @export var acceleration: float = 0.9
@@ -116,6 +117,7 @@ var _mobile_perf: bool = false
 # POOLED RAY QUERY: create() allocates + sets defaults every call. Reuse one
 # query object per frame and just reassign its fields.
 var _ray_q: PhysicsRayQueryParameters3D = null
+var _proxy_ray_q: PhysicsRayQueryParameters3D = null  # proxy-only, ignores terrain
 # THROTTLE COUNTERS for mobile budget pacing
 var _thruster_tick: int = 0
 var _terrain_floor_tick: int = 0
@@ -129,6 +131,9 @@ func _ready() -> void:
 	_ray_q = PhysicsRayQueryParameters3D.new()
 	_ray_q.collision_mask = 1 | 2
 	_ray_q.exclude = [self]
+	_proxy_ray_q = PhysicsRayQueryParameters3D.new()
+	_proxy_ray_q.collision_mask = 32  # layer 6: SurfacePropProxy only, bypasses terrain
+	_proxy_ray_q.exclude = [self]
 	lock_mouse()
 	
 	# COMPASS HARDENING: 3D arrow pointing back to ship
@@ -223,6 +228,7 @@ func _setup_combat_hud() -> void:
 	hud_reticle = Control.new()
 	hud_reticle.name = "Reticle"
 	hud_reticle.custom_minimum_size = Vector2(128, 128) # Larger canvas for anti-aliased arcs
+	hud_reticle.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_reticle.set_script(load("res://src/combat/ReticleUI.gd"))
 	hud.add_child(hud_reticle)
 	
@@ -230,11 +236,13 @@ func _setup_combat_hud() -> void:
 	# ACE LOCK-ON: Dual-Stage visors
 	hud_scan_lock = Control.new()
 	hud_scan_lock.custom_minimum_size = Vector2(80, 80)
+	hud_scan_lock.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_scan_lock.set_script(load("res://src/combat/TargetLockUI.gd"))
 	hud.add_child(hud_scan_lock); hud_scan_lock.hide()
 	
 	hud_hard_lock = Control.new()
 	hud_hard_lock.custom_minimum_size = Vector2(100, 100)
+	hud_hard_lock.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_hard_lock.set_script(load("res://src/combat/TargetLockUI.gd"))
 	hud.add_child(hud_hard_lock); hud_hard_lock.hide()
 	hud_hard_lock.modulate = Color(1.0, 0.8, 0.1) # GOLD (Locked)
@@ -242,6 +250,7 @@ func _setup_combat_hud() -> void:
 	# ACE: INTERCEPT LEAD RETICLE (Predictive solution)
 	hud_target_lead = Control.new()
 	hud_target_lead.custom_minimum_size = Vector2(40, 40)
+	hud_target_lead.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hud_target_lead.set_script(load("res://src/combat/TargetLockUI.gd"))
 	hud.add_child(hud_target_lead); hud_target_lead.hide()
 	hud_target_lead.modulate = Color(1.0, 0.5, 0.1) # ORANGE Lead
@@ -250,6 +259,7 @@ func _setup_combat_hud() -> void:
 	for i in range(8):
 		var arrow = Control.new()
 		arrow.custom_minimum_size = Vector2(40, 40)
+		arrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		arrow.set_script(load("res://src/combat/TargetLockUI.gd"))
 		hud.add_child(arrow); arrow.hide()
 	# ACE: MOBILE CONTROLS OVERLAY
@@ -1408,7 +1418,10 @@ func _process(delta: float) -> void:
 		
 		# RETICLE SNAPPING: Jump visually to the target when within lock-cone
 		if is_instance_valid(lock_on_target):
-			final_target_point = lock_on_target.global_position
+			if lock_on_target.has_method("get_target_center"):
+				final_target_point = lock_on_target.get_target_center()
+			else:
+				final_target_point = lock_on_target.global_position
 			hud_reticle.is_locked = true
 		else:
 			hud_reticle.is_locked = false
@@ -1520,12 +1533,16 @@ func _process(delta: float) -> void:
 		var next_pos = old_pos + move_dist
 		b["pos"] = next_pos # Update internal physical pos
 		
-		# SWEPT-FRAME PHYSICS: Direct raycast from old to new position.
-		# Reusing _ray_q (allocated once in _ready) avoids per-bolt allocations —
-		# critical when dozens of bolts are live at 30fps on mobile.
-		_ray_q.from = old_pos
-		_ray_q.to = next_pos
-		var result = space_state.intersect_ray(_ray_q)
+		# SWEPT-FRAME PHYSICS: proxy check first (layer 32, bypasses terrain),
+		# then normal world/enemy check. Two raycasts prevent terrain from
+		# intercepting bolts before they reach surface prop collision spheres.
+		_proxy_ray_q.from = old_pos
+		_proxy_ray_q.to = next_pos
+		var result = space_state.intersect_ray(_proxy_ray_q)
+		if not result:
+			_ray_q.from = old_pos
+			_ray_q.to = next_pos
+			result = space_state.intersect_ray(_ray_q)
 		
 		if result and is_instance_valid(result.collider):
 			var target = result.collider

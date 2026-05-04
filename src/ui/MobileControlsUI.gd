@@ -357,6 +357,7 @@ func _format_alt(alt: float) -> String:
 # =====================================================================
 
 func _input(event: InputEvent) -> void:
+	if not visible: return
 	if event is InputEventScreenTouch or event is InputEventMouseButton:
 		var pressed := false
 		var pos     := Vector2.ZERO

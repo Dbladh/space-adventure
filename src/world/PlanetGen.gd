@@ -737,11 +737,11 @@ func _process(_delta: float) -> void:
 		if is_instance_valid(node) and node.has_method(method):
 			node.call(method, data)
 
-	# ACE REAPER: Asynchronous destruction of urban nodes
-	var death_budget = 12 if mobile_perf else MAX_DEATHS_PER_FRAME
+	# ACE REAPER: Asynchronous destruction of nodes
+	var death_budget = 4 if mobile_perf else 12 # ACE: Reduced budget per frame to avoid spikes
 	for i in range(min(death_row.size(), death_budget)):
 		var d = death_row.pop_back()
-		if is_instance_valid(d): d.free()
+		if is_instance_valid(d): d.queue_free() # ACE: Always queue_free() for main-thread safety
 	
 	for i in range(min(collision_queue.size(), MAX_COLLISIONS_PER_FRAME)):
 		var c = collision_queue.pop_back()

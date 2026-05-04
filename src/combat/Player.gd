@@ -127,7 +127,7 @@ var _last_flash_ms: int = 0
 
 func _ready() -> void:
 	self.add_to_group("Player")
-	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	_mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
 	_ray_q = PhysicsRayQueryParameters3D.new()
 	_ray_q.collision_mask = 1 | 2 | 4  # terrain + ship + mineable props
 	_ray_q.exclude = [self]
@@ -1303,11 +1303,20 @@ func _input(event: InputEvent) -> void:
 		if in_ship and fire_cooldown <= 0.0:
 			_fire_alternating_cannon()
 	
-	# ORBIT CAMERA: Mouse Look
-	if event is InputEventMouseMotion and mouse_locked and in_ship and not mobile_throttle_dragging:
+	# ORBIT CAMERA: Mouse Look (Desktop only to avoid Gyro-Mouse emulation conflicts)
+	if not _mobile_perf and event is InputEventMouseMotion and mouse_locked and in_ship and not mobile_throttle_dragging:
 		cam_orbit.x -= event.relative.x * 0.002
 		cam_orbit.y -= event.relative.y * 0.002
 		cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
+	
+	# ORBIT CAMERA: Touch Look (Mobile only)
+	# This explicitly separates touch-dragging from gyro tilt emulation.
+	if _mobile_perf and event is InputEventScreenDrag and not mobile_throttle_dragging:
+		# Use position.x > viewport.size.x * 0.3 to avoid throttle interference
+		if event.position.x > get_viewport().size.x * 0.3:
+			cam_orbit.x -= event.relative.x * 0.005 # Faster for touch
+			cam_orbit.y -= event.relative.y * 0.005
+			cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
 	
 	# CONTROLLER FIRE: Triangle (PS) / Y (Xbox)
 	if event is InputEventJoypadButton and event.button_index == JOY_BUTTON_Y and event.pressed:
@@ -1334,14 +1343,11 @@ func _input(event: InputEvent) -> void:
 		if in_ship and true_altitude < 500.0: _disembark()
 		elif not in_ship and parked_ship and global_position.distance_to(parked_ship.global_position) < 80.0: _embark()
 		
-	# MOUSE LOOK
-	if event is InputEventMouseMotion and mouse_locked and not mobile_throttle_dragging:
-		if in_ship:
-			cam_orbit.x -= event.relative.x * 0.002
-			cam_orbit.y -= event.relative.y * 0.002
-		else:
-			walk_yaw -= event.relative.x * 0.005
-			cam_orbit.y -= event.relative.y * 0.005
+	# MOUSE LOOK (On-Foot)
+	if not _mobile_perf and event is InputEventMouseMotion and mouse_locked and not mobile_throttle_dragging and not in_ship:
+		walk_yaw -= event.relative.x * 0.005
+		cam_orbit.y -= event.relative.y * 0.005
+		cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
 
 func _process(delta: float) -> void:
 	# SHADOWGLASS 30FPS SYNC: Only update visual nodes every 33.3ms

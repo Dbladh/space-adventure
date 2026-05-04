@@ -385,11 +385,10 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 			if d < 10000.0: is_near = true # Within 10km of chunk center
 		
 		if is_near:
-			var planet = get_parent().get_parent()
-			if planet and "collision_queue" in planet:
-				planet.collision_queue.append(self)
-			else:
-				create_trimesh_collision()
+			var p_node = planet if planet else get_parent().get_parent()
+			if p_node and "collision_queue" in p_node:
+				if not p_node.collision_queue.has(self):
+					p_node.collision_queue.append(self)
 
 func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	# CPU HARDENING: Infrastructure (Metropolis) visible from ORBIT (<= 2000km).
@@ -528,13 +527,15 @@ func _get_object_xform(pos: Vector3, up: Vector3, noise_val: float, b_scale: flo
 	return xf.scaled_local(Vector3(b_scale, b_scale * sv, b_scale))
 
 func _spawn_rock(points: Array[Transform3D]) -> void:
+	if _c_r == null: _c_r = _build_faceted_rock_mesh(12)
+	
 	var mmi_h = MultiMeshInstance3D.new()
 	var mm_h = MultiMesh.new(); mm_h.transform_format = MultiMesh.TRANSFORM_3D; mm_h.use_colors = true
-	mm_h.mesh = _build_faceted_rock_mesh(12); mm_h.instance_count = points.size()
+	mm_h.mesh = _c_r; mm_h.instance_count = points.size()
 	
 	var mmi_l = MultiMeshInstance3D.new()
 	var mm_l = MultiMesh.new(); mm_l.transform_format = MultiMesh.TRANSFORM_3D; mm_l.use_colors = true
-	mm_l.mesh = _build_faceted_rock_mesh(4); mm_l.instance_count = points.size()
+	mm_l.mesh = _c_r; mm_l.instance_count = points.size()
 	
 	for i in range(points.size()):
 		var h_v = hash(points[i].origin)
@@ -543,7 +544,7 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 		mm_h.set_instance_transform(i, points[i]); mm_h.set_instance_color(i, r_col)
 		mm_l.set_instance_transform(i, points[i]); mm_l.set_instance_color(i, r_col)
 	
-	var mat = ShaderMaterial.new(); mat.shader = load("res://src/shaders/hatch_toon.gdshader"); mat.set_shader_parameter("shadow_strength", 0.9)
+	var mat = _get_rock_mat()
 	
 	_apply_planetary_lod_policy(mmi_h, true)
 	mmi_h.multimesh = mm_h; mmi_h.material_override = mat; add_child(mmi_h)
@@ -610,47 +611,21 @@ func _apply_planetary_lod_policy(mmi: MultiMeshInstance3D, is_high_detail: bool)
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 func _spawn_tree_lods(points: Array[Transform3D]) -> void:
-	# ============================================================
-	# BOTW-STYLE TREE SYSTEM — Complete architectural rewrite.
-	# The fundamental fix: SEPARATE trunk and foliage into TWO
-	# independent MultiMesh stacks with completely different materials.
-	#
-	# TRUNK STACK: Fixed-color StandardMaterial3D (warm brown).
-	#   No vertex colors. No instance colors. Always warm wood brown.
-	#
-	# FOLIAGE STACK: Unshaded StandardMaterial3D.
-	#   vertex_color_use_as_albedo=true + per-instance biome colors.
-	#   CULL_DISABLED so both sides of 2D cross-quads are visible.
-	#   This CANNOT go black — unshaded always shows full albedo.
-	# ============================================================
-	
-	# 2. FOLIAGE MATERIAL — Specialized Toon + Wind Shader
-	var mobile_perf: bool = _is_mobile_perf()
-	var foliage_mat: ShaderMaterial = ShaderMaterial.new()
-	foliage_mat.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
-	foliage_mat.set_shader_parameter("shadow_strength", 0.6)
-	foliage_mat.set_shader_parameter("wind_speed", 0.7)
-	foliage_mat.set_shader_parameter("wind_strength", 0.4)
-	foliage_mat.set_shader_parameter("leaf_texture", _get_tex("res://assets/textures/tree_leaves_texture.png"))
-	foliage_mat.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_leaves_texture_normal.png"))
-	
-	# 1. TRUNK MATERIAL — custom BoTW Toon Shader with hatching
-	var trunk_mat: ShaderMaterial = ShaderMaterial.new()
-	trunk_mat.shader = _get_res("res://src/shaders/trunk_toon.gdshader")
-	trunk_mat.set_shader_parameter("albedo", Color(0.35, 0.25, 0.15))
-	trunk_mat.set_shader_parameter("bark_texture", _get_tex("res://assets/textures/tree_trunk_texture.png"))
-	trunk_mat.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_trunk_texture_normal.png"))
-	trunk_mat.set_shader_parameter("disp_map", _get_tex("res://assets/textures/tree_trunk_texture_displacement.png"))
-	trunk_mat.set_shader_parameter("hatching_strength", 0.45)
+	var foliage_mat = _get_foliage_mat()
+	var trunk_mat = _get_trunk_mat()
 
 
 	
 	var n: int = points.size()
 	# High-Detail chunks (sf <= 0.00055) now manage two simultaneous LOD models.
 	if scale_factor <= 0.00055:
-		var fol_h = _build_varied_foliage(true, 4); var mm_h = MultiMesh.new(); mm_h.transform_format = MultiMesh.TRANSFORM_3D; mm_h.use_colors = true; mm_h.mesh = fol_h; mm_h.instance_count = n
-		var fol_m = _build_varied_foliage(false, 2); var mm_m = MultiMesh.new(); mm_m.transform_format = MultiMesh.TRANSFORM_3D; mm_m.use_colors = true; mm_m.mesh = fol_m; mm_m.instance_count = n
-		var trk_h = _build_botw_trunk(true); var mt_th = MultiMesh.new(); mt_th.transform_format = MultiMesh.TRANSFORM_3D; mt_th.use_colors = true; mt_th.mesh = trk_h; mt_th.instance_count = n
+		if _c_fol_h == null: _c_fol_h = _build_varied_foliage(true, 4)
+		if _c_fol_m == null: _c_fol_m = _build_varied_foliage(false, 2)
+		if _c_trk_h == null: _c_trk_h = _build_botw_trunk(true)
+
+		var mm_h = MultiMesh.new(); mm_h.transform_format = MultiMesh.TRANSFORM_3D; mm_h.use_colors = true; mm_h.mesh = _c_fol_h; mm_h.instance_count = n
+		var mm_m = MultiMesh.new(); mm_m.transform_format = MultiMesh.TRANSFORM_3D; mm_m.use_colors = true; mm_m.mesh = _c_fol_m; mm_m.instance_count = n
+		var mt_th = MultiMesh.new(); mt_th.transform_format = MultiMesh.TRANSFORM_3D; mt_th.use_colors = true; mt_th.mesh = _c_trk_h; mt_th.instance_count = n
 		
 		var aabb: AABB = _calculate_forest_aabb(points)
 		mm_h.custom_aabb = aabb; mm_m.custom_aabb = aabb; mt_th.custom_aabb = aabb
@@ -689,9 +664,12 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 60, 15.0)
 	else:
 		# Mid/Far Chunk: Single simplified MultiMesh
+		if _c_fol_l == null: _c_fol_l = _build_varied_foliage(false, 2 if scale_factor < 0.003 else 1)
+		if _c_trk_l == null: _c_trk_l = _build_botw_trunk(false)
+
 		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true; mm.instance_count = n
-		mm.mesh = _build_varied_foliage(false, 2 if scale_factor < 0.003 else 1)
-		var trk = _build_botw_trunk(false); var mm_t = MultiMesh.new(); mm_t.transform_format = MultiMesh.TRANSFORM_3D; mm_t.mesh = trk; mm_t.instance_count = n
+		mm.mesh = _c_fol_l
+		var mm_t = MultiMesh.new(); mm_t.transform_format = MultiMesh.TRANSFORM_3D; mm_t.mesh = _c_trk_l; mm_t.instance_count = n
 		
 		var aabb = _calculate_forest_aabb(points); mm.custom_aabb = aabb; mm_t.custom_aabb = aabb
 		for i in range(n):
@@ -1843,8 +1821,45 @@ func _spawn_minerals(data: Array) -> void:
 			await get_tree().process_frame
 			if not is_inside_tree() or offset != initial_offset: return
 
-static var c_r: ArrayMesh
-static var c_t_l: ArrayMesh
-static var c_t_m: ArrayMesh
-static var c_t_h: ArrayMesh
-static var c_g: ArrayMesh
+# ACE PERFORMANCE: Shared Static Cache for Procedural Assets
+# We cache these to prevent rebuilding meshes and materials on the main thread for every chunk.
+static var _c_r: ArrayMesh = null      # Rock
+static var _c_trk_h: ArrayMesh = null  # Trunk High
+static var _c_trk_l: ArrayMesh = null  # Trunk Low
+static var _c_fol_h: ArrayMesh = null  # Foliage High
+static var _c_fol_m: ArrayMesh = null  # Foliage Medium
+static var _c_fol_l: ArrayMesh = null  # Foliage Low
+static var _c_g: ArrayMesh = null      # Grass
+
+static var _mat_foliage: ShaderMaterial = null
+static var _mat_trunk: ShaderMaterial = null
+static var _mat_rock: ShaderMaterial = null
+
+func _get_foliage_mat() -> ShaderMaterial:
+	if _mat_foliage: return _mat_foliage
+	_mat_foliage = ShaderMaterial.new()
+	_mat_foliage.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
+	_mat_foliage.set_shader_parameter("shadow_strength", 0.6)
+	_mat_foliage.set_shader_parameter("wind_speed", 0.7)
+	_mat_foliage.set_shader_parameter("wind_strength", 0.4)
+	_mat_foliage.set_shader_parameter("leaf_texture", _get_tex("res://assets/textures/tree_leaves_texture.png"))
+	_mat_foliage.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_leaves_texture_normal.png"))
+	return _mat_foliage
+
+func _get_trunk_mat() -> ShaderMaterial:
+	if _mat_trunk: return _mat_trunk
+	_mat_trunk = ShaderMaterial.new()
+	_mat_trunk.shader = _get_res("res://src/shaders/trunk_toon.gdshader")
+	_mat_trunk.set_shader_parameter("albedo", Color(0.35, 0.25, 0.15))
+	_mat_trunk.set_shader_parameter("bark_texture", _get_tex("res://assets/textures/tree_trunk_texture.png"))
+	_mat_trunk.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_trunk_texture_normal.png"))
+	_mat_trunk.set_shader_parameter("disp_map", _get_tex("res://assets/textures/tree_trunk_texture_displacement.png"))
+	_mat_trunk.set_shader_parameter("hatching_strength", 0.45)
+	return _mat_trunk
+
+func _get_rock_mat() -> ShaderMaterial:
+	if _mat_rock: return _mat_rock
+	_mat_rock = ShaderMaterial.new()
+	_mat_rock.shader = _get_res("res://src/shaders/hatch_toon.gdshader")
+	_mat_rock.set_shader_parameter("shadow_strength", 0.9)
+	return _mat_rock

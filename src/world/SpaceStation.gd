@@ -587,6 +587,8 @@ func _on_dock_pressed() -> void:
 	_prompt_btn.hide()
 	_show_ui()
 
+var _hud_was_visible: Array = []   # snapshot of HUD nodes hidden by _show_ui
+
 func _show_ui() -> void:
 	_ui_visible = true
 	_panel.show()
@@ -594,15 +596,19 @@ func _show_ui() -> void:
 	_refresh_planets_ui()
 	_forge_status.text = ""
 	_update_slot_display()
-	# Hide all gameplay HUD and freeze the world while docked
+	# Hide all gameplay HUD and freeze the world while docked.
+	# Snapshot only nodes that are currently visible so we restore exactly
+	# that set on close — otherwise force-showing children un-hides the
+	# debug FPS overlay (and anything else the user toggled off).
+	_hud_was_visible.clear()
 	for node in get_tree().get_nodes_in_group("GameHUD"):
 		if node is CanvasLayer:
+			if node.visible:
+				node.visible = false
+				_hud_was_visible.append(node)
+		elif "visible" in node and node.visible:
 			node.visible = false
-			for child in node.get_children():
-				if child.has_method("hide"):
-					child.hide()
-		elif node.has_method("hide"):
-			node.hide()
+			_hud_was_visible.append(node)
 	get_tree().paused = true
 	# Enable mouse cursor for UI interaction
 	if _player and _player.has_method("unlock_mouse"):
@@ -614,16 +620,13 @@ func _hide_ui() -> void:
 	if _in_range:
 		_prompt_btn.show()
 
-	# Restore gameplay HUD and unpause
+	# Restore gameplay HUD and unpause — only the nodes WE hid, so the
+	# diag overlay / debug suite / anything else stays hidden if it was.
 	get_tree().paused = false
-	for node in get_tree().get_nodes_in_group("GameHUD"):
-		if node is CanvasLayer:
+	for node in _hud_was_visible:
+		if is_instance_valid(node):
 			node.visible = true
-			for child in node.get_children():
-				if child.has_method("show"):
-					child.show()
-		elif node.has_method("show"):
-			node.show()
+	_hud_was_visible.clear()
 	# Lock mouse cursor back for gameplay
 	if _player and _player.has_method("lock_mouse"):
 		_player.lock_mouse()

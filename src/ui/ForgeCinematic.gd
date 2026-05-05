@@ -80,7 +80,6 @@ func setup(target_pos: Vector3, player_node: Node3D, planet_node: Node3D) -> voi
 	sm.radial_segments = 32
 	sm.rings = 16
 	_light_mesh.mesh = sm
-	_light_mesh.global_position = _target_pos
 	_light_mesh.scale = Vector3.ONE
 
 	var mat = ShaderMaterial.new()
@@ -91,6 +90,10 @@ func setup(target_pos: Vector3, player_node: Node3D, planet_node: Node3D) -> voi
 	_light_mesh.material_override = mat
 	_light_mesh.hide()
 	parent.add_child(_light_mesh)
+	# Set global_position AFTER add_child — WorldRoot may be shifted by the
+	# floating-origin system, so setting global_position before parenting
+	# would leave the light at parent_offset + _target_pos (wrong by Mm).
+	_light_mesh.global_position = _target_pos
 
 	# ── 3. Screen flash overlay (2D white rect) ───────────────────────
 	_flash_layer = CanvasLayer.new()
@@ -103,14 +106,22 @@ func setup(target_pos: Vector3, player_node: Node3D, planet_node: Node3D) -> voi
 	_flash_layer.add_child(_flash_rect)
 
 	# ── 4. Hide HUD layers ────────────────────────────────────────────
+	# Track which layers were visible so we can restore THEM specifically —
+	# don't blanket-show everything on cleanup or you'll un-hide debug
+	# overlays etc. that the user intentionally hid.
 	_hidden_layers.clear()
 	for c in get_tree().root.get_children():
 		if c is CanvasLayer and c != _flash_layer and c.visible:
 			c.visible = false
 			_hidden_layers.append(c)
 	for n in get_tree().get_nodes_in_group("GameHUD"):
-		if n.has_method("hide"): n.hide()
-		elif "visible" in n: n.visible = false
+		if n is CanvasLayer and n.visible and not _hidden_layers.has(n):
+			n.visible = false
+			_hidden_layers.append(n)
+		elif not (n is CanvasLayer):
+			if "visible" in n and n.visible:
+				n.visible = false
+				_hidden_layers.append(n)
 
 
 func _process(delta: float) -> void:
@@ -190,12 +201,11 @@ func _finish() -> void:
 		_player_cam.make_current()
 	if is_instance_valid(_cine_cam): _cine_cam.queue_free()
 
-	# Restore HUD layers
+	# Restore HUD layers — only the ones we actually hid, preserving any
+	# intentional hidden state (debug overlays, FPS labels, etc.)
 	for c in _hidden_layers:
 		if is_instance_valid(c): c.visible = true
-	for n in get_tree().get_nodes_in_group("GameHUD"):
-		if n.has_method("show"): n.show()
-		elif "visible" in n: n.visible = true
+	_hidden_layers.clear()
 
 	# Ensure planet is visible (safety net)
 	if is_instance_valid(_planet_node) and not _planet_node.visible:

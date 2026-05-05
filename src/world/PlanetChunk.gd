@@ -644,7 +644,7 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 			mt_th.set_instance_transform(i, points[i]); mt_th.set_instance_color(i, tr_c)
 			
 			# AMBIENT LEAF DRIFT: Throttled to only spawn for the immediate local neighborhood (Optimization)
-			if not mobile_perf and i % 15 == 0:
+			if not _is_mobile_perf() and i % 15 == 0:
 				var cam_p = Vector3.ZERO
 				if is_instance_valid(get_viewport().get_camera_3d()):
 					cam_p = get_viewport().get_camera_3d().global_position

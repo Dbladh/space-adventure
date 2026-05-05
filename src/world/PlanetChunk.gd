@@ -125,7 +125,7 @@ func is_busy() -> bool:
 
 func _on_rebuild_req() -> void:
 	# ACE CACHE FLUSHING: Invalidate static LOD meshes to force re-generation with new geometry
-	c_t_l = null; c_t_m = null; c_t_h = null; c_g = null; c_r = null
+	_c_fol_l = null; _c_fol_m = null; _c_fol_h = null; _c_trk_l = null; _c_trk_h = null; _c_g = null; _c_r = null
 	for n in _flora_nodes: if is_instance_valid(n): n.queue_free()
 	_flora_nodes.clear()
 	# Update local complexity before mesh recalc
@@ -1178,21 +1178,6 @@ func _add_lush_blob(st: SurfaceTool, center: Vector3, size: float, is_high: bool
 			st.set_uv(Vector2(u2, v2_uv)); st.add_vertex(v4)
 			st.set_uv(Vector2(u1, v2_uv)); st.add_vertex(v3)
 
-func _build_low_tree() -> ArrayMesh:
-	if c_t_l: return c_t_l
-	c_t_l = _build_botw_foliage(false, 1)
-	return c_t_l
-
-func _build_med_tree() -> ArrayMesh:
-	if c_t_m: return c_t_m
-	c_t_m = _build_botw_foliage(false, 2)
-	return c_t_m
-
-func _build_high_tree() -> ArrayMesh:
-	if c_t_h: return c_t_h
-	c_t_h = _build_botw_foliage(true, 4)
-	return c_t_h
-
 func _build_varied_foliage(is_high: bool, complexity: int) -> ArrayMesh:
 	match archetype:
 		"DESERT": return _build_cactus_mesh(is_high)
@@ -1271,7 +1256,7 @@ func _build_glow_bulb(is_high: bool) -> ArrayMesh:
 	return st.commit()
 
 func _build_grass_mesh() -> ArrayMesh:
-	if c_g: return c_g
+	if _c_g: return _c_g
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	# ACE BOTW/NMS GRASS: Dense, tall, swooping grassy thickets scattered lushly
 	var rng = RandomNumberGenerator.new(); rng.seed = 1337
@@ -1288,7 +1273,7 @@ func _build_grass_mesh() -> ArrayMesh:
 		st.add_vertex(dir + side)
 		st.add_vertex(dir + Vector3(0.0, h, 0.0) + top_offset)
 	st.generate_normals(false); st.generate_tangents()
-	c_g = st.commit(); return c_g
+	_c_g = st.commit(); return _c_g
 
 static var _shared_land_shader: Shader = null
 static func _get_shared_land_shader() -> Shader:

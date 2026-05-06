@@ -674,10 +674,30 @@ func _unhandled_input(event: InputEvent) -> void:
 			if not get_tree().paused or _pause_overlay.visible:
 				toggle_pause()
 
+func _any_modal_ui_open() -> bool:
+	# True if a SpaceStation has its docking UI open, or a PlanetPlacementUI
+	# is in flight — used to suppress the global pause overlay so we never
+	# stack two menus on top of each other.
+	for s in get_tree().get_nodes_in_group("SpaceStation"):
+		if "_ui_visible" in s and bool(s.get("_ui_visible")):
+			return true
+	# PlanetPlacementUI doesn't add itself to a group; detect via class
+	# (it extends Control and has placement_confirmed signal).
+	for n in get_tree().get_nodes_in_group("PlacementUI"):
+		if n is Control and n.visible:
+			return true
+	return false
+
+
 func toggle_pause() -> void:
 	if _is_loading: return
+	# Mutual exclusion: don't layer the pause overlay over an already-open
+	# station/forge UI.  If a station has a UI visible, do nothing — that
+	# UI's own _input already handles its own close-button (Escape / START
+	# / B).  Same for an in-flight placement UI.
+	if not get_tree().paused and _any_modal_ui_open(): return
 	get_tree().paused = !get_tree().paused
-	
+
 	if get_tree().paused:
 		_pause_overlay.show()
 		_toggle_map_fullscreen_to(true)

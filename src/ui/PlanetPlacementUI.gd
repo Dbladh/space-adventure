@@ -27,6 +27,9 @@ const PLAYER_SAFETY_MARGIN: float = 100000.0       # 100 km buffer around player
 
 func _ready() -> void:
 	process_mode = PROCESS_MODE_ALWAYS
+	# Group so Main._any_modal_ui_open() can detect us and suppress the
+	# global pause overlay — keeps the rule "one menu at a time".
+	add_to_group("PlacementUI")
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	
 	# 1. Dark Background
@@ -87,15 +90,31 @@ func _ready() -> void:
 	confirm_btn.add_theme_font_size_override("font_size", 28)
 	confirm_btn.pressed.connect(_on_confirm)
 	hbox.add_child(confirm_btn)
-	
+
 	var cancel_btn = Button.new()
 	cancel_btn.text = "  CANCEL  "
 	cancel_btn.add_theme_font_size_override("font_size", 28)
 	cancel_btn.pressed.connect(func(): placement_canceled.emit(); queue_free())
 	hbox.add_child(cancel_btn)
 
+	# Grab focus on Confirm so a gamepad user can press A immediately
+	# after picking a spot, and B / START / Esc to back out without
+	# having to mouse to the Cancel button.  Deferred so the buttons
+	# are fully in the tree before grab_focus runs.
+	cancel_btn.set_meta("placement_cancel_btn", true)
+	confirm_btn.call_deferred("grab_focus")
+
 func _input(event: InputEvent) -> void:
+	# Cancel via Escape OR gamepad B (ui_cancel) OR gamepad START.
+	# Pre-empts the global pause toggle so pause-while-placing closes
+	# this UI rather than stacking the pause overlay on top.
+	var cancel_pressed := false
 	if event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
+		cancel_pressed = true
+	elif event is InputEventJoypadButton and event.pressed:
+		if event.button_index == JOY_BUTTON_START or event.button_index == JOY_BUTTON_B:
+			cancel_pressed = true
+	if cancel_pressed:
 		placement_canceled.emit()
 		queue_free()
 		get_viewport().set_input_as_handled()

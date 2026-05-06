@@ -700,14 +700,26 @@ func _process(delta: float) -> void:
 				_hide_ui()
 
 func _input(event: InputEvent) -> void:
-	# Only intercept keyboard events when the station UI is open.
-	# Do NOT return early for all events — that blocks button mouse clicks.
-	if _ui_visible and event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
-		_hide_ui()
-		get_viewport().set_input_as_handled()
-		return
+	# Close-menu input — Escape OR gamepad B (ui_cancel) OR gamepad START.
+	# Pre-empts the global pause handler so pressing pause-while-docked
+	# closes the station menu instead of layering the pause overlay on
+	# top of it.  Only intercept when the UI is actually open so
+	# button mouse clicks aren't blocked.
+	if _ui_visible:
+		var close_pressed := false
+		if event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
+			close_pressed = true
+		elif event is InputEventJoypadButton and event.pressed:
+			if event.button_index == JOY_BUTTON_START or event.button_index == JOY_BUTTON_B:
+				close_pressed = true
+		if close_pressed:
+			_hide_ui()
+			get_viewport().set_input_as_handled()
+			return
 
-	if _in_range and not _ui_visible:
+	# Don't allow docking while the pause overlay owns the screen — the
+	# station UI would render behind a paused tree and look broken.
+	if _in_range and not _ui_visible and not get_tree().paused:
 		if event is InputEventKey and event.keycode == KEY_E and event.pressed and not event.echo:
 			_on_dock_pressed()
 			get_viewport().set_input_as_handled()
@@ -786,6 +798,32 @@ func _switch_tab(idx: int) -> void:
 		else:
 			btn.add_theme_color_override("font_color", Color(0.5, 0.5, 0.55))
 			btn.remove_theme_stylebox_override("normal")
+	# Gamepad: move focus into the newly-visible tab so the next A press
+	# acts on real content rather than re-firing the tab button.
+	# Only re-grab if focus is currently on a tab button (i.e. the user
+	# just navigated here); otherwise leave focus alone.
+	var f: Control = get_viewport().gui_get_focus_owner()
+	if f != null and f in _tab_btns:
+		call_deferred("_grab_first_in_active_tab")
+
+
+func _grab_first_in_active_tab() -> void:
+	var panel: Control = _tab_market_panel if _active_tab == 0 else _tab_forge_panel
+	if panel == null: return
+	var first := _find_first_focusable(panel)
+	if first: first.grab_focus()
+
+
+func _find_first_focusable(n: Node) -> Control:
+	# Depth-first walk to the first Control that accepts focus.
+	if n is Control:
+		var c: Control = n
+		if c.focus_mode != Control.FOCUS_NONE and c.is_visible_in_tree():
+			return c
+	for child in n.get_children():
+		var found := _find_first_focusable(child)
+		if found: return found
+	return null
 
 func _tab_active_style() -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()

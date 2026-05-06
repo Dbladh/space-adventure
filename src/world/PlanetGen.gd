@@ -1,21 +1,24 @@
-@tool
 extends Node3D
 
 # PlanetGen.gd (Aggressive Horizon Edition)
 # Managed by THE ARCHITECT.
 
-const PlanetChunkScript := preload("res://src/world/PlanetChunk.gd")
+var PlanetChunkScript = load("res://src/world/PlanetChunk.gd")
 
-@export var planet_radius: float = 1000000.0 
+@export var planet_radius: float = 100000.0 
 @export var terrain_strength: float = 5000.0 
 @export var max_lod: int = 18 
-@export var subdivision_bias: float = 1.15
+@export var subdivision_bias: float = 1.8
 # Each planet must get a unique seed so terrain is distinct per celestial body!
 @export var planet_seed: int = 1234
-var mobile_perf: bool = false
 # Resources available to mine on this planet. Set externally before chunks generate.
 # Stone and Wood are always present; extras are tier-gated by how the planet was forged.
 var planet_resources: Array[String] = ["Stone", "Wood", "Copper"]
+# Forge-rank label (F / D / C / B / A / S / SS / ★ LEGENDARY). Set by
+# SpaceStation after spawning so chunks/props can vary visuals (e.g. only rare
+# A+ planets get glowing flora). Empty = unranked (default starter look).
+var planet_rank: String = ""
+var sea_level: float = -120.0
 
 # ATMOSPHERIC IDENTITY
 var sky_horizon_color: Color
@@ -34,8 +37,23 @@ var pal_water_shore: Color
 var archetype: String
 
 var noise: FastNoiseLite
+var mobile_perf: bool = false
 var faces: Array[QuadTreeFace] = []
 var player: Node3D
+
+# TOPOGRAPHY VARIETY: Deterministic terrain style per planet
+var terrain_mode: String = "VARIED" # FLAT, HILLY, MOUNTAINOUS, EXTREME
+var noise_frequency: float = 600.0
+var terrain_multiplier: float = 1.0
+var has_bioluminescence: bool = false
+
+# SHARED MATERIALS: Cached per planet to reduce Draw Calls and State Changes
+var land_material: ShaderMaterial
+var water_material: ShaderMaterial
+var foliage_material: ShaderMaterial
+var trunk_material: ShaderMaterial
+var rock_material: ShaderMaterial
+var grass_material: ShaderMaterial
 
 # ACE MEMORY POOLING: Hibernation buffer for QuadTree nodes to prevent GC stutters
 var chunk_pool: Array[MeshInstance3D] = []
@@ -44,7 +62,7 @@ var continent_pole: Vector3 = Vector3.UP # ACE: Deterministic anchor for the maj
 # NMS OPTIMIZATION: Throttle chunk streaming to prevent CPU micro-stutters!
 # One split per frame keeps mesh generation within frame budget.
 var split_queue: Array[QuadTreeNode] = []
-const MAX_SPLITS_PER_FRAME: int = 1
+const MAX_SPLITS_PER_FRAME: int = 3
 const PROXIMITY_CUTOFF: float = 8000000.0 # ACE: Increased for mission-critical persistence
 var impostor: Node3D = null
 var faces_hidden: bool = false
@@ -58,11 +76,11 @@ var death_row: Array[Node] = []
 var prop_spawn_queue: Array = [] # ACE: Throttled Prop batches
 # ACE PHYSICS: Queue for trimesh collision generation to prevent spikes
 var collision_queue: Array[MeshInstance3D] = []
-const MAX_COLLISIONS_PER_FRAME: int = 1
-var MAX_FINALIZE_PER_FRAME: int = 1
-const MAX_DEATHS_PER_FRAME: int = 24
+const MAX_COLLISIONS_PER_FRAME: int = 4
+var MAX_FINALIZE_PER_FRAME: int = 4
+const MAX_DEATHS_PER_FRAME: int = 48
 var _prewarm_count: int = 0
-var _prewarm_target: int = 20
+var _prewarm_target: int = 32
 
 func _prewarm_one_chunk() -> void:
 	var pc = PlanetChunkScript.new()
@@ -80,19 +98,29 @@ const FACE_NORMALS: Array[Vector3] = [
 ]
 
 func _ready() -> void:
+	self.add_to_group("Planet")
+	self.add_to_group("World")
+	print("--- ARCHITECT: Planet [%s] _ready. Parent: %s, Global Pos: %s ---" % [name, get_parent().name if get_parent() else "NONE", str(global_position)])
+	mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
 	noise = FastNoiseLite.new()
-	if mobile_perf:
-		max_lod = min(max_lod, 15)
-		subdivision_bias = min(subdivision_bias, 0.95)
-		terrain_strength *= 0.8
-		_prewarm_target = 12
+	_prewarm_target = 32
 	# Always use the explicit planet_seed for terrain noise.
 	# Main.gd sets unique values (1001, 2002...) before add_child() is called,
 	# so _ready() always receives the correct distinct seed per body.
+	# NOISE VARIETY: The Geologist
+	var geo_rng = RandomNumberGenerator.new()
+	geo_rng.seed = planet_seed + 555
 	noise.seed = planet_seed
-	noise.noise_type = FastNoiseLite.TYPE_PERLIN
+	
+	# Randomize noise type for high variety
+	var n_types = [FastNoiseLite.TYPE_PERLIN, FastNoiseLite.TYPE_SIMPLEX, FastNoiseLite.TYPE_VALUE]
+	noise.noise_type = n_types[geo_rng.randi() % n_types.size()]
+	
 	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.frequency = 0.05 
+	noise.frequency = 0.01 
+	noise.fractal_octaves = geo_rng.randi_range(3, 6)
+	noise.fractal_lacunarity = geo_rng.randf_range(1.8, 2.4)
+	noise.fractal_gain = geo_rng.randf_range(0.3, 0.6)
 	
 	# PROCEDURAL ATMOSPHERE: Unique Sky per Planet!
 	# The user requested specific vivid colors: Blue, Red, Orange, Yellow, Green.
@@ -137,6 +165,52 @@ func _ready() -> void:
 	pal_rng.seed = hash(str(name) + str(planet_radius) + str(planet_seed)) & 0x7FFFFFFF
 	var theme = archetypes[pal_rng.randi() % archetypes.size()]
 	self.archetype = theme
+	
+	# SEA LEVEL RANDOMIZATION: The Hydrologist
+	var hydro_rng = RandomNumberGenerator.new()
+	hydro_rng.seed = planet_seed + 123
+	# Range from -250 (shallow/scattered) to -50 (deep/continental)
+	sea_level = hydro_rng.randf_range(-250.0, -50.0)
+	
+	# TOPOGRAPHY DIVERSIFICATION: The Cartographer
+	# We randomize how 'aggressive' the terrain is based on a separate roll.
+	var topo_rng = RandomNumberGenerator.new()
+	topo_rng.seed = hash(str(planet_seed) + "topo") & 0x7FFFFFFF
+	var topo_roll = topo_rng.randf()
+	
+	if topo_roll > 0.9:
+		terrain_mode = "EXTREME"
+		terrain_multiplier = 1.8
+		noise_frequency = 800.0
+	elif topo_roll > 0.65:
+		terrain_mode = "MOUNTAINOUS"
+		terrain_multiplier = 1.2
+		noise_frequency = 600.0
+	elif topo_roll > 0.3:
+		terrain_mode = "HILLY"
+		terrain_multiplier = 0.6
+		noise_frequency = 400.0
+	else:
+		terrain_mode = "FLAT"
+		terrain_multiplier = 0.25
+		noise_frequency = 300.0
+	
+	# ACE: Global scale correction for small planets (100km range)
+	# We scale strength linearly with radius to prevent the 'spikey' look.
+	var scale_fix = planet_radius / 180000.0
+	terrain_strength = 2800.0 * scale_fix * terrain_multiplier
+	
+	# BIOLUMINESCENCE ROLL: The Exobiologist
+	# Only 12% of planets exhibit natural glowing flora (S-Tier rarity)
+	# CANDY and RADIATED archetypes have a 2.5x higher chance.
+	var bio_chance = 0.12
+	if archetype == "CANDY" or archetype == "RADIATED": bio_chance = 0.30
+	has_bioluminescence = hydro_rng.randf() < bio_chance
+	
+	print("--- CARTOGRAPHER: Planet [%s] Type: [%s] Topo: [%s] Bio: [%s] ---" % [name, archetype, terrain_mode, str(has_bioluminescence)])
+	
+	# INITIALIZE SHARED MATERIALS: Now at the end so trait rolls (Bio/Archetype) are baked in
+	_init_shared_materials()
 	
 	match theme:
 		"LUSH":
@@ -193,23 +267,22 @@ func _ready() -> void:
 	
 	base_hue = pal_grass_col.h
 	self.pal_forest_h = base_hue # Seed for tree variety
+	print("--- ARCHITECT: Planet [%s] Initialized. Theme: %s (Radius: %d) ---" % [name, theme, planet_radius])
 	
 	# MAJOR CONTINENT ARCHITECT: Every planet gets one iconic, massive landmass
 	var c_rng = RandomNumberGenerator.new(); c_rng.seed = planet_seed + 999
 	continent_pole = Vector3(c_rng.randf_range(-1,1), c_rng.randf_range(-1,1), c_rng.randf_range(-1,1)).normalized()
 	
-	for normal in FACE_NORMALS:
-		var face = QuadTreeFace.new(self, normal)
+	for i in range(6):
+		var face = QuadTreeFace.new(self, FACE_NORMALS[i])
 		faces.append(face)
 		add_child(face)
 	# ACE: Inject majestic cloud belts and celestial rings — visible against the charcoal void
-	self.add_to_group("Planet")
-	self.add_to_group("World")
 	_spawn_majestic_clouds_and_rings(rng, base_hue)
 	# ACE: Scatter colossal Hero Landmarks as navigation anchors across the planet surface
 	_spawn_hero_landmarks(rng)
 	_spawn_poi_marker()
-	print("--- ARCHITECT: PLANET [%s] SYNCHRONIZED (terrain_seed=%d) ---" % [name, noise.seed])
+	# print("--- ARCHITECT: PLANET [%s] SYNCHRONIZED (terrain_seed=%d) ---" % [name, noise.seed])
 
 func get_terrain_height_at(pos: Vector3) -> float:
 	var sphere_norm: Vector3 = (pos - global_position).normalized()
@@ -252,14 +325,9 @@ func get_terrain_height_at(pos: Vector3) -> float:
 	return planet_radius + total_h
 
 func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: float) -> void:
-	# 1. PUFFY CLOUD BELTS: Massive celestial sphere at 35km altitude
-	# MOBILE: Drop tessellation ~4x (64/32 → 32/16) — the fluid shader over a
-	# sphere-scale mesh is one of the biggest vertex shader costs per frame.
-	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 35000.0; c_mesh.height = c_mesh.radius * 2.0
-	if mobile_perf:
-		c_mesh.radial_segments = 32; c_mesh.rings = 16
-	else:
-		c_mesh.radial_segments = 64; c_mesh.rings = 32
+	# 1. PUFFY CLOUD BELTS: Massive celestial sphere at 2.5km altitude (Hugging closer)
+	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 2500.0; c_mesh.height = c_mesh.radius * 2.0
+	c_mesh.radial_segments = 64; c_mesh.rings = 32
 	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 	uniform vec3 sun_dir;
 	uniform vec3 horizon_color;
@@ -300,8 +368,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		
 		if (cloud_mask > active_threshold) {
 			ALBEDO = cloud_base;
-			// Softer, more transparent clouds (max 0.7 instead of 0.95)
-			ALPHA = 0.7 * smoothstep(active_threshold, active_threshold + 0.1, cloud_mask) * mix(0.2, 1.0, terminator);
+			ALPHA = 0.4 * smoothstep(active_threshold, active_threshold + 0.1, cloud_mask) * mix(0.2, 1.0, terminator);
 		} else { 
 			discard;
 		}
@@ -317,14 +384,13 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
 	
-	# 2. PLANETARY RINGS (50% chance per planet; 25% on mobile to save fragment cost)
-	var ring_chance: float = 0.75 if mobile_perf else 0.5
+	# 2. PLANETARY RINGS (50% chance per planet)
+	var ring_chance: float = 0.5
 	if rng.randf() > ring_chance:
-		var r_mesh = TorusMesh.new(); r_mesh.inner_radius = planet_radius + 150000.0; r_mesh.outer_radius = planet_radius + 400000.0
-		if mobile_perf:
-			r_mesh.rings = 64; r_mesh.ring_segments = 4
-		else:
-			r_mesh.rings = 128; r_mesh.ring_segments = 4
+		var r_mesh = TorusMesh.new()
+		r_mesh.inner_radius = planet_radius * 1.5
+		r_mesh.outer_radius = planet_radius * 2.8
+		r_mesh.rings = 128; r_mesh.ring_segments = 4
 		var r_shader = Shader.new(); r_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
 		uniform vec3 ring_col_a;
 		varying vec3 v_local_pos;
@@ -332,13 +398,13 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		float hash(float n) { return fract(sin(n) * 43758.5453123); }
 		void fragment() {
 			float d = length(v_local_pos.xz);
-			float radial_idx = floor(d * 0.0002);
+			float radial_idx = floor(d * 0.0006); // ACE: Increased frequency for tighter rings
 			float noise_val = hash(radial_idx);
 			
 			// Multi-frequency bands
 			float mask = mix(0.2, 0.8, noise_val);
-			mask *= 0.7 + 0.3 * sin(d * 0.0015); // Fine grooves
-			mask *= 0.8 + 0.2 * sin(d * 0.00004); // Broad variation
+			mask *= 0.7 + 0.3 * sin(d * 0.0045); // Fine grooves (Scaled up)
+			mask *= 0.8 + 0.2 * sin(d * 0.0001); // Broad variation (Scaled up)
 			
 			// Cassini-style gaps for realism
 			float gaps = step(0.15, abs(sin(d * 0.000025 + noise_val)));
@@ -358,12 +424,11 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
 		r_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(r_inst)
 
-	# 3. POLAR AURORAS — Skipped on mobile (additive-blend full-sphere shader is costly)
-	if not mobile_perf:
-		_spawn_polar_auroras(pal_grass_col)
+	# 3. POLAR AURORAS: Reduced scale to hug the planet
+	_spawn_polar_auroras(pal_grass_col)
 
 func _spawn_polar_auroras(base_color: Color) -> void:
-	var a_mesh = SphereMesh.new(); a_mesh.radius = planet_radius + 45000.0; a_mesh.height = a_mesh.radius * 2.0; a_mesh.radial_segments = 48; a_mesh.rings = 24
+	var a_mesh = SphereMesh.new(); a_mesh.radius = planet_radius + 4500.0; a_mesh.height = a_mesh.radius * 2.0; a_mesh.radial_segments = 48; a_mesh.rings = 24
 	var a_shader = Shader.new(); a_shader.code = """shader_type spatial; render_mode unshaded, blend_add, depth_draw_always, cull_disabled;
 	uniform vec3 aura_col;
 	varying vec3 v_local_pos;
@@ -377,18 +442,9 @@ func _spawn_polar_auroras(base_color: Color) -> void:
 	a_inst.material_override.set_shader_parameter("aura_col", base_color.lightened(0.5))
 	a_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(a_inst)
 
-# ===========================================================================
-# HERO LANDMARK SYSTEM — THE PROCEDURALIST
-# ===========================================================================
-# Scatters 4-6 colossal navigation anchors per planet. Each landmark type is
-# built from raw triangle geometry using SurfaceTool with flat shading,
-# making them look like they grew organically from the planet's geology.
-# ALL positions are deterministic from the planet_seed for full reproducibility.
-# ===========================================================================
 func _spawn_hero_landmarks(rng: RandomNumberGenerator) -> void:
-	# MOBILE: Cut landmark count 4-6 → 2-3. Each landmark is a SurfaceTool mesh
-	# built on the main thread at load time — fewer = faster first-frame paint.
-	var num = rng.randi_range(2, 3) if mobile_perf else rng.randi_range(4, 6)
+	# 4-6 colossal navigation anchors per planet.
+	var num = rng.randi_range(4, 6)
 	# Rock color derived from the planet palette — dark, slightly desaturated
 	var rock_col: Color = pal_mount_col.darkened(0.15)
 	var accent_col: Color = pal_grass_col.lightened(0.1)
@@ -662,7 +718,7 @@ func _process(_delta: float) -> void:
 	# FRUSTUM HIBERNATION: Disabled if inside the planetary sphere of influence
 	var cam = get_viewport().get_camera_3d()
 	var should_hibernate = false
-	var safety_dist = planet_radius * 3.5
+	var safety_dist = planet_radius * 12.0 # ACE: Drastically increased to prevent 'White Sphere' syndrome
 	if cam and dist_to_player > safety_dist: 
 		var to_planet = (global_position - cam.global_position).normalized()
 		var cam_fwd = -cam.global_transform.basis.z
@@ -722,15 +778,17 @@ func _process(_delta: float) -> void:
 	
 	# ACE FINALIZATION: Predictable Generation Cycles
 	# STRICT BUDGET: Spaced out to prevent frame spikes on mobile
-	MAX_FINALIZE_PER_FRAME = 1 if (OS.get_name() == "iOS" or OS.get_name() == "Android") else 2
+	MAX_FINALIZE_PER_FRAME = 1 if (OS.get_name() == "iOS" or OS.get_name() == "Android") else 8
 	for i in range(min(finalize_queue.size(), MAX_FINALIZE_PER_FRAME)):
-		var chunk = finalize_queue.pop_back()
+		var chunk = finalize_queue.pop_front()
 		if is_instance_valid(chunk):
 			chunk._finalize_generation_on_main()
 			
 	# ACE PROP THROTTLE: Spread node instantiation across multiple frames
-	for i in range(min(prop_spawn_queue.size(), 1 if mobile_perf else 2)):
-		var task = prop_spawn_queue.pop_back()
+	# Tightened for M1 — 2 tasks per frame to ensure buttery flight.
+	var prop_batch = 1 if mobile_perf else 2
+	for i in range(min(prop_spawn_queue.size(), prop_batch)):
+		var task = prop_spawn_queue.pop_front()
 		var node = task[0]
 		var method = task[1]
 		var data = task[2]
@@ -738,7 +796,7 @@ func _process(_delta: float) -> void:
 			node.call(method, data)
 
 	# ACE REAPER: Asynchronous destruction of nodes
-	var death_budget = 4 if mobile_perf else 12 # ACE: Reduced budget per frame to avoid spikes
+	var death_budget = 2 if mobile_perf else 6 
 	for i in range(min(death_row.size(), death_budget)):
 		var d = death_row.pop_back()
 		if is_instance_valid(d): d.queue_free() # ACE: Always queue_free() for main-thread safety
@@ -764,6 +822,7 @@ func queue_chunk_for_finalization(chunk: Node) -> void:
 	# ACE: Thread-safe handover to the main finalization queue
 	if not finalize_queue.has(chunk):
 		finalize_queue.append(chunk)
+		collision_queue.append(chunk) # ACE: Ensure collision is baked after mesh is ready
 
 func get_terrain_elevation(sn: Vector3) -> float:
 	if not noise: return 0.0
@@ -799,11 +858,13 @@ func get_terrain_elevation(sn: Vector3) -> float:
 			var layer_step = floor(local_geo / terrace_height) + smoothstep(0.15, 0.85, h_frac)
 			local_geo = layer_step * terrace_height
 	
-	var c_n: float = noise.get_noise_3dv(sn * 2.2)
-	c_n += noise.get_noise_3dv(sn * 6.5) * 0.5
-	c_n += noise.get_noise_3dv(sn * 15.0) * 0.25
-	var cont_mask: float = smoothstep(-0.2, 0.2, c_n + 0.3)
-	var S_LVL: float = -120.0
+	# STRICT SYNC with PlanetChunk's continent mask (noise.frequency = 0.01,
+	# so multipliers ~200-1100 produce continent-scale variation across faces).
+	var c_n: float = noise.get_noise_3dv(sn * 220.0)
+	c_n += noise.get_noise_3dv(sn * 520.0) * 0.55
+	c_n += noise.get_noise_3dv(sn * 1100.0) * 0.25
+	var cont_mask: float = smoothstep(-0.18, 0.18, c_n + 0.05)
+	var S_LVL: float = sea_level
 	var abyss_depth: float = S_LVL - 400.0
 	
 	var elev = lerp(abyss_depth, local_geo + (S_LVL + 50.0), cont_mask)
@@ -980,3 +1041,50 @@ class QuadTreeNode:
 		remove_chunk()
 		for child in children: child.dispose()
 		children.clear()
+
+func _init_shared_materials() -> void:
+	land_material = ShaderMaterial.new()
+	land_material.shader = load("res://src/world/triplanar_local.gdshader")
+	land_material.set_shader_parameter("planet_radius", planet_radius)
+	land_material.set_shader_parameter("texture_scale", 1.0)
+	# Wire the procedurally-rolled palette into the biome-aware land shader so
+	# every chunk renders with the planet's actual archetype colour.
+	land_material.set_shader_parameter("sea_level", sea_level)
+	land_material.set_shader_parameter("col_beach",  pal_beach_col)
+	land_material.set_shader_parameter("col_grass",  pal_grass_col)
+	land_material.set_shader_parameter("col_forest", pal_grass_secondary)
+	land_material.set_shader_parameter("col_rock",   pal_mount_col)
+	# Tint snow slightly toward the rock colour so ice caps don't bleach pure
+	# white (and so they read distinctly between archetypes).
+	land_material.set_shader_parameter("col_snow",
+		Color(0.92, 0.94, 0.98).lerp(pal_mount_col, 0.15))
+	
+	water_material = ShaderMaterial.new()
+	var w_shader = load("res://src/world/water.gdshader")
+	if w_shader:
+		water_material.shader = w_shader
+		water_material.set_shader_parameter("radius", planet_radius)
+	
+	# FOLIAGE MATERIALS
+	foliage_material = ShaderMaterial.new()
+	foliage_material.shader = load("res://src/shaders/foliage_toon.gdshader")
+	foliage_material.set_shader_parameter("shadow_strength", 0.6)
+	foliage_material.set_shader_parameter("wind_speed", 0.7)
+	foliage_material.set_shader_parameter("wind_strength", 0.4)
+	foliage_material.set_shader_parameter("leaf_texture", load("res://assets/textures/tree_leaves_texture.png"))
+	foliage_material.set_shader_parameter("normal_map", load("res://assets/textures/tree_leaves_texture_normal.png"))
+	foliage_material.set_shader_parameter("biolum_intensity", 1.0 if has_bioluminescence else 0.0)
+	
+	trunk_material = ShaderMaterial.new()
+	trunk_material.shader = load("res://src/shaders/trunk_toon.gdshader")
+	trunk_material.set_shader_parameter("albedo", Color(0.35, 0.25, 0.15))
+	trunk_material.set_shader_parameter("bark_texture", load("res://assets/textures/tree_trunk_texture.png"))
+	trunk_material.set_shader_parameter("normal_map", load("res://assets/textures/tree_trunk_texture_normal.png"))
+	
+	rock_material = ShaderMaterial.new()
+	rock_material.shader = load("res://src/shaders/hatch_toon.gdshader")
+	rock_material.set_shader_parameter("shadow_strength", 0.9)
+	rock_material.set_shader_parameter("biolum_intensity", 1.0 if has_bioluminescence else 0.0)
+	
+	grass_material = ShaderMaterial.new()
+	grass_material.shader = PlanetChunkScript._get_grass_shader()

@@ -24,50 +24,45 @@ void sky() {
 	vec3 local_e = vec3(dot(right, EYEDIR), dot(up, EYEDIR), dot(forward, EYEDIR));
 	
 	// 1. DENSE GALACTIC NEBULA & TWINKLING STARS
-	vec2 polar_uv = vec2(atan(EYEDIR.z, EYEDIR.x) / (2.0 * PI) + 0.5, acos(EYEDIR.y) / PI);
-	
-	// Procedural Twinkling Stars
-	float raw_stars = texture(star_noise, polar_uv * vec2(16.0, 8.0)).r;
-	float star_mask = step(0.85, raw_stars);
-	
-	// ACE STATIC SYNC: Twinkle halted for cinematic stability
-	float twinkle = 0.5; 
-	vec3 stars = vec3(star_mask * (0.6 + twinkle * 1.5)); 
-	
-	// Soft, Transparent Milky Way Dust
-	// Frozen nebula position for iconic visual alignment
-	vec2 nebula_uv = polar_uv * vec2(2.0, 1.0);
-	
-	float dust = texture(nebula_noise, nebula_uv).r;
-	float band = smoothstep(0.1, 1.0, 1.0 - abs(EYEDIR.y * 1.8)); 
-	
-	// PULSING GALAXY: Halted at 75% intensity for consistent contrast
-	float neb_pulse = 0.75;
-	dust = smoothstep(0.3, 0.8, dust * band) * neb_pulse;
-	
-	// Dynamic Shifting Colors: Static iconic purple-red blend
-	float c_phase = sin(polar_uv.x * PI * 2.0) * cos(polar_uv.y * PI * 2.0);
-	c_phase = smoothstep(-0.5, 0.5, c_phase);
-	
-	vec3 c_purple = vec3(0.25, 0.0, 0.45);
-	vec3 c_red = vec3(0.65, 0.05, 0.15);
-	vec3 nebula_col = mix(c_purple, c_red, c_phase) * (0.8 + neb_pulse * 0.4);
-	
-	// The Absolute Void: Halted phase loop
-	float void_phase1 = sin(polar_uv.x * PI * 2.0) * 0.5 + 0.5;
-	float void_phase2 = cos(polar_uv.y * PI * 2.0) * 0.5 + 0.5;
-	
-	vec3 deep_black  = vec3(0.01, 0.01, 0.01);
-	vec3 deep_blue   = vec3(0.01, 0.02, 0.05);
-	vec3 deep_purple = vec3(0.03, 0.01, 0.04);
-	vec3 deep_red    = vec3(0.04, 0.01, 0.02);
-	
-	vec3 void_mix1 = mix(deep_black, deep_blue, void_phase1);
-	vec3 void_mix2 = mix(deep_purple, deep_red, 1.0 - void_phase1);
-	vec3 void_col  = mix(void_mix1, void_mix2, void_phase2);
-	
-	// Compositing the Universe
-	vec3 space_col = mix(void_col, nebula_col, dust * 0.65) + stars;
+	vec3 space_col = vec3(0.0);
+	if (space_blend > 0.01) {
+		vec2 polar_uv = vec2(atan(EYEDIR.z, EYEDIR.x) / (2.0 * PI) + 0.5, acos(EYEDIR.y) / PI);
+		
+		// Procedural Twinkling Stars
+		float raw_stars = texture(star_noise, polar_uv * vec2(16.0, 8.0)).r;
+		float star_mask = step(0.85, raw_stars);
+		
+		float twinkle = 0.5; 
+		vec3 stars = vec3(star_mask * (0.6 + twinkle * 1.5)); 
+		
+		vec2 nebula_uv = polar_uv * vec2(2.0, 1.0);
+		float dust = texture(nebula_noise, nebula_uv).r;
+		float band = smoothstep(0.1, 1.0, 1.0 - abs(EYEDIR.y * 1.8)); 
+		
+		float neb_pulse = 0.75;
+		dust = smoothstep(0.3, 0.8, dust * band) * neb_pulse;
+		
+		float c_phase = sin(polar_uv.x * PI * 2.0) * cos(polar_uv.y * PI * 2.0);
+		c_phase = smoothstep(-0.5, 0.5, c_phase);
+		
+		vec3 c_purple = vec3(0.25, 0.0, 0.45);
+		vec3 c_red = vec3(0.65, 0.05, 0.15);
+		vec3 nebula_col = mix(c_purple, c_red, c_phase) * (0.8 + neb_pulse * 0.4);
+		
+		float void_phase1 = sin(polar_uv.x * PI * 2.0) * 0.5 + 0.5;
+		float void_phase2 = cos(polar_uv.y * PI * 2.0) * 0.5 + 0.5;
+		
+		vec3 deep_black  = vec3(0.01, 0.01, 0.01);
+		vec3 deep_blue   = vec3(0.01, 0.02, 0.05);
+		vec3 deep_purple = vec3(0.03, 0.01, 0.04);
+		vec3 deep_red    = vec3(0.04, 0.01, 0.02);
+		
+		vec3 void_mix1 = mix(deep_black, deep_blue, void_phase1);
+		vec3 void_mix2 = mix(deep_purple, deep_red, 1.0 - void_phase1);
+		vec3 void_col  = mix(void_mix1, void_mix2, void_phase2);
+		
+		space_col = mix(void_col, nebula_col, dust * 0.65) + stars;
+	}
 	
 	// 2. STRIKING ATMOSPHERIC GRADIENT (Static Sunset)
 	float sky_grad = smoothstep(-0.35, 0.7, local_e.y);

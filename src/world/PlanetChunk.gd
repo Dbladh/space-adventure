@@ -1,4 +1,3 @@
-@tool
 extends MeshInstance3D
 
 # PlanetChunk.gd (Botanical Horizon Edition)
@@ -22,6 +21,15 @@ var planet: Node
 
 func setup(p_planet: Node) -> void:
 	self.planet = p_planet
+	self.radius = planet.planet_radius
+	self.SEA_LEVEL = planet.sea_level
+	self.planet_seed = planet.planet_seed
+	
+	# ACE: Sync planetary palette to chunk for terrain coloring
+	if "pal_grass_col" in planet: self.pal_grass_col = planet.pal_grass_col
+	if "pal_mount_col" in planet: self.pal_mount_col = planet.pal_mount_col
+	if "pal_beach_col" in planet: self.pal_beach_col = planet.pal_beach_col
+	if "pal_water_base" in planet: self.pal_water_base = planet.pal_water_base
 
 # DYNAMIC PROCEDURAL PLANET PALETTE
 static var _res_cache := {}
@@ -57,8 +65,11 @@ var _is_generating: bool = false
 var _mesh_data_land: Array = []
 var _mesh_data_water: Array = []
 var _collision_shape: ConcavePolygonShape3D
+var _static_body: StaticBody3D
+var _collision_node: CollisionShape3D
 var _t_pts: Array[Transform3D] = []
 var _r_pts: Array[Transform3D] = []
+var _mobile_perf: bool = OS.get_name() == "iOS" or OS.has_feature("mobile")
 var _g_pts: Array[Transform3D] = []
 var _c_pts: Array[Transform3D] = []
 var _m_pts: Array = [] # Pairs: [Transform3D, String (Type)]
@@ -73,13 +84,11 @@ const PROP_LOD_FADE: float = 300.0
 
 func start_generation() -> void:
 	self.visible = false
-	_is_generating = false # ACE: Reset state before starting new thread to avoid pool deadlocks
+	_is_generating = true # ACE: Set to true before thread start
 	DebugSettings.connect_rebuild(self, "_on_rebuild_req")
 	_start_async_generation()
 
 func _start_async_generation() -> void:
-	if _is_generating: return
-	_is_generating = true
 	_task_id = WorkerThreadPool.add_task(_threaded_generation_task)
 
 func _threaded_generation_task() -> void:
@@ -124,8 +133,10 @@ func is_busy() -> bool:
 	return true
 
 func _on_rebuild_req() -> void:
-	# ACE CACHE FLUSHING: Invalidate static LOD meshes to force re-generation with new geometry
-	_c_fol_l = null; _c_fol_m = null; _c_fol_h = null; _c_trk_l = null; _c_trk_h = null; _c_g = null; _c_r = null
+	# ACE CACHE FLUSHING: Invalidate per-archetype LOD meshes to force regen.
+	_c_fol_l_by_arch.clear(); _c_fol_m_by_arch.clear(); _c_fol_h_by_arch.clear()
+	_c_trk_l_by_arch.clear(); _c_trk_h_by_arch.clear()
+	_c_g = null; _c_r = null
 	for n in _flora_nodes: if is_instance_valid(n): n.queue_free()
 	_flora_nodes.clear()
 	# Update local complexity before mesh recalc
@@ -142,7 +153,11 @@ func _get_sn(x: int, y: int) -> Vector3:
 	return cp.normalized()
 
 func get_terrain_elevation(sn: Vector3) -> float:
-	var macro_h: float = noise.get_noise_3dv(sn * 600.0)
+	var noise_freq = 600.0
+	if is_instance_valid(planet) and "noise_frequency" in planet:
+		noise_freq = planet.noise_frequency
+		
+	var macro_h: float = noise.get_noise_3dv(sn * noise_freq)
 	var micro_crag: float = noise.get_noise_3dv(sn * 15000.0) * 0.1
 	var local_geo: float = 0.0
 
@@ -179,11 +194,17 @@ func get_terrain_elevation(sn: Vector3) -> float:
 			var layer_step = floor(local_geo / terrace_height) + smoothstep(0.15, 0.85, h_frac)
 			local_geo = layer_step * terrace_height
 	
-	# CONTINENTS VS OCEANS: Large-scale landmasses with varied islands
-	var c_n: float = noise.get_noise_3dv(sn * 2.2)
-	c_n += noise.get_noise_3dv(sn * 6.5) * 0.5
-	c_n += noise.get_noise_3dv(sn * 15.0) * 0.25
-	var cont_mask: float = smoothstep(-0.2, 0.2, c_n + 0.3)
+	# CONTINENTS VS OCEANS: noise.frequency = 0.01 in PlanetGen so the input is
+	# internally scaled by 0.01 before sampling.  We need the primary continent
+	# layer to vary on the scale of ~2-3 oscillations per planet face, which
+	# means the multiplier here must be ~200-300 (effective coord sn*2-3).
+	# Earlier values (sn*2.2 then sn*60) both sampled near sn*0.02-0.6, giving a
+	# near-constant c_n per planet — so every world was either all-land or
+	# all-ocean.
+	var c_n: float = noise.get_noise_3dv(sn * 220.0)
+	c_n += noise.get_noise_3dv(sn * 520.0) * 0.55
+	c_n += noise.get_noise_3dv(sn * 1100.0) * 0.25
+	var cont_mask: float = smoothstep(-0.18, 0.18, c_n + 0.05)
 	var abyss_depth: float = SEA_LEVEL - 400.0
 	
 	# Calculate natural terrain height (Continental Land vs Oceanic Abyss)
@@ -192,6 +213,12 @@ func get_terrain_elevation(sn: Vector3) -> float:
 
 func get_water_point(sn: Vector3) -> Vector3:
 	return sn * (radius + SEA_LEVEL)
+	
+func _get_land_color(h: float) -> Color:
+	if h < SEA_LEVEL + 40.0: return pal_beach_col
+	if h > 1600.0: return Color.WHITE # Snow
+	if h > 700.0: return pal_mount_col
+	return pal_grass_col
 
 func _calculate_multi_surface_mesh_thread_safe() -> void:
 	# ACE VERTEX REUSE: Pre-generate the elevated grid to avoid redundant noise calls.
@@ -212,8 +239,10 @@ func _calculate_multi_surface_mesh_thread_safe() -> void:
 			
 	var l_verts: PackedVector3Array = PackedVector3Array()
 	var l_norms: PackedVector3Array = PackedVector3Array()
+	var l_cols: PackedColorArray = PackedColorArray()
 	l_verts.resize(resolution * resolution * 6)
 	l_norms.resize(resolution * resolution * 6)
+	l_cols.resize(resolution * resolution * 6)
 	var l_idx: int = 0
 	
 	var w_verts: PackedVector3Array = PackedVector3Array()
@@ -234,14 +263,16 @@ func _calculate_multi_surface_mesh_thread_safe() -> void:
 			
 			# ACE FACETED NORMALS: Calculate the cross-product per triangle to maintain the retro aesthetic
 			var n1 = (p3 - p1).cross(p2 - p1).normalized()
-			l_verts[l_idx] = p1; l_norms[l_idx] = n1; l_idx += 1
-			l_verts[l_idx] = p3; l_norms[l_idx] = n1; l_idx += 1
-			l_verts[l_idx] = p2; l_norms[l_idx] = n1; l_idx += 1
+			var c1 = _get_land_color(h1); var c2 = _get_land_color(h2); var c3 = _get_land_color(h3); var c4 = _get_land_color(h4)
+			
+			l_verts[l_idx] = p1; l_norms[l_idx] = n1; l_cols[l_idx] = c1; l_idx += 1
+			l_verts[l_idx] = p3; l_norms[l_idx] = n1; l_cols[l_idx] = c3; l_idx += 1
+			l_verts[l_idx] = p2; l_norms[l_idx] = n1; l_cols[l_idx] = c2; l_idx += 1
 			
 			var n2 = (p4 - p3).cross(p2 - p3).normalized()
-			l_verts[l_idx] = p3; l_norms[l_idx] = n2; l_idx += 1
-			l_verts[l_idx] = p4; l_norms[l_idx] = n2; l_idx += 1
-			l_verts[l_idx] = p2; l_norms[l_idx] = n2; l_idx += 1
+			l_verts[l_idx] = p3; l_norms[l_idx] = n2; l_cols[l_idx] = c3; l_idx += 1
+			l_verts[l_idx] = p4; l_norms[l_idx] = n2; l_cols[l_idx] = c4; l_idx += 1
+			l_verts[l_idx] = p2; l_norms[l_idx] = n2; l_cols[l_idx] = c2; l_idx += 1
 			
 			if min(min(h1, h2), min(h3, h4)) <= SEA_LEVEL + 30.0:
 				has_water = true
@@ -272,7 +303,8 @@ func _calculate_multi_surface_mesh_thread_safe() -> void:
 			
 	_mesh_data_land = []; _mesh_data_land.resize(Mesh.ARRAY_MAX)
 	_mesh_data_land[Mesh.ARRAY_VERTEX] = l_verts
-	_mesh_data_land[Mesh.ARRAY_NORMAL] = l_norms # ACE: Missing Normals fixed
+	_mesh_data_land[Mesh.ARRAY_COLOR] = l_cols
+	_mesh_data_land[Mesh.ARRAY_NORMAL] = l_norms 
 	
 	if has_water:
 		_mesh_data_water = []; _mesh_data_water.resize(Mesh.ARRAY_MAX)
@@ -320,59 +352,53 @@ func _add_faceted_tri(st: SurfaceTool, v1: Vector3, v2: Vector3, v3: Vector3, h1
 func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 	self.mesh = a_mesh
 	
+	# ACE COLLISION SYNC: Attach the baked physics shape to the main thread tree
+	if _collision_shape:
+		if not _static_body:
+			_static_body = StaticBody3D.new()
+			_static_body.collision_layer = 1 # Layer 1 (Terrain)
+			_static_body.collision_mask = 0
+			add_child(_static_body)
+			
+			_collision_node = CollisionShape3D.new()
+			_static_body.add_child(_collision_node)
+		
+		_collision_node.shape = _collision_shape
+	
+	# ACE PERFORMANCE: Planetary trimesh shadows are the #1 GPU killer on M1 Macs.
+	# We disable land shadows globally to ensure stable 60fps.
+	self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	# LAND SURFACE: Shared Shader with per-planet uniforms
 	# ACE CACHE: We create unique materials ONLY when uniforms change (radius/archetype)
-	var m_land = ShaderMaterial.new()
-	m_land.shader = _get_shared_land_shader()
-	m_land.set_shader_parameter("radius", radius)
-	m_land.set_shader_parameter("sea_level", SEA_LEVEL)
-	m_land.set_shader_parameter("col_beach", pal_beach_col)
-	m_land.set_shader_parameter("col_grass", pal_grass_col)
-	m_land.set_shader_parameter("col_forest", pal_grass_secondary)
-	m_land.set_shader_parameter("col_rock", pal_mount_col)
-	m_land.set_shader_parameter("continent_pole", continent_pole)
-	
-	# Tri-Planar Micro-Detail
-	m_land.set_shader_parameter("ground_tex", _get_tex("res://assets/textures/ground_texture.png"))
-	m_land.set_shader_parameter("mountain_tex", _get_tex("res://assets/textures/mountain_texture.png"))
-	m_land.set_shader_parameter("snow_tex", _get_tex("res://assets/textures/snow_texture.png"))
-	
-	# ACE PHYSICAL HARDENING: Load the new high-fidelity normal maps
-	m_land.set_shader_parameter("ground_norm", _get_tex("res://assets/textures/ground_texture_normal.png"))
-	m_land.set_shader_parameter("mountain_norm", _get_tex("res://assets/textures/mountain_texture_normal.png"))
-	m_land.set_shader_parameter("snow_norm", _get_tex("res://assets/textures/snow_texture_normal.png"))
-	
-	# ACE STELLAR DEPTH: Load the new displacement maps for Parallax Occlusion
-	m_land.set_shader_parameter("ground_disp", _get_tex("res://assets/textures/ground_texture_displacement.png"))
-	m_land.set_shader_parameter("mountain_disp", _get_tex("res://assets/textures/mountain_texture_displacement.png"))
-	m_land.set_shader_parameter("snow_disp", _get_tex("res://assets/textures/snow_texture_displacement.png"))
-	
-	# DISTANCE-PHASE HARDENING: Only enable Outlines for detailed surface chunks
-	if scale_factor < 0.013:
-		var outline = ShaderMaterial.new()
-		outline.shader = load("res://src/shaders/outline.gdshader")
-		outline.set_shader_parameter("outline_width", 1.5)
-		outline.set_shader_parameter("outline_color", Color.BLACK)
-		m_land.next_pass = outline
-	self.set_surface_override_material(0, m_land)
+	# LAND SURFACE: Shared Shader with per-planet uniforms
+	# ACE CACHE: We use the planet's shared material to avoid thousands of per-chunk allocations.
+	if is_instance_valid(planet) and planet.get("land_material"):
+		var m = planet.get("land_material")
+		self.set_surface_override_material(0, m)
+		# Push the procedurally-rolled biome palette into the land shader so
+		# every chunk renders with the planet's archetype colour rather than a
+		# flat texture tint.  Names must match triplanar_local.gdshader uniforms.
+		m.set_shader_parameter("planet_radius", radius)
+		m.set_shader_parameter("sea_level", SEA_LEVEL)
+		m.set_shader_parameter("col_beach",  pal_beach_col)
+		m.set_shader_parameter("col_grass",  pal_grass_col)
+		m.set_shader_parameter("col_forest", pal_grass_secondary)
+		m.set_shader_parameter("col_rock",   pal_mount_col)
+		m.set_shader_parameter("col_snow",
+			Color(0.92, 0.94, 0.98).lerp(pal_mount_col, 0.15))
 	
 	if has_water:
-		# Use a shared material for water where possible to reduce draw calls
-		var m_water = ShaderMaterial.new()
-		m_water.shader = _get_shared_water_shader()
-		m_water.set_shader_parameter("pal_water_base", pal_water_base)
-		m_water.set_shader_parameter("pal_water_light", pal_water_light)
-		m_water.set_shader_parameter("pal_water_shore", pal_water_shore)
-		if archetype == "VOLCANIC":
-			m_water.set_shader_parameter("is_lava", true)
-			m_water.set_shader_parameter("pal_water_base", Color(0.8, 0.2, 0.0))
-			m_water.set_shader_parameter("pal_water_light", Color(1.0, 0.6, 0.1))
-		self.set_surface_override_material(1, m_water)
-	# ONLY CAST SHADOWS for the immediate high-detail terrain
-	if scale_factor <= 0.005:
-		self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	else:
-		self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if is_instance_valid(planet) and planet.get("water_material"):
+			self.set_surface_override_material(1, planet.get("water_material"))
+			planet.water_material.set_shader_parameter("pal_water_base", pal_water_base)
+			planet.water_material.set_shader_parameter("pal_water_light", pal_water_light)
+			planet.water_material.set_shader_parameter("pal_water_shore", pal_water_shore)
+			if archetype == "VOLCANIC":
+				planet.water_material.set_shader_parameter("is_lava", true)
+				planet.water_material.set_shader_parameter("pal_water_base", Color(0.8, 0.2, 0.0))
+				planet.water_material.set_shader_parameter("pal_water_light", Color(1.0, 0.6, 0.1))
+	
+	self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		
 	# DECOUPLED COLLISION: High-detail chunks (under 2km across) get collision.
 	# ACE PERFORMANCE: Only materialize physics if the player is in 'Hazard Proximity' (< 3km alt)
@@ -398,7 +424,7 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []; var g_pts: Array[Transform3D] = []; var c_pts: Array[Transform3D] = []
 	var m_pts: Array = []
 
-	# Cache the planet's mineable resource list locally — safe to read once from the
+	# Cache the planet's mineable resource list locally     safe to read once from the
 	# background thread since planet_resources is set before chunk generation begins.
 	var _mineable: Array[String] = []
 	if is_instance_valid(planet) and "planet_resources" in planet:
@@ -440,8 +466,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
 			# WILDERNESS ZONE: Minerals & Nature
 			# -----------------------------------
-			# 1. MINERAL PRIORITY: Extreme Rarity — sparse legendary deposits
-			if (h_v % 50000) < 1:
+			# 1. MINERAL PRIORITY: Extreme Rarity (ACE: Drastic reduction to 1 in 300,000)
+			if (h_v % 300000) < 1:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
 					# Pick deterministically from this planet's resource pool
@@ -452,13 +478,10 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 					m_pts.append([xf, type])
 			else:
 				# 2. NATURE FALLBACK: Standard Biome Scattering
-				# MOBILE: Halve scatter density; tree get_terrain_elevation calls
-				# are the long-tail cost here and count directly inflates MMI size.
-				var _mob_on: bool = planet and "mobile_perf" in planet and planet.mobile_perf
-				var _nat_scale: float = 0.5 if _mob_on else 1.0
-				if cluster_n > 0.22:
-					var grove_strength = clamp((cluster_n - 0.22) * 8.0, 0.0, 1.0)
-					if (h_v % 1000) < int(960 * grove_strength * DebugSettings.tree_mult * _nat_scale):
+				var _nat_scale: float = 1.0
+				if cluster_n > 0.35: # ACE: Raised cluster threshold (narrower groves)
+					var grove_strength = clamp((cluster_n - 0.35) * 8.0, 0.0, 1.0)
+					if (h_v % 1000) < int(125 * grove_strength * DebugSettings.tree_mult * _nat_scale):
 						var h_t = get_terrain_elevation(cp)
 						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
 							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
@@ -467,25 +490,28 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 								m_pts.append([xform, "Wood"])
 							else:
 								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
-				elif cluster_n < -0.20:
-					if (h_v % 1000) < int(200 * DebugSettings.rock_mult * _nat_scale):
+				elif cluster_n < -0.30: # ACE: Widened rock threshold
+					if (h_v % 1000) < int(30 * DebugSettings.rock_mult * _nat_scale):
 						var h_r = get_terrain_elevation(cp)
 						if h_r > -150.0:
-							var r_xf = _get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 5.0)
-							# ACE: Very rare interactive/mineable rock (1 in 800)
-							if h_v % 800 < 1:
-								m_pts.append([_get_rock_xform(cp * (radius + max(h_r, SEA_LEVEL - 50.0)), cp, detail_n, 8.0), "Stone"])
-							else:
-								r_pts.append(r_xf)
+							var r_pos = cp * (radius + max(h_r, SEA_LEVEL - 50.0))
+							
+							# SPAWN COLLISION AVOIDANCE: Ensure we don't spawn inside a tree or another rock
+							var too_close = false
+							for tp in t_pts: if tp.origin.distance_to(r_pos) < 12.0: too_close = true; break
+							if not too_close:
+								for rp in r_pts: if rp.origin.distance_to(r_pos) < 10.0: too_close = true; break
+							
+							if not too_close:
+								var r_xf = _get_rock_xform(r_pos, cp, detail_n, 5.0)
+								# ACE: Very rare interactive/mineable rock (1 in 800)
+								if h_v % 800 < 1:
+									m_pts.append([_get_rock_xform(r_pos, cp, detail_n, 8.0), "Stone"])
+								else:
+									r_pts.append(r_xf)
 
 	
-	# MOBILE: Grass is the single biggest CPU win on iOS (15-25ms in the worst
-	# chunk). Skip the grass grid entirely — the hatch-toon shader + scattered
-	# rocks/trees already give a dense visual ground cover.
-	var _mobile_perf_chunk: bool = false
-	if planet and "mobile_perf" in planet:
-		_mobile_perf_chunk = planet.mobile_perf
-	if scale_factor <= 0.00055 and not _mobile_perf_chunk:
+	if scale_factor <= 0.00055:
 		var g_cell: float = 0.0000045 / radius_ratio
 		var gs_x = int(floor((offset.x - scale_factor) / g_cell)); var ge_x = int(ceil((offset.x + scale_factor) / g_cell))
 		var gs_y = int(floor((offset.y - scale_factor) / g_cell)); var ge_y = int(ceil((offset.y + scale_factor) / g_cell))
@@ -493,7 +519,7 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			for y_idx in range(gs_y, ge_y):
 				for x_idx in range(gs_x, ge_x):
 					var h_v = hash(Vector3(float(x_idx), float(y_idx), float(planet_seed) + face_normal.x*7.0 + face_normal.z*3.0))
-					if h_v % 100 < 85:
+					if h_v % 100 < 12: # ACE: Drastic grass reduction (25 -> 12)
 						# ACE ORGANIC GRASS: Aggressive jitter (1.8) actively breaks the rigid grid system
 						# Grass clusters now unpredictably drift and clump, forming natural rolling fields
 						var j_x = (float(h_v % 50)/50.0 - 0.5) * 1.8
@@ -539,11 +565,17 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	
 	for i in range(points.size()):
 		var h_v = hash(points[i].origin)
-		var g = 0.4 + fposmod(float(h_v % 100)/100.0, 0.45)
-		var r_col = Color(g, g, g, 1.0)
+		# Warm brown-grey rock palette — slight per-instance variation in luminance
+		# and a small red-brown tilt so rocks don't read as flat grey in any biome.
+		var g: float = 0.34 + fposmod(float(h_v % 100) / 100.0, 0.32)
+		var r_col := Color(g * 1.05, g * 0.95, g * 0.85, 1.0)
 		mm_h.set_instance_transform(i, points[i]); mm_h.set_instance_color(i, r_col)
 		mm_l.set_instance_transform(i, points[i]); mm_l.set_instance_color(i, r_col)
-	
+
+	# Always use the static rock material (which has biolum_intensity=0). The
+	# per-planet rock_material was inheriting bioluminescence from the planet
+	# trait roll and tinting rocks cyan on bioluminescent worlds — rocks should
+	# stay neutral regardless of biome.
 	var mat = _get_rock_mat()
 	
 	_apply_planetary_lod_policy(mmi_h, true)
@@ -558,81 +590,72 @@ func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: Stri
 	var proxy_script = load("res://src/world/SurfacePropProxy.gd")
 	if not proxy_script: return
 
-	var player_pos := Vector3.ZERO
-	if is_instance_valid(planet):
-		var pl = planet.get("player")
-		if is_instance_valid(pl):
-			player_pos = pl.global_position
-
-	# Mobile: Reduce proxy count to 50% to avoid performance issues
-	var effective_max = max_count
-	if _is_mobile_perf():
-		effective_max = max(1, max_count / 2)
-
+	var effective_max = min(max_count, 40)
 	var sphere := SphereShape3D.new()
 	sphere.radius = sphere_r
 
 	var spawned := 0
 	for i in range(points.size()):
 		if spawned >= effective_max: break
-		var world_pos: Vector3 = global_transform * points[i].origin
-		if world_pos.distance_to(player_pos) > PROP_LOD_HIGH_END * 1.5:
-			continue
 		var col := CollisionShape3D.new()
 		col.shape = sphere
 		var proxy := StaticBody3D.new()
 		proxy.set_script(proxy_script)
 		proxy.add_child(col)
-		add_child(proxy)
 		# Lift center above terrain so the sphere top clears coarse mobile mesh triangles.
 		# Sphere still overlaps the visual prop position (lift < radius), so manual aim works.
 		var surface_normal: Vector3 = points[i].origin.normalized()
 		proxy.position = points[i].origin + surface_normal * (sphere_r * 0.65)
+		add_child(proxy)
 		proxy.call("setup", mmis, i, res_type)
 		spawned += 1
 
-func _is_mobile_perf() -> bool:
-	return is_instance_valid(planet) and bool(planet.get("mobile_perf"))
-
 func _apply_planetary_lod_policy(mmi: MultiMeshInstance3D, is_high_detail: bool) -> void:
-	var mobile_perf: bool = _is_mobile_perf()
 	mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	
 	if is_high_detail:
-		mmi.visibility_range_end = 800.0 if mobile_perf else PROP_LOD_HIGH_END
-		mmi.visibility_range_end_margin = 180.0 if mobile_perf else PROP_LOD_FADE
+		mmi.visibility_range_end = PROP_LOD_HIGH_END
+		mmi.visibility_range_end_margin = PROP_LOD_FADE
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF # OPTIMIZATION: Foliage shadows are too expensive
 	else:
-		mmi.visibility_range_begin = 800.0 if mobile_perf else PROP_LOD_HIGH_END
-		mmi.visibility_range_begin_margin = 180.0 if mobile_perf else PROP_LOD_FADE
-		mmi.visibility_range_end = 4200.0 if mobile_perf else PROP_LOD_PROXY_END
-		mmi.visibility_range_end_margin = 280.0 if mobile_perf else PROP_LOD_FADE * 2.5
+		mmi.visibility_range_begin = PROP_LOD_HIGH_END
+		mmi.visibility_range_begin_margin = PROP_LOD_FADE
+		mmi.visibility_range_end = PROP_LOD_PROXY_END
+		mmi.visibility_range_end_margin = PROP_LOD_FADE * 2.5
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 func _spawn_tree_lods(points: Array[Transform3D]) -> void:
-	var foliage_mat = _get_foliage_mat()
-	var trunk_mat = _get_trunk_mat()
+	var foliage_mat = planet.foliage_material if is_instance_valid(planet) and planet.get("foliage_material") else _get_foliage_mat()
+	var trunk_mat = planet.trunk_material if is_instance_valid(planet) and planet.get("trunk_material") else _get_trunk_mat()
 
 
 	
 	var n: int = points.size()
 	# High-Detail chunks (sf <= 0.00055) now manage two simultaneous LOD models.
 	if scale_factor <= 0.00055:
-		if _c_fol_h == null: _c_fol_h = _build_varied_foliage(true, 4)
-		if _c_fol_m == null: _c_fol_m = _build_varied_foliage(false, 2)
-		if _c_trk_h == null: _c_trk_h = _build_botw_trunk(true)
+		# Per-archetype foliage cache so a LUSH planet doesn't reuse a VOLCANIC
+		# crystal-spire mesh that was built on the first planet generated.
+		if not _c_fol_h_by_arch.has(archetype):
+			_c_fol_h_by_arch[archetype] = _build_varied_foliage(true, 4)
+		if not _c_fol_m_by_arch.has(archetype):
+			_c_fol_m_by_arch[archetype] = _build_varied_foliage(false, 2)
+		if not _c_trk_h_by_arch.has(archetype):
+			_c_trk_h_by_arch[archetype] = _build_botw_trunk(true)
+		var fol_h_mesh: ArrayMesh = _c_fol_h_by_arch[archetype]
+		var fol_m_mesh: ArrayMesh = _c_fol_m_by_arch[archetype]
+		var trk_h_mesh: ArrayMesh = _c_trk_h_by_arch[archetype]
 
-		var mm_h = MultiMesh.new(); mm_h.transform_format = MultiMesh.TRANSFORM_3D; mm_h.use_colors = true; mm_h.mesh = _c_fol_h; mm_h.instance_count = n
-		var mm_m = MultiMesh.new(); mm_m.transform_format = MultiMesh.TRANSFORM_3D; mm_m.use_colors = true; mm_m.mesh = _c_fol_m; mm_m.instance_count = n
-		var mt_th = MultiMesh.new(); mt_th.transform_format = MultiMesh.TRANSFORM_3D; mt_th.use_colors = true; mt_th.mesh = _c_trk_h; mt_th.instance_count = n
+		var mm_h = MultiMesh.new(); mm_h.transform_format = MultiMesh.TRANSFORM_3D; mm_h.use_colors = true; mm_h.mesh = fol_h_mesh; mm_h.instance_count = n
+		var mm_m = MultiMesh.new(); mm_m.transform_format = MultiMesh.TRANSFORM_3D; mm_m.use_colors = true; mm_m.mesh = fol_m_mesh; mm_m.instance_count = n
+		var mt_th = MultiMesh.new(); mt_th.transform_format = MultiMesh.TRANSFORM_3D; mt_th.use_colors = true; mt_th.mesh = trk_h_mesh; mt_th.instance_count = n
 		
 		var aabb: AABB = _calculate_forest_aabb(points)
 		mm_h.custom_aabb = aabb; mm_m.custom_aabb = aabb; mt_th.custom_aabb = aabb
 
 		for i in range(n):
 			var pos: Vector3 = points[i].origin
-			var t_hue: float = fposmod(pal_forest_h + 0.5 + fposmod(pos.x * 0.012, 0.3) - 0.15, 1.0); var t_col: Color = Color.from_hsv(t_hue, 0.85, 1.1) 
+			var t_hue: float = fposmod(pal_forest_h + 0.5 + fposmod(pos.x * 0.012, 0.3) - 0.15, 1.0); var t_col: Color = Color.from_hsv(t_hue, 0.85, 0.92)
 			mm_h.set_instance_transform(i, points[i]); mm_h.set_instance_color(i, t_col)
 			mm_m.set_instance_transform(i, points[i]); mm_m.set_instance_color(i, t_col)
 			
@@ -644,7 +667,7 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 			mt_th.set_instance_transform(i, points[i]); mt_th.set_instance_color(i, tr_c)
 			
 			# AMBIENT LEAF DRIFT: Throttled to only spawn for the immediate local neighborhood (Optimization)
-			if not _is_mobile_perf() and i % 15 == 0:
+			if not _mobile_perf and i % 15 == 0:
 				var cam_p = Vector3.ZERO
 				if is_instance_valid(get_viewport().get_camera_3d()):
 					cam_p = get_viewport().get_camera_3d().global_position
@@ -663,17 +686,21 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 
 		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 60, 15.0)
 	else:
-		# Mid/Far Chunk: Single simplified MultiMesh
-		if _c_fol_l == null: _c_fol_l = _build_varied_foliage(false, 2 if scale_factor < 0.003 else 1)
-		if _c_trk_l == null: _c_trk_l = _build_botw_trunk(false)
+		# Mid/Far Chunk: Single simplified MultiMesh, per-archetype mesh.
+		if not _c_fol_l_by_arch.has(archetype):
+			_c_fol_l_by_arch[archetype] = _build_varied_foliage(false, 2 if scale_factor < 0.003 else 1)
+		if not _c_trk_l_by_arch.has(archetype):
+			_c_trk_l_by_arch[archetype] = _build_botw_trunk(false)
+		var fol_l_mesh: ArrayMesh = _c_fol_l_by_arch[archetype]
+		var trk_l_mesh: ArrayMesh = _c_trk_l_by_arch[archetype]
 
 		var mm = MultiMesh.new(); mm.transform_format = MultiMesh.TRANSFORM_3D; mm.use_colors = true; mm.instance_count = n
-		mm.mesh = _c_fol_l
-		var mm_t = MultiMesh.new(); mm_t.transform_format = MultiMesh.TRANSFORM_3D; mm_t.mesh = _c_trk_l; mm_t.instance_count = n
+		mm.mesh = fol_l_mesh
+		var mm_t = MultiMesh.new(); mm_t.transform_format = MultiMesh.TRANSFORM_3D; mm_t.mesh = trk_l_mesh; mm_t.instance_count = n
 		
 		var aabb = _calculate_forest_aabb(points); mm.custom_aabb = aabb; mm_t.custom_aabb = aabb
 		for i in range(n):
-			var pos: Vector3 = points[i].origin; var t_hue: float = fposmod(pal_forest_h + 0.5 + fposmod(pos.x * 0.012, 0.3) - 0.15, 1.0); var t_col: Color = Color.from_hsv(t_hue, 0.85, 1.1) 
+			var pos: Vector3 = points[i].origin; var t_hue: float = fposmod(pal_forest_h + 0.5 + fposmod(pos.x * 0.012, 0.3) - 0.15, 1.0); var t_col: Color = Color.from_hsv(t_hue, 0.85, 0.92)
 			mm.set_instance_transform(i, points[i]); mm.set_instance_color(i, t_col)
 			mm_t.set_instance_transform(i, points[i])
 		
@@ -930,8 +957,8 @@ func _spawn_grass(points: Array[Transform3D]) -> void:
 	
 	var mmi_h = MultiMeshInstance3D.new()
 	mmi_h.multimesh = mm
-	var mat = ShaderMaterial.new()
-	mat.shader = _get_grass_shader()
+	var mat = planet.grass_material if is_instance_valid(planet) and planet.get("grass_material") else ShaderMaterial.new()
+	if is_instance_valid(planet) and not planet.get("grass_material"): mat.shader = _get_grass_shader()
 	mmi_h.material_override = mat
 	
 	mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 200.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
@@ -1096,7 +1123,7 @@ func _build_lush_tree(is_high: bool, complexity: int) -> ArrayMesh:
 	
 	# ===== CANOPY (OVAL ENVELOPE) =====
 	# Alpha=1.0 so the foliage shader uses the per-instance biome color.
-	# Shape: sin(t*PI) envelope creates a wide middle, narrow top/bottom — exactly like the reference.
+	# Shape: sin(t*PI) envelope creates a wide middle, narrow top/bottom     exactly like the reference.
 	st.set_color(Color(1.0, 1.0, 1.0, 1.0))
 	var canopy_base: float = trunk_h * 0.5  # Canopy starts halfway up the trunk
 	var canopy_top: float  = trunk_h + 8.0  # Canopy extends 8 units above trunk tip
@@ -1105,7 +1132,7 @@ func _build_lush_tree(is_high: bool, complexity: int) -> ArrayMesh:
 	
 	var rings: int = clamp(complexity, 2, 5)
 	for ring_i in range(rings):
-		# t goes 0→1 over the canopy height
+		# t goes 0   1 over the canopy height
 		var t: float = float(ring_i) / float(rings - 1) if rings > 1 else 0.5
 		var ry: float = canopy_base + t * canopy_span
 		
@@ -1204,9 +1231,9 @@ func _build_cactus_mesh(is_high: bool) -> ArrayMesh:
 
 func _build_fungal_mesh(is_high: bool) -> ArrayMesh:
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	st.set_color(Color(1, 1, 1, 1)) # Alpha=0 → fixed purple stalk
+	st.set_color(Color(1, 1, 1, 1)) # Alpha=0     fixed purple stalk
 	_add_tapered_cylinder(st, Vector3.ZERO, Vector3(0, 5, 0), 0.9, 0.5, 4)
-	st.set_color(Color(1, 1, 1, 1)) # Alpha=1 → caps take biome color
+	st.set_color(Color(1, 1, 1, 1)) # Alpha=1     caps take biome color
 	_add_lush_blob(st, Vector3(0, 5.5, 0), 4.5, is_high)
 	if is_high:
 		_add_lush_blob(st, Vector3(1.5, 3.8, 0.5), 2.5, false)
@@ -1216,7 +1243,7 @@ func _build_fungal_mesh(is_high: bool) -> ArrayMesh:
 
 func _build_crystal_spire(is_high: bool) -> ArrayMesh:
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Alpha=0 → shader uses fixed dark crystal base (the old near-black Color caused black trees!)
+	# Alpha=0     shader uses fixed dark crystal base (the old near-black Color caused black trees!)
 	st.set_color(Color(1, 1, 1, 1))
 	_add_tapered_cylinder(st, Vector3.ZERO, Vector3(0, 10, 0), 1.5, 0.05, 4)
 	var count = 4 if is_high else 2
@@ -1275,8 +1302,11 @@ func _build_grass_mesh() -> ArrayMesh:
 	st.generate_normals(false); st.generate_tangents()
 	_c_g = st.commit(); return _c_g
 
-static var _shared_land_shader: Shader = null
-static func _get_shared_land_shader() -> Shader:
+# Non-static so each editor play-session gets a freshly-compiled shader.
+# (Static caching survived script reloads in some Godot editor states which
+# meant code changes weren't reaching the GPU until a full editor restart.)
+var _shared_land_shader: Shader = null
+func _get_shared_land_shader() -> Shader:
 	if _shared_land_shader: return _shared_land_shader
 	_shared_land_shader = Shader.new()
 	_shared_land_shader.code = """shader_type spatial;
@@ -1323,7 +1353,9 @@ void vertex() {
 	v_steepness = dot(normalize(VERTEX), NORMAL);
 }
 void fragment() {
-	vec3 col_snow = vec3(0.97, 0.97, 1.0); // Slightly blue-white snow caps
+	// Snow tinted slightly toward the planet's rock palette so caps don't
+	// read as pure white and bleach the silhouette under bloom.
+	vec3 col_snow = mix(vec3(0.92, 0.94, 0.98), col_rock, 0.15);
 	vec3 blending = abs(v_normal);
 	blending /= (blending.x + blending.y + blending.z);
 	float tex_scale = 0.005;
@@ -1359,12 +1391,16 @@ void fragment() {
 	float city_shore_mask = smoothstep(sea_level, sea_level + 150.0, v_height);
 	float city_mask = smoothstep(0.4, 0.6, n_base * global_mask) * city_shore_mask;
 	
-	// Zone boundaries (above sea level)
+	// Zone boundaries (above sea level).
+	// Pushed higher (was 800/1800/3200) so peaks don't immediately bleach into
+	// snow on planets with terrain_strength=5000 — most of each landmass now
+	// reads as the biome's grass / forest colour, with rock and snow reserved
+	// for genuine peaks.
 	float beach_warp = sin(v_world_pos.x * 0.008) * 15.0 + cos(v_world_pos.z * 0.01) * 10.0;
 	float t_beach_end  = aa_step(sea_level + 120.0 + beach_warp, v_height);   // Beach -> Grass
-	float t_midland    = aa_step(800.0, warped_h);                             // Grass -> Forest/Mid
-	float t_rock_start = aa_step(1800.0, warped_h);                            // Mid -> Rock
-	float t_snow       = aa_step(3200.0, warped_h);                            // Rock -> Snow
+	float t_midland    = aa_step(1400.0, warped_h);                            // Grass -> Forest/Mid
+	float t_rock_start = aa_step(3000.0, warped_h);                            // Mid  -> Rock
+	float t_snow       = aa_step(4500.0, warped_h);                            // Rock -> Snow
 	
 	// SLOPE-BASED CLIFF DETECTION: Faces pointing sideways are cliff walls regardless of height
 	// v_steepness: 1.0=flat ground relative to gravity, 0.0=sheer vertical cliff
@@ -1378,7 +1414,9 @@ void fragment() {
 	albedo = mix(albedo, col_snow * s_detail_level, t_snow); // Rock -> snow caps
 
 	// POLAR SNOW CAP: Overlays snow regardless of altitude at the North/South poles
-	float polar_snow = smoothstep(0.78, 0.94, abs(v_local_norm.y));
+	// Tighter polar caps (was 0.78–0.94) so the ice doesn't drown half the
+	// visible disc and bleach out the procedural biome colour.
+	float polar_snow = smoothstep(0.88, 0.96, abs(v_local_norm.y));
 	albedo = mix(albedo, col_snow * s_detail_level, polar_snow);
 	
 	// Override steep cliff faces with rock color regardless of their altitude
@@ -1437,11 +1475,10 @@ void fragment() {
 }
 void light() {
 	float l_level = dot(NORMAL, LIGHT);
-	// SOFTER TOON BANDS: Shadow min lifted from 0.35 to 0.55 to prevent pitch-black terrain
-	float t2 = aa_step(0.20, l_level); // Shadow -> mid transition
-	float t1 = aa_step(0.60, l_level); // Mid -> lit transition
-	vec3 shadow_col = ALBEDO * 0.55;   // Was 0.35 — much softer shadow minimum
-	vec3 mid_col    = ALBEDO * 0.78;   // Was 0.65 — richer midtone
+	float t2 = aa_step(0.20, l_level);
+	float t1 = aa_step(0.60, l_level);
+	vec3 shadow_col = ALBEDO * 0.55;
+	vec3 mid_col    = ALBEDO * 0.78;
 	vec3 final_col  = mix(shadow_col, mid_col, t2);
 	final_col = mix(final_col, ALBEDO, t1);
 	DIFFUSE_LIGHT += final_col * LIGHT_COLOR * ATTENUATION;
@@ -1506,7 +1543,7 @@ static func _init_skyscraper_assets() -> void:
 		vec2 r_uv = (v_local_pos.xz + 140.0) / 280.0;
 		float s_h = texture(disp_tex, s_uv).r; vec2 p_s_uv = s_uv - v_view_dir.xy * (s_h * 0.015);
 		float r_h = texture(roof_disp, r_uv).r; vec2 p_r_uv = r_uv - v_view_dir.xz * (r_h * 0.015);
-		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb; vec3 roof_alb = texture(roof_tex, p_r_uv).rgb;
+		vec3 side_alb = texture(albedo_tex, p_s_uv).rgb; vec3 roof_alb = texture(roof_tex, r_uv).rgb;
 		vec3 base_alb = mix(side_alb, roof_alb, roof_mask); float luma = dot(base_alb, vec3(0.299, 0.587, 0.114));
 		float is_win = step(0.45, luma) * (1.0 - roof_mask);
 		
@@ -1515,14 +1552,14 @@ static func _init_skyscraper_assets() -> void:
 		if (dist < 4500.0) {
 			interior = room_trace(s_uv, v_view_dir, vec3(20.0, 40.0, 1.0), v_seed);
 		}
-		float b_ao = mix(texture(ao_tex, p_s_uv).r, texture(roof_ao, p_r_uv).r, roof_mask);
+		float b_ao = mix(texture(ao_tex, p_s_uv).r, texture(roof_ao, r_uv).r, roof_mask);
 		float h_grad = mix(0.2, 1.0, smoothstep(-240.0, 100.0, v_local_pos.y));
 		ALBEDO = mix(base_alb, base_alb * interior * 2.5, is_win) * h_grad * b_ao;
 		float s_spec = texture(spec_tex, p_s_uv).r;
-		SPECULAR = mix(s_spec, texture(roof_spec, p_r_uv).r, roof_mask);
+		SPECULAR = mix(s_spec, texture(roof_spec, r_uv).r, roof_mask);
 		METALLIC = mix(s_spec * 0.8, 0.1, roof_mask); ROUGHNESS = mix(0.7 - s_spec * 0.5, 0.8, roof_mask);
 		EMISSION = mix(vec3(0.0), base_alb * 10.0 + interior * is_win * 6.0, is_win);
-		NORMAL_MAP = mix(texture(normal_tex, p_s_uv).rgb, texture(roof_norm, p_r_uv).rgb, roof_mask);
+		NORMAL_MAP = mix(texture(normal_tex, p_s_uv).rgb, texture(roof_norm, r_uv).rgb, roof_mask);
 		NORMAL_MAP_DEPTH = 1.35;
 	}
 	"""
@@ -1593,8 +1630,8 @@ static func _get_impostor_mat() -> ShaderMaterial:
 	}"""
 	_impostor_mat.shader = s; return _impostor_mat
 
-static var _shared_water_shader: Shader = null
-static func _get_shared_water_shader() -> Shader:
+var _shared_water_shader: Shader = null
+func _get_shared_water_shader() -> Shader:
 	if _shared_water_shader: return _shared_water_shader
 	_shared_water_shader = Shader.new()
 	_shared_water_shader.code = """shader_type spatial;
@@ -1622,7 +1659,7 @@ vec2 hash2(vec2 p) {
 float value_noise(vec2 p) {
 	vec2 i = floor(p);
 	vec2 f = fract(p);
-	// Quintic interpolation curve — smoother than cubic, no visible grid seams
+	// Quintic interpolation curve     smoother than cubic, no visible grid seams
 	vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
 	// Sample 4 corner hashes and bilinearly interpolate
 	float a = hash2(i).x;
@@ -1702,14 +1739,14 @@ void fragment() {
 	}
 
 	// -------------------------------------------------------
-	// 5. SUN SHIMMER — irregular dapple on open water
+	// 5. SUN SHIMMER     irregular dapple on open water
 	// -------------------------------------------------------
 	float shimmer_n = fbm(v_local_pos.xz * 0.009 + vec2(wt * 0.4, -wt * 0.35));
 	float shimmer = step(0.78, shimmer_n) * step(0.4, dot(v_world_normal, vec3(0.0, 1.0, 0.0)));
 	shimmer *= smoothstep(0.45, 0.0, shore); // Only on open deep water
 
 	// -------------------------------------------------------
-	// 6. ASSEMBLE: base → mid highlight → crest → shore foam → sparkle
+	// 6. ASSEMBLE: base     mid highlight     crest     shore foam     sparkle
 	// -------------------------------------------------------
 	float fresnel = pow(1.0 - dot(NORMAL, VIEW), 3.0);
 	vec3 col = pal_water_base;
@@ -1720,7 +1757,7 @@ void fragment() {
 
 	ALBEDO = col;
 	if (is_lava) {
-		EMISSION = col * (fresnel + 0.5) * 2.5;
+		EMISSION = col * (fresnel + 0.5) * 1.2;
 	}
 	METALLIC = 0.0;
 	ROUGHNESS = 0.08;
@@ -1742,13 +1779,14 @@ void light() {
 	vec3 H = normalize(LIGHT + VIEW); // Half-vector between sun direction and camera
 	float NdotH = max(dot(NORMAL, H), 0.0);
 	
-	// Two cel-shaded rings: a broad warm halo and a tight bright core
-	float spec_mid  = step(0.965, NdotH); // Wide outer glow
-	float spec_core = step(0.990, NdotH); // Tight bright center
-	
-	// Warm golden sun color for the halo, pure white for the core
-	vec3 sun_halo = LIGHT_COLOR * vec3(1.0, 0.92, 0.70) * 1.8;
-	vec3 sun_core = vec3(1.0, 0.98, 0.90) * 3.5;
+	// Two cel-shaded rings: a tighter halo and a small bright core.
+	// Tightened thresholds + dimmed halo so the sun reflection is a believable
+	// glint instead of a screen-wide hot spot that washes out the planet.
+	float spec_mid  = step(0.985, NdotH);
+	float spec_core = step(0.996, NdotH);
+
+	vec3 sun_halo = LIGHT_COLOR * vec3(1.0, 0.92, 0.70) * 0.7;
+	vec3 sun_core = vec3(1.0, 0.98, 0.90) * 1.3;
 	
 	// Only reflect when surface is lit (not in shadow)
 	float lit_mask = t_shadow * ATTENUATION;
@@ -1776,6 +1814,15 @@ func _spawn_minerals(data: Array) -> void:
 	var per_frame: int = 3 if mobile else 6
 	var counter: int = 0
 
+	# Plain flora props (Wood / Stone / Carbon Fiber) only glow on rare A-tier
+	# or higher forged planets. On lower-tier planets they read as normal
+	# terrain scenery.
+	var rank_label: String = ""
+	if is_instance_valid(planet) and "planet_rank" in planet:
+		rank_label = String(planet.get("planet_rank"))
+	var planet_can_glow: bool = rank_label in ["A", "S", "SS", "★ LEGENDARY"]
+	var flora_types := ["Wood", "Stone", "Carbon Fiber"]
+
 	for item in data:
 		# Bail if chunk was freed OR recycled to a different position.
 		if not is_inside_tree() or offset != initial_offset: return
@@ -1794,9 +1841,16 @@ func _spawn_minerals(data: Array) -> void:
 		var res = StaticBody3D.new()
 		res.set_script(m_script)
 		res.set("resource_type", type)
-		add_child(res)
+		# Decide glow per-prop. Real mineral deposits keep their gem look on
+		# every planet; flora props are only luminous on top-tier planets, and
+		# even then only a random subset (~50%) so it reads as a special quirk.
+		var prop_glows: bool = true
+		if type in flora_types:
+			prop_glows = planet_can_glow and (pos_hash & 1) == 0
+		res.set("glows", prop_glows)
 		# ACE: Use local transform relative to the chunk node
 		res.transform = xf
+		add_child(res)
 
 		counter += 1
 		if counter >= per_frame:
@@ -1806,45 +1860,52 @@ func _spawn_minerals(data: Array) -> void:
 			await get_tree().process_frame
 			if not is_inside_tree() or offset != initial_offset: return
 
-# ACE PERFORMANCE: Shared Static Cache for Procedural Assets
-# We cache these to prevent rebuilding meshes and materials on the main thread for every chunk.
-static var _c_r: ArrayMesh = null      # Rock
-static var _c_trk_h: ArrayMesh = null  # Trunk High
-static var _c_trk_l: ArrayMesh = null  # Trunk Low
-static var _c_fol_h: ArrayMesh = null  # Foliage High
-static var _c_fol_m: ArrayMesh = null  # Foliage Medium
-static var _c_fol_l: ArrayMesh = null  # Foliage Low
-static var _c_g: ArrayMesh = null      # Grass
+# ACE PERFORMANCE: Shared per-archetype mesh cache.
+# Foliage shape varies by archetype (cactus / crystal spire / ice fan / botw
+# trees) so a single static slot would freeze the first archetype rolled and
+# render every subsequent planet with the wrong foliage shape (e.g. cyan
+# crystal spires on a green LUSH world).  Keying by archetype gives one shared
+# mesh per archetype, recomputed on first use, reused freely after.
+static var _c_r: ArrayMesh = null      # Rock — same across archetypes
+static var _c_g: ArrayMesh = null      # Grass — same across archetypes
+static var _c_trk_h_by_arch: Dictionary = {}  # archetype -> high-detail trunk
+static var _c_trk_l_by_arch: Dictionary = {}  # archetype -> low-detail trunk
+static var _c_fol_h_by_arch: Dictionary = {}  # archetype -> high-detail foliage
+static var _c_fol_m_by_arch: Dictionary = {}  # archetype -> mid-detail foliage
+static var _c_fol_l_by_arch: Dictionary = {}  # archetype -> low-detail foliage
 
 static var _mat_foliage: ShaderMaterial = null
 static var _mat_trunk: ShaderMaterial = null
 static var _mat_rock: ShaderMaterial = null
 
-func _get_foliage_mat() -> ShaderMaterial:
-	if _mat_foliage: return _mat_foliage
-	_mat_foliage = ShaderMaterial.new()
-	_mat_foliage.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
-	_mat_foliage.set_shader_parameter("shadow_strength", 0.6)
+static func _get_foliage_mat() -> ShaderMaterial:
+	if _mat_foliage == null:
+		_mat_foliage = ShaderMaterial.new()
+		_mat_foliage.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
+		_mat_foliage.set_shader_parameter("shadow_strength", 0.6)
+		_mat_foliage.set_shader_parameter("biolum_intensity", 0.0) # Ensure no glow by default
 	_mat_foliage.set_shader_parameter("wind_speed", 0.7)
 	_mat_foliage.set_shader_parameter("wind_strength", 0.4)
 	_mat_foliage.set_shader_parameter("leaf_texture", _get_tex("res://assets/textures/tree_leaves_texture.png"))
 	_mat_foliage.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_leaves_texture_normal.png"))
 	return _mat_foliage
 
-func _get_trunk_mat() -> ShaderMaterial:
-	if _mat_trunk: return _mat_trunk
-	_mat_trunk = ShaderMaterial.new()
-	_mat_trunk.shader = _get_res("res://src/shaders/trunk_toon.gdshader")
-	_mat_trunk.set_shader_parameter("albedo", Color(0.35, 0.25, 0.15))
-	_mat_trunk.set_shader_parameter("bark_texture", _get_tex("res://assets/textures/tree_trunk_texture.png"))
-	_mat_trunk.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_trunk_texture_normal.png"))
-	_mat_trunk.set_shader_parameter("disp_map", _get_tex("res://assets/textures/tree_trunk_texture_displacement.png"))
-	_mat_trunk.set_shader_parameter("hatching_strength", 0.45)
+static func _get_trunk_mat() -> ShaderMaterial:
+	if _mat_trunk == null:
+		_mat_trunk = ShaderMaterial.new()
+		_mat_trunk.shader = _get_res("res://src/shaders/trunk_toon.gdshader")
+		_mat_trunk.set_shader_parameter("albedo", Color(0.35, 0.25, 0.15))
+		_mat_trunk.set_shader_parameter("bark_texture", _get_tex("res://assets/textures/tree_trunk_texture.png"))
+		_mat_trunk.set_shader_parameter("normal_map", _get_tex("res://assets/textures/tree_trunk_texture_normal.png"))
+		_mat_trunk.set_shader_parameter("disp_map", _get_tex("res://assets/textures/tree_trunk_texture_displacement.png"))
+		_mat_trunk.set_shader_parameter("hatching_strength", 0.45)
 	return _mat_trunk
 
-func _get_rock_mat() -> ShaderMaterial:
-	if _mat_rock: return _mat_rock
-	_mat_rock = ShaderMaterial.new()
-	_mat_rock.shader = _get_res("res://src/shaders/hatch_toon.gdshader")
-	_mat_rock.set_shader_parameter("shadow_strength", 0.9)
+static func _get_rock_mat() -> ShaderMaterial:
+	if _mat_rock == null:
+		_mat_rock = ShaderMaterial.new()
+		_mat_rock.shader = _get_res("res://src/shaders/hatch_toon.gdshader")
+		_mat_rock.set_shader_parameter("shadow_strength", 0.9)
+		_mat_rock.set_shader_parameter("biolum_intensity", 0.0) # Ensure no glow by default
+		
 	return _mat_rock

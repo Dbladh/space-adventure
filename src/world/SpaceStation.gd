@@ -8,7 +8,7 @@ const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
 #   • Forge     — spend 3 resource slots to spawn a deterministic planet
 #   • Dismantle — destroy a forged planet and recover the resources
 
-const DOCK_RANGE: float = 600000.0   # 600 km — stations are massive now
+const DOCK_RANGE: float = 2000000.0   # 2000 km — Closer to the model surface
 const MAX_PLANETS: int = 3
 
 var station_display_name: String = "Alpha"   # set before add_child()
@@ -30,6 +30,25 @@ var _prompt_btn: Button = null
 var _ui_visible: bool = false
 var _in_range: bool = false
 var _cinematic_active: bool = false
+
+# ACE SIGNALS: Notify the universe of major system changes
+signal planet_forged(count: int)
+
+# Market panel references
+var _market_scroll: ScrollContainer = null
+var _market_rows_vbox: VBoxContainer = null
+var _market_status: Label = null
+const BUY_MARKUP: float = 1.8
+
+# Tab references
+var _tab_btns: Array = []  # [market_btn, forge_btn]
+var _active_tab: int = 0  # 0 = Market, 1 = Forge
+var _tab_market_panel: Control = null
+var _tab_forge_panel: Control = null
+
+# Gamepad cursor/focus
+var _virtual_cursor: ColorRect = null
+var _last_mouse_pos: Vector2 = Vector2.ZERO
 
 # Each entry: { node: Node3D, r1: String, r2: String, r3: String }
 static var _active_planets: Array[Dictionary] = []
@@ -76,9 +95,9 @@ class ResourceCard extends PanelContainer:
 		return {"type": "resource", "res": resource_id}
 
 func _ready() -> void:
+	add_to_group("SpaceStation")
 	# ALWAYS so the Close button and _process work even when tree is paused for docking
 	process_mode = PROCESS_MODE_ALWAYS
-	add_to_group("SpaceStation")
 	_build_visual()
 	_build_ui()
 
@@ -87,78 +106,80 @@ func _ready() -> void:
 # ---------------------------------------------------------------------------
 
 func _build_visual() -> void:
-	# All sizes in metres.  Station is ~300 km across — Death Star scale.
-	const DISC_R   := 150_000.0   # main disc radius
-	const DISC_H   :=  28_000.0   # disc thickness
-	const RING_IN  := 170_000.0   # orbital ring inner radius
-	const RING_OUT := 215_000.0   # orbital ring outer radius
-	const CORE_R   :=  42_000.0   # central sphere radius
-
-	# ── Main disc body ────────────────────────────────────────────────
-	var disc_mesh := CylinderMesh.new()
-	disc_mesh.top_radius    = DISC_R
-	disc_mesh.bottom_radius = DISC_R
-	disc_mesh.height        = DISC_H
-	disc_mesh.radial_segments = 24
-
-	var disc_mat := StandardMaterial3D.new()
-	disc_mat.albedo_color = Color(0.42, 0.52, 0.62)
-	disc_mat.emission_enabled = true
-	disc_mat.emission = Color(0.15, 0.35, 0.75)
-	disc_mat.emission_energy_multiplier = 1.2
-	disc_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	disc_mesh.material = disc_mat
-
-	var disc := MeshInstance3D.new()
-	disc.mesh = disc_mesh
-	add_child(disc)
-
-	# ── Central core sphere ───────────────────────────────────────────
-	var sphere_mesh := SphereMesh.new()
-	sphere_mesh.radius = CORE_R
-	sphere_mesh.height = CORE_R * 2.0
-	sphere_mesh.radial_segments = 16
-	sphere_mesh.rings = 8
-
-	var core_mat := StandardMaterial3D.new()
-	core_mat.albedo_color = Color(0.6, 0.75, 1.0)
-	core_mat.emission_enabled = true
-	core_mat.emission = Color(0.2, 0.6, 1.0)
-	core_mat.emission_energy_multiplier = 3.5
-	core_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	sphere_mesh.material = core_mat
-
-	var core := MeshInstance3D.new()
-	core.mesh = sphere_mesh
-	add_child(core)
-
-	# ── Orbital ring (slowly rotates) ────────────────────────────────
-	var torus := TorusMesh.new()
-	torus.inner_radius = RING_IN
-	torus.outer_radius = RING_OUT
-	torus.rings         = 48
-	torus.ring_segments = 12
-
-	var ring_mat := StandardMaterial3D.new()
-	ring_mat.albedo_color = Color(0.1, 0.8, 1.0)
-	ring_mat.emission_enabled = true
-	ring_mat.emission = Color(0.1, 0.8, 1.0)
-	ring_mat.emission_energy_multiplier = 5.0
-	ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	torus.material = ring_mat
-
-	_ring_node = Node3D.new()
-	var ring := MeshInstance3D.new()
-	ring.mesh = torus
-	_ring_node.add_child(ring)
-	add_child(_ring_node)
+	# ACE ASSET INTEGRATION: Load the high-fidelity space station model 
+	# Replacing legacy procedural primitives with 'The Gunsmith's' signature asset.
+	var model_path := "res://assets/models/space station/space_station.glb"
+	var station_scene: PackedScene = load(model_path)
+	
+	if station_scene:
+		var instance = station_scene.instantiate()
+		# ACE SCALE: The model is scaled to astronomical proportions (~300km)
+		# to maintain consistent navigation telemetry across the system.
+		# ACE MEGA-SCALE: 10x previous size. 3,000km diameter.
+		instance.scale = Vector3(40000.0, 40000.0, 40000.0)
+		add_child(instance)
+		
+		# ACE MATERIAL OVERHAUL: Injecting Normal Maps and Emission Glow
+		_apply_station_materials(instance)
+		
+		# We hook into the existing rotation logic used for the procedural ring.
+		# Now the entire station rotates majestically around its axis.
+		_ring_node = instance
+	else:
+		# FALLBACK: Maintain structural integrity if asset is missing
+		printerr("--- ARCHITECT: Space Station asset missing at [%s]. Using fallback. ---" % model_path)
+		var sphere = MeshInstance3D.new()
+		sphere.mesh = SphereMesh.new()
+		sphere.mesh.radius = 1500000.0
+		sphere.mesh.height = 3000000.0
+		add_child(sphere)
+		_ring_node = sphere
 
 	# ── OmniLight so the station glows across the system ─────────────
 	var light := OmniLight3D.new()
 	light.light_color = Color(0.3, 0.7, 1.0)
 	light.light_energy = 8.0
-	light.omni_range   = RING_OUT * 8.0
+	light.omni_range   = 3000000.0 * 10.0
 	add_child(light)
+
+func _apply_station_materials(node: Node) -> void:
+	# ACE: Explicitly load textures to ensure they are assigned correctly
+	var tex_albedo = load("res://assets/models/space station/space_station_0.jpg")
+	var tex_normal = load("res://assets/models/space station/space_station_2.jpg")
+	var tex_emission = load("res://assets/models/space station/space_station_3.jpg")
+
+	for child in node.get_children():
+		if child is MeshInstance3D:
+			var body := StaticBody3D.new()
+			# Layer 8: Space Station (Special-cased for negligible damage)
+			body.collision_layer = 8 
+			child.add_child(body)
+			
+			var coll_node := CollisionShape3D.new()
+			coll_node.shape = child.mesh.create_trimesh_shape()
+			body.add_child(coll_node)
+
+			# ACE: The model may have multiple surfaces; we must iterate and enhance each.
+			for i in range(child.mesh.get_surface_count()):
+				var mat = child.get_active_material(i)
+				if mat is StandardMaterial3D:
+					var new_mat = mat.duplicate()
+					
+					# ACE TEXTURE SYNC: Explicitly assigning maps to avoid null-defaults
+					new_mat.albedo_texture = tex_albedo
+					
+					new_mat.normal_enabled = true
+					new_mat.normal_texture = tex_normal
+					
+					# ACE EMISSION MASKING: Using the dedicated light-mask (space_station_3.jpg)
+					# to ensure only the actual fixtures glow, not the hull plating.
+					new_mat.emission_enabled = true
+					new_mat.emission_texture = tex_emission
+					new_mat.emission = Color(1.0, 0.9, 0.4)
+					new_mat.emission_energy_multiplier = 8.0
+					
+					child.set_surface_override_material(i, new_mat)
+		_apply_station_materials(child)
 
 # ---------------------------------------------------------------------------
 # UI BUILD
@@ -170,23 +191,6 @@ func _build_ui() -> void:
 	# ALWAYS so buttons remain interactive while the gameplay tree is paused
 	_ui_layer.process_mode = PROCESS_MODE_ALWAYS
 	add_child(_ui_layer)
-
-	# Use a ScrollContainer so the panel adapts to variable planet list height
-	var scroll := ScrollContainer.new()
-	scroll.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	scroll.custom_minimum_size = Vector2(560, 680)
-	scroll.offset_top    = -340
-	scroll.offset_left   = -280
-	scroll.offset_bottom =  340
-	scroll.offset_right  =  280
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_ui_layer.add_child(scroll)
-	_panel = scroll  # hide/show the scroll container as our panel
-
-	var vbox := VBoxContainer.new()
-	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_theme_constant_override("separation", 10)
-	scroll.add_child(vbox)
 
 	_prompt_btn = Button.new()
 	_prompt_btn.text = "DOCK STATION [E]"
@@ -200,6 +204,29 @@ func _build_ui() -> void:
 	_prompt_btn.pressed.connect(_on_dock_pressed)
 	_prompt_btn.hide()
 	_ui_layer.add_child(_prompt_btn)
+
+	# Use a ScrollContainer so the panel adapts to variable planet list height
+	_market_scroll = ScrollContainer.new()
+	_market_scroll.process_mode = PROCESS_MODE_ALWAYS
+	_market_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	_market_scroll.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	_market_scroll.custom_minimum_size = Vector2(560, 680)
+	_market_scroll.offset_top    = -340
+	_market_scroll.offset_left   = -280
+	_market_scroll.offset_bottom =  340
+	_market_scroll.offset_right  =  280
+	_market_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_ui_layer.add_child(_market_scroll)
+	_panel = _market_scroll
+
+	var vbox := VBoxContainer.new()
+	vbox.process_mode = PROCESS_MODE_ALWAYS
+	vbox.mouse_filter = Control.MOUSE_FILTER_PASS
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_theme_constant_override("separation", 10)
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_theme_constant_override("separation", 10)
+	_market_scroll.add_child(vbox)
 
 	# ---- Title ----
 	var title := Label.new()
@@ -226,29 +253,80 @@ func _build_ui() -> void:
 	_inv_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(_inv_label)
 
-	# ---- Sell ----
-	var sell_btn := Button.new()
-	sell_btn.text = "Sell All Resources"
-	sell_btn.add_theme_font_size_override("font_size", 22)
-	sell_btn.pressed.connect(_on_sell_all)
-	vbox.add_child(sell_btn)
+	# ---- Tabs: MARKET | FORGE ----
+	var tab_row := HBoxContainer.new()
+	tab_row.add_theme_constant_override("separation", 4)
+	tab_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_child(tab_row)
 
-	vbox.add_child(HSeparator.new())
+	for tab_i in range(2):
+		var tab_lbl: String = ["  MARKET  ", "  FORGE  "][tab_i]
+		var tb: Button = Button.new()
+		tb.text = tab_lbl
+		tb.add_theme_font_size_override("font_size", 20)
+		tb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var captured_i: int = tab_i
+		tb.pressed.connect(func() -> void: _switch_tab(captured_i))
+		tab_row.add_child(tb)
+		_tab_btns.append(tb)
 
-	# ---- Forge ----
+	# ======================== MARKET TAB ========================
+	_tab_market_panel = VBoxContainer.new()
+	_tab_market_panel.add_theme_constant_override("separation", 8)
+	_tab_market_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_child(_tab_market_panel)
+
+	_market_status = Label.new()
+	_market_status.text = ""
+	_market_status.add_theme_font_size_override("font_size", 15)
+	_market_status.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+	_market_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_market_status.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_tab_market_panel.add_child(_market_status)
+
+	# Column header row
+	var header_row := HBoxContainer.new()
+	header_row.add_theme_constant_override("separation", 4)
+	_tab_market_panel.add_child(header_row)
+	for col_text in ["Resource", "Held", "Sell", "Buy"]:
+		var h := Label.new()
+		h.text = col_text
+		h.add_theme_font_size_override("font_size", 13)
+		h.add_theme_color_override("font_color", Color(0.5, 0.5, 0.55))
+		h.size_flags_horizontal = Control.SIZE_EXPAND_FILL if col_text == "Resource" else Control.SIZE_SHRINK_CENTER
+		h.custom_minimum_size.x = 90 if col_text == "Resource" else 58
+		header_row.add_child(h)
+
+	_market_rows_vbox = VBoxContainer.new()
+	_market_rows_vbox.add_theme_constant_override("separation", 4)
+	_tab_market_panel.add_child(_market_rows_vbox)
+
+	var sell_all_btn := Button.new()
+	sell_all_btn.text = "Sell ALL Resources"
+	sell_all_btn.add_theme_font_size_override("font_size", 20)
+	sell_all_btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+	sell_all_btn.pressed.connect(_on_sell_all)
+	_tab_market_panel.add_child(sell_all_btn)
+
+	# ======================== FORGE TAB ========================
+	_tab_forge_panel = VBoxContainer.new()
+	_tab_forge_panel.add_theme_constant_override("separation", 8)
+	_tab_forge_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_child(_tab_forge_panel)
+
 	var forge_title := Label.new()
-	forge_title.text = "— FORGE PLANET —\nSelect 3 resources to consume"
+	forge_title.text = "— FORGE PLANET —\nDrag 3 resources into the slots"
 	forge_title.add_theme_font_size_override("font_size", 20)
 	forge_title.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
 	forge_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	forge_title.autowrap_mode = TextServer.AUTOWRAP_WORD
-	vbox.add_child(forge_title)
+	_tab_forge_panel.add_child(forge_title)
 
-	# ── Selected slots row ──────────────────────────────────────────────
+	# ── Selected slots row (inside forge tab) ──────────────────────────
 	var slots_row := HBoxContainer.new()
 	slots_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	slots_row.add_theme_constant_override("separation", 6)
-	vbox.add_child(slots_row)
+	_tab_forge_panel.add_child(slots_row)
 
 	for i in range(3):
 		var slot_panel := ForgeSlot.new()
@@ -290,31 +368,31 @@ func _build_ui() -> void:
 	_forge_status.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
 	_forge_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_forge_status.autowrap_mode = TextServer.AUTOWRAP_WORD
-	vbox.add_child(_forge_status)
+	_tab_forge_panel.add_child(_forge_status)
 
-	# ── Resource card grid ──────────────────────────────────────────────
+	# ── Resource card grid (inside forge tab) ──────────────────────────
 	var card_title := Label.new()
 	card_title.text = "Available Resources:"
 	card_title.add_theme_font_size_override("font_size", 16)
 	card_title.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
-	vbox.add_child(card_title)
+	_tab_forge_panel.add_child(card_title)
 
 	_forge_card_grid = GridContainer.new()
 	_forge_card_grid.columns = 3
 	_forge_card_grid.add_theme_constant_override("h_separation", 8)
 	_forge_card_grid.add_theme_constant_override("v_separation", 8)
-	vbox.add_child(_forge_card_grid)
+	_tab_forge_panel.add_child(_forge_card_grid)
 
 	_forge_btn = Button.new()
 	_forge_btn.text = "FORGE PLANET"
 	_forge_btn.add_theme_font_size_override("font_size", 26)
 	_forge_btn.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
 	_forge_btn.pressed.connect(_on_forge_planet)
-	vbox.add_child(_forge_btn)
+	_tab_forge_panel.add_child(_forge_btn)
 
 	vbox.add_child(HSeparator.new())
 
-	# ---- Active Worlds ----
+	# ---- Active Worlds (always visible below tabs) ----
 	_worlds_header = Label.new()
 	_worlds_header.text = "— ACTIVE WORLDS (0/" + str(MAX_PLANETS) + ") —"
 	_worlds_header.add_theme_font_size_override("font_size", 20)
@@ -361,6 +439,7 @@ func _refresh_inv_display() -> void:
 			parts.append(ResourceRegistry.get_abbrev(r) + ":" + str(amt))
 	_inv_label.text = "Inventory: " + ("  ".join(parts) if parts.size() > 0 else "(empty)")
 	_rebuild_forge_cards()
+	_rebuild_market_rows()
 
 func _tier_color(tier: int) -> Color:
 	match tier:
@@ -549,6 +628,10 @@ func _process(delta: float) -> void:
 	if _ring_node:
 		_ring_node.rotate_y(delta * 0.04)
 
+	# GAMEPAD CURSOR: Scroll menu with right stick when UI is visible
+	if _ui_visible:
+		_handle_gamepad_cursor(delta)
+
 	if not _player:
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0:
@@ -569,10 +652,11 @@ func _process(delta: float) -> void:
 				_hide_ui()
 
 func _input(event: InputEvent) -> void:
-	if _ui_visible:
-		if event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
-			_hide_ui()
-			get_viewport().set_input_as_handled()
+	# Only intercept keyboard events when the station UI is open.
+	# Do NOT return early for all events — that blocks button mouse clicks.
+	if _ui_visible and event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
+		_hide_ui()
+		get_viewport().set_input_as_handled()
 		return
 
 	if _in_range and not _ui_visible:
@@ -593,9 +677,16 @@ func _show_ui() -> void:
 	_ui_visible = true
 	_panel.show()
 	_refresh_inv_display()
+	_rebuild_market_rows()
 	_refresh_planets_ui()
 	_forge_status.text = ""
+	_market_status.text = ""
 	_update_slot_display()
+	_switch_tab(0)  # Always open on Market tab
+
+	# GRAB FOCUS for gamepad navigation
+	if _tab_btns.size() > 0:
+		_tab_btns[0].grab_focus()
 	# Hide all gameplay HUD and freeze the world while docked.
 	# Snapshot only nodes that are currently visible so we restore exactly
 	# that set on close — otherwise force-showing children un-hides the
@@ -609,27 +700,72 @@ func _show_ui() -> void:
 		elif "visible" in node and node.visible:
 			node.visible = false
 			_hud_was_visible.append(node)
-	get_tree().paused = true
-	# Enable mouse cursor for UI interaction
-	if _player and _player.has_method("unlock_mouse"):
-		_player.unlock_mouse()
+	# Freeze the player in place WITHOUT pausing the scene tree.
+	# get_tree().paused breaks Godot 4's Viewport GUI event routing,
+	# preventing all button clicks from registering.
+	if _player:
+		_player.set_physics_process(false)
+		_player.set_process(false)
+		if _player.has_method("unlock_mouse"):
+			_player.unlock_mouse()
 
 func _hide_ui() -> void:
 	_ui_visible = false
 	_panel.hide()
 	if _in_range:
 		_prompt_btn.show()
-
-	# Restore gameplay HUD and unpause — only the nodes WE hid, so the
-	# diag overlay / debug suite / anything else stays hidden if it was.
-	get_tree().paused = false
+	# Restore player movement and HUD.
+	if _player:
+		_player.set_physics_process(true)
+		_player.set_process(true)
+		if _player.has_method("lock_mouse"):
+			_player.lock_mouse()
 	for node in _hud_was_visible:
 		if is_instance_valid(node):
 			node.visible = true
 	_hud_was_visible.clear()
-	# Lock mouse cursor back for gameplay
-	if _player and _player.has_method("lock_mouse"):
-		_player.lock_mouse()
+
+func _switch_tab(idx: int) -> void:
+	_active_tab = idx
+	if _tab_market_panel: _tab_market_panel.visible = (idx == 0)
+	if _tab_forge_panel:  _tab_forge_panel.visible  = (idx == 1)
+	# Style active tab btn brighter, inactive dimmed
+	for i in _tab_btns.size():
+		var btn: Button = _tab_btns[i]
+		if i == idx:
+			btn.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
+			btn.add_theme_stylebox_override("normal", _tab_active_style())
+		else:
+			btn.add_theme_color_override("font_color", Color(0.5, 0.5, 0.55))
+			btn.remove_theme_stylebox_override("normal")
+
+func _tab_active_style() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.12, 0.14, 0.25)
+	sb.border_color = Color(0.4, 0.8, 1.0)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(4)
+	sb.content_margin_left = 8; sb.content_margin_right = 8
+	sb.content_margin_top = 6;  sb.content_margin_bottom = 6
+	return sb
+
+func _handle_gamepad_cursor(delta: float) -> void:
+	# Right stick scrolls the menu — no warp_mouse (that breaks hover detection)
+	var scroll_y := Input.get_axis("ui_up", "ui_down")
+	if abs(scroll_y) > 0.15 and _market_scroll:
+		_market_scroll.scroll_vertical += int(scroll_y * 1000.0 * delta)
+
+	# Left stick also moves the actual OS mouse cursor for button selection
+	var mx := Input.get_axis("ui_left", "ui_right")
+	var my := Input.get_axis("ui_up", "ui_down")
+	if Vector2(mx, my).length() > 0.15:
+		var vp := get_viewport()
+		var new_pos := vp.get_mouse_position() + Vector2(mx, my) * 1000.0 * delta
+		# Clamp inside viewport
+		new_pos.x = clamp(new_pos.x, 0.0, vp.get_visible_rect().size.x)
+		new_pos.y = clamp(new_pos.y, 0.0, vp.get_visible_rect().size.y)
+		vp.warp_mouse(new_pos)
+
 
 # ---------------------------------------------------------------------------
 # ACTIONS
@@ -648,9 +784,114 @@ func _on_sell_all() -> void:
 			inv.consume(r, amt)
 	if total > 0:
 		econ.add_credits(total)
-		_set_status("Sold for $" + str(total), Color.GREEN)
+		_set_market_status("+$" + str(total) + " — Sold everything!", Color(0.4, 1.0, 0.7))
 	else:
-		_set_status("Nothing to sell.", Color(1.0, 0.5, 0.3))
+		_set_market_status("Nothing to sell.", Color(1.0, 0.5, 0.3))
+	_refresh_inv_display()
+
+func _on_sell_one(resource_type: String) -> void:
+	if not Engine.has_meta("InventoryManager") or not Engine.has_meta("EconomyManager"): return
+	var inv = Engine.get_meta("InventoryManager")
+	var econ = Engine.get_meta("EconomyManager")
+	if inv.get_amount(resource_type) <= 0:
+		_set_market_status("None in inventory.", Color(1.0, 0.5, 0.3))
+		return
+	var sell_price: int = ResourceRegistry.get_value(resource_type)
+	inv.consume(resource_type, 1)
+	econ.add_credits(sell_price)
+	_set_market_status("+$" + str(sell_price) + " for " + resource_type, Color(0.4, 1.0, 0.7))
+	_refresh_inv_display()
+
+func _on_buy_one(resource_type: String) -> void:
+	if not Engine.has_meta("InventoryManager") or not Engine.has_meta("EconomyManager"): return
+	var inv = Engine.get_meta("InventoryManager")
+	var econ = Engine.get_meta("EconomyManager")
+	var buy_price: int = int(ResourceRegistry.get_value(resource_type) * BUY_MARKUP)
+	if econ.credits < buy_price:
+		_set_market_status("Need $" + str(buy_price) + " to buy " + resource_type, Color(1.0, 0.5, 0.3))
+		return
+	econ.credits -= buy_price
+	econ.emit_signal("currency_changed", econ.credits)
+	inv.add(resource_type, 1)
+	_set_market_status("-$" + str(buy_price) + " — Bought " + resource_type, Color(1.0, 0.85, 0.3))
+	_refresh_inv_display()
+
+func _set_market_status(msg: String, col: Color) -> void:
+	if _market_status:
+		_market_status.text = msg
+		_market_status.add_theme_color_override("font_color", col)
+
+func _rebuild_market_rows() -> void:
+	if not _market_rows_vbox: return
+	for c in _market_rows_vbox.get_children(): c.queue_free()
+
+	var inv_ref = Engine.get_meta("InventoryManager") if Engine.has_meta("InventoryManager") else null
+	var econ_ref = Engine.get_meta("EconomyManager") if Engine.has_meta("EconomyManager") else null
+
+	for r in ResourceRegistry.all_names():
+		var tier: int = ResourceRegistry.get_tier(r)
+		var rarity_col: Color = _tier_color(tier)
+		var sell_val: int = ResourceRegistry.get_value(r)
+		var buy_price: int = int(sell_val * BUY_MARKUP)
+		var held: int = inv_ref.get_amount(r) if inv_ref else 0
+		var credits_val: int = econ_ref.credits if econ_ref else 0
+
+		var row: HBoxContainer = HBoxContainer.new()
+		row.add_theme_constant_override("separation", 4)
+		_market_rows_vbox.add_child(row)
+
+		# ── Resource name badge ────────────────────────────────────────
+		var name_panel: PanelContainer = PanelContainer.new()
+		var name_sb: StyleBoxFlat = StyleBoxFlat.new()
+		name_sb.bg_color = rarity_col.darkened(0.72)
+		name_sb.border_color = rarity_col.darkened(0.2)
+		name_sb.set_border_width_all(1)
+		name_sb.set_corner_radius_all(4)
+		name_sb.content_margin_left = 6; name_sb.content_margin_right = 6
+		name_sb.content_margin_top = 2;  name_sb.content_margin_bottom = 2
+		name_panel.add_theme_stylebox_override("panel", name_sb)
+		name_panel.custom_minimum_size = Vector2(90, 30)
+		name_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var name_lbl := Label.new()
+		name_lbl.text = r
+		name_lbl.add_theme_font_size_override("font_size", 13)
+		name_lbl.add_theme_color_override("font_color", rarity_col)
+		name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		name_panel.add_child(name_lbl)
+		row.add_child(name_panel)
+
+		# ── Held qty ──────────────────────────────────────────────────
+		var held_lbl := Label.new()
+		held_lbl.text = "x" + str(held)
+		held_lbl.add_theme_font_size_override("font_size", 14)
+		held_lbl.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0) if held > 0 else Color(0.4, 0.4, 0.4))
+		held_lbl.custom_minimum_size = Vector2(46, 0)
+		held_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		held_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		row.add_child(held_lbl)
+
+		# ── Sell button ───────────────────────────────────────────────
+		var sell_btn: Button = Button.new()
+		sell_btn.text = "$" + str(sell_val)
+		sell_btn.add_theme_font_size_override("font_size", 13)
+		sell_btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+		sell_btn.custom_minimum_size = Vector2(58, 28)
+		sell_btn.disabled = held <= 0
+		var sell_r: String = r  # capture
+		sell_btn.pressed.connect(func() -> void: _on_sell_one(sell_r))
+		row.add_child(sell_btn)
+
+		# ── Buy button ────────────────────────────────────────────────
+		var buy_btn: Button = Button.new()
+		buy_btn.text = "$" + str(buy_price)
+		buy_btn.add_theme_font_size_override("font_size", 13)
+		buy_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
+		buy_btn.custom_minimum_size = Vector2(58, 28)
+		buy_btn.disabled = credits_val < buy_price
+		var buy_r: String = r  # capture
+		buy_btn.pressed.connect(func() -> void: _on_buy_one(buy_r))
+		row.add_child(buy_btn)
+
 
 func _on_forge_planet() -> void:
 	_set_status("", Color(1.0, 0.5, 0.3))
@@ -705,19 +946,35 @@ func _on_forge_planet() -> void:
 		var planet_node := _spawn_planet_node(seed_val, pos, p_name)
 		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
 		planet_node.set("planet_resources", planet_res)
-		_active_planets.append({node = planet_node, r1 = r1, r2 = r2, r3 = r3})
+		var rank: Dictionary = PlanetSeedKitchen.rank_planet(r1, r2, r3, seed_val)
+		planet_node.set("planet_rank", String(rank.get("label", "")))
+		# (Impostor activation is deferred to the cinematic — the planet stays
+		# hidden until the flash peaks and is revealed there.)
+
+		# Record to persistent registry
+		_active_planets.append({node=planet_node, r1=r1, r2=r2, r3=r3})
+		
+		# ACE UNIVERSE SYNC: Notify that a planet was added
+		planet_forged.emit(_active_planets.size())
+		
 		_refresh_planets_ui()
 
 		# 3. Clear selection for next forge
 		_forge_selected.clear()
 		_update_slot_display()
 
-		# 4. Trigger Dramatic Forge Cinematic
+		# 4. Trigger Dramatic Forge Cinematic — pass the colours of the three
+		# forged resources so the converging motes match what was consumed.
 		var cine_script = load("res://src/ui/ForgeCinematic.gd")
 		var cinematic = cine_script.new()
 		get_tree().root.add_child(cinematic)
 
-		cinematic.setup(pos, _player, planet_node)
+		var mote_cols: Array = [
+			ResourceRegistry.get_color(r1),
+			ResourceRegistry.get_color(r2),
+			ResourceRegistry.get_color(r3),
+		]
+		cinematic.setup(pos, _player, planet_node, mote_cols)
 
 		cinematic.completed.connect(func():
 			_cinematic_active = false
@@ -758,27 +1015,29 @@ func _format_cost(cost: Dictionary) -> String:
 	return ",  ".join(parts)
 
 func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String) -> Node3D:
+	print("--- FORGE: Spawning Planet Node at %s ---" % str(custom_pos))
 	var pg_script = load("res://src/world/PlanetGen.gd")
 	if not pg_script:
 		return Node3D.new()
 
-	var base_radius: float = 600000.0 + float(seed_val % 1200) * 500.0
+	var base_radius: float = 60000.0 + float(seed_val % 800) * 60.0
 	if seed_val % 11 == 0:
-		base_radius *= 1.4
+		base_radius *= 1.3
 
 	var planet := Node3D.new()
 	planet.set_script(pg_script)
 	planet.name = "Planet_" + custom_name.replace(" ", "_")
 	planet.set("planet_seed", seed_val)
 	planet.set("planet_radius", base_radius)
+	planet.add_to_group("Planet")
+	planet.add_to_group("ForgedPlanet")
 
 	var world_root = get_tree().get_nodes_in_group("WorldRoot")
+	planet.global_position = custom_pos
 	if world_root.size() > 0:
+		print("--- FORGE: Attaching Planet [%s] to WorldRoot at %s ---" % [planet.name, str(custom_pos)])
 		world_root[0].add_child(planet)
 	else:
 		get_tree().root.add_child(planet)
 
-	planet.global_position = custom_pos
-	planet.add_to_group("Planet")
-	planet.add_to_group("ForgedPlanet")
 	return planet

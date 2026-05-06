@@ -29,7 +29,7 @@ func _ready() -> void:
 	add_to_group("Destructible")
 	# Layer 6 (bit 32): dedicated proxy layer so bolt raycasts bypass terrain (layer 1).
 	# Terrain and proxies on the same layer caused terrain to intercept first on mobile.
-	collision_layer = 32
+	collision_layer = 1 << 5 # Layer 6
 	collision_mask = 0
 
 func setup(mmis: Array, idx: int, res_type: String) -> void:
@@ -38,6 +38,7 @@ func setup(mmis: Array, idx: int, res_type: String) -> void:
 	resource_type = res_type
 
 func take_damage(_amount: float) -> void:
+	print("--- PROCEDURALIST: Proxy Hit! health=%d ---" % [_health - 1])
 	_health -= 1
 	health = _health
 	if _health <= 0:

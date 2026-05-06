@@ -6,7 +6,7 @@ extends Node3D
 
 @export var belt_seed: int = 9999
 @export var mmi_count: int = 14000 
-@export var phys_count: int = 500  
+@export var phys_count: int = 250  
 @export var inner_radius: float = 1400000.0
 @export var outer_radius: float = 2000000.0
 @export var thickness: float = 20000.0 
@@ -25,10 +25,10 @@ var player: Node3D
 var _health_component_script: Script = null
 var _mine_component_script: Script = null
 var _asteroid_script: Script = null
-var mobile_perf: bool = false
+var _cached_cel_mat: ShaderMaterial = null
 
 # LOD CONSTANTS
-const PHYSICS_LOD_DIST: float = 80000.0 # 80km - asteroids beyond this lose collision
+const PHYSICS_LOD_DIST: float = 40000.0 # 40km - Tightened for M1 performance
 const HIDE_LOD_DIST: float = 800000.0  # 800km - individual rocks hide and let MMI take over
 const STELLAR_CUTOFF: float = 4000000.0 # 4,000km - Transition to deep space hibernation
 
@@ -37,12 +37,6 @@ var _is_spawning_phys: bool = true
 var _rng: RandomNumberGenerator
 
 func _ready() -> void:
-	if mobile_perf:
-		# MOBILE: Tighter caps for iPhone 12-class hardware. Each MMI instance
-		# still costs per-frame transform I/O, and every phys rock is a
-		# StaticBody3D with its own CollisionShape3D.
-		mmi_count = min(mmi_count, 5000)
-		phys_count = min(phys_count, 150)
 	rock_mesh_low = _build_faceted_rock_mesh(4) # Pyramid / Minimal
 	rock_mesh_med = _build_faceted_rock_mesh(8) # Standard
 	rock_mesh_high = _build_faceted_rock_mesh(12) # High-Fidelity
@@ -60,12 +54,17 @@ func _spawn_deterministic_belt() -> void:
 	_rng.seed = belt_seed
 	
 	# SHARED MATERIALS
-	var mmi_mat = ShaderMaterial.new(); mmi_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
-	var phys_mat = ShaderMaterial.new(); phys_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
-	var outline_mat = ShaderMaterial.new(); outline_mat.shader = load("res://src/shaders/outline.gdshader")
-	outline_mat.set_shader_parameter("outline_width", 1.5)
-	outline_mat.set_shader_parameter("outline_color", Color.BLACK)
-	mmi_mat.next_pass = outline_mat; phys_mat.next_pass = outline_mat
+	if not _cached_cel_mat:
+		_cached_cel_mat = ShaderMaterial.new()
+		_cached_cel_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
+		var outline = ShaderMaterial.new()
+		outline.shader = load("res://src/shaders/outline.gdshader")
+		outline.set_shader_parameter("outline_width", 1.2)
+		outline.set_shader_parameter("outline_color", Color.BLACK)
+		_cached_cel_mat.next_pass = outline
+	
+	var mmi_mat = _cached_cel_mat.duplicate()
+	var phys_mat = _cached_cel_mat.duplicate()
 	
 	# TIER 1: DISTANT IMPOSTOR RING (Low Poly, 14k)
 	mmi_back = MultiMeshInstance3D.new()
@@ -161,19 +160,19 @@ func _process(delta: float) -> void:
 	if dist_to_planet > STELLAR_CUTOFF:
 		return
 
+	# ACE: Pre-calculate local player position to avoid expensive global coordinate lookups in the loop
+	var p_pos_local = to_local(p_pos)
+	
 	# PERFORMANCE: Update a smaller slice each frame so the belt LOD stays smooth
-	# without turning per-frame visibility bookkeeping into a spike.
-	# MOBILE: Tighter batch (16) — with a 30fps cap we have twice as much wall
-	# time per frame but half as many frames per LOD sweep. 16/frame still
-	# sweeps all 150 rocks in <10 frames.
-	var final_batch = 16 if mobile_perf else (64 if dist_to_planet < 2200000.0 else 32)
+	# ACE: Tightened batch for M1 — 24 asteroids per frame is sufficient for visual consistency.
+	var final_batch = 24
 	for k in range(final_batch):
 		if asteroids.is_empty(): break
 		proc_idx = (proc_idx + 1) % asteroids.size()
 		var a = asteroids[proc_idx]
 		if not is_instance_valid(a): continue
 
-		var dist_sq = a.global_position.distance_squared_to(p_pos)
+		var dist_sq = a.position.distance_squared_to(p_pos_local)
 		var coll = coll_nodes[proc_idx]
 
 		# MANUAL LOD STATE MACHINE
@@ -194,7 +193,7 @@ func _process(delta: float) -> void:
 
 func _process_physical_spawning() -> void:
 	# ACE: Spawn 50 rocks per frame to eliminate the startup freeze
-	var batch = 24 if mobile_perf else 50
+	var batch = 50
 	for i in range(batch):
 		if _spawn_idx >= phys_count:
 			_is_spawning_phys = false

@@ -7,6 +7,10 @@ const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
 # A deterministic, low-poly mineral deposit that responds to projectile impacts.
 
 @export var resource_type: String = "Copper"
+# Whether this deposit emits its own glow + omni light. Defaults true for the
+# legacy / deep-space mineral spawn path, overridden to false for plain flora
+# (Wood / Stone / Carbon Fiber) so every planet doesn't have glowing trees.
+@export var glows: bool = true
 var health: float = 3.0 # 3-12 hits depending on type
 var max_health: float = 3.0 # ACE: Healthbar scaling
 var flash_timer: float = 0.0 # ACE: Damage feedback persistence
@@ -34,8 +38,23 @@ static var _shared_shapes: Dictionary = {}    # size_bucket(int) → CylinderSha
 const _MESH_UNIT_SIZE: float = 1.0            # unit-scale octahedron geometry
 
 func _ready() -> void:
+	# ACE: Robustly resolve the planetary root node by traversing parents until we find the PlanetGen node
+	var planet_root = get_parent()
+	var trace = ""
+	while is_instance_valid(planet_root):
+		trace += " -> " + planet_root.name + " (" + str(planet_root.get_groups()) + ")"
+		if planet_root.is_in_group("Planet"):
+			break
+		planet_root = planet_root.get_parent()
+	
+	if not is_instance_valid(planet_root) or not planet_root.is_in_group("Planet"):
+		print("--- PROCEDURALIST: Mineral [%s] FAILED to find Planet. Trace: %s ---" % [name, trace])
+	
+	var p_pos = planet_root.global_position if is_instance_valid(planet_root) else Vector3.ZERO
+	var p_name = planet_root.name if is_instance_valid(planet_root) else "NONE"
+	print("--- PROCEDURALIST: Mineral Spawned [%s] at %s (Planet [%s] at %s) ---" % [resource_type, str(global_position), p_name, str(p_pos)])
 	add_to_group("Mineable") # ACE: Absolute identification for projectiles
-	collision_layer = 4       # Layer 4: mineable props (scanned by main laser ray)
+	collision_layer = 1 << 2 # Layer 3
 	collision_mask = 0        # Minerals don't need to detect anything themselves
 	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
 	# Health scales with resource tier — rarer deposits take more shots
@@ -81,19 +100,22 @@ func _generate_low_poly_node() -> void:
 	# (Sharing the material would synchronise every mineral's pulse — distracting.)
 	var mat = StandardMaterial3D.new()
 	mat.albedo_color = col
-	mat.metallic = 1.0
-	mat.roughness = 0.02
+	mat.metallic = 1.0 if glows else 0.3
+	mat.roughness = 0.02 if glows else 0.85
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	mat.emission_enabled = true
-	mat.emission = col * 1.5
-	mat.emission_energy_multiplier = 0.6
+	# Non-glowing flora props read as natural surface scenery — no emission, no
+	# point light. Only "real" mineral deposits keep the gem-like glint behaviour.
+	mat.emission_enabled = glows
+	if glows:
+		mat.emission = col * 1.0
+		mat.emission_energy_multiplier = 0.25
 	mesh_inst.material_override = mat
 
-	if not _mobile_perf:
+	if glows and not _mobile_perf:
 		var light = OmniLight3D.new()
 		light.light_color = col
-		light.light_energy = 0.7
-		light.omni_range = size * 3.5
+		light.light_energy = 0.4
+		light.omni_range = size * 2.5
 		add_child(light)
 
 	add_child(mesh_inst)
@@ -102,8 +124,8 @@ func _generate_low_poly_node() -> void:
 	# Collision shape — flora gets a larger radius for easier shooting.
 	var shape = CollisionShape3D.new()
 	shape.shape = _get_or_build_shape(size, is_flora)
-	# Center the cylinder at object midpoint
-	shape.position = Vector3(0, size * 2.5, 0)
+	# Center the cylinder at object midpoint — Shifted UP to ensure visibility above terrain
+	shape.position = Vector3(0, size * 3.5, 0)
 	add_child(shape)
 
 # -------------------------------------------------------------------
@@ -243,8 +265,8 @@ static func _get_or_build_shape(size: float, is_flora: bool = false) -> Cylinder
 		cyl.height = float(bucket) * 8.0
 		cyl.radius = float(bucket) * 4.0
 	else:
-		cyl.height = float(bucket) * 5.0
-		cyl.radius = float(bucket) * 1.1
+		cyl.height = float(bucket) * 8.0
+		cyl.radius = float(bucket) * 2.2
 	_shared_shapes[key] = cyl
 	return cyl
 
@@ -252,7 +274,7 @@ func _get_resource_color() -> Color:
 	return ResourceRegistry.get_color(resource_type)
 
 func take_damage(_amount: float) -> void:
-	# print("[MINERAL] Hit Detected! Health: ", health - 1.0)
+	print("--- PROCEDURALIST: Mineral Hit! [%s] health=%.1f ---" % [resource_type, health - 1.0])
 	flash_timer = 0.2 # ACE: Trigger a 0.2s high-energy flash
 	
 	health -= 1.0
@@ -282,11 +304,11 @@ func _process(_delta: float) -> void:
 
 	if mesh_inst and mesh_inst.material_override:
 		if flash_timer > 0.0:
-			# ACE: Damage flash takes priority over shimmmery glint
-			mesh_inst.material_override.emission_energy_multiplier = 45.0
-		else:
-			# ACE: normal shimmery glint
-			mesh_inst.material_override.emission_energy_multiplier = 0.2 + (glint * 40.0)
+			# ACE: Damage flash takes priority — keep loud so hits read clearly
+			mesh_inst.material_override.emission_energy_multiplier = 12.0
+		elif glows:
+			# Subtle gem-like shimmer for real deposits; non-glowing flora skips this entirely.
+			mesh_inst.material_override.emission_energy_multiplier = 0.15 + (glint * 6.0)
 
 	if hud_sprite:
 		var cam = get_viewport().get_camera_3d()

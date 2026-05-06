@@ -419,16 +419,11 @@ func _setup_hardened_diag_hud() -> void:
 			inv_label.text = "  ".join(parts)
 		inv.inventory_changed.connect(_refresh_inv)
 
-	# NAVIGATION BEACON: Compact corner widget — bearing + distance to nearest station.
-	# Positioned below RECENTER GYRO (which ends at roughly y=90 on most screens).
-	var beacon_script = load("res://src/ui/NavBeacon.gd")
-	if beacon_script:
-		var beacon = Control.new()
-		beacon.set_script(beacon_script)
-		beacon.set_anchors_preset(Control.PRESET_TOP_LEFT)
-		beacon.custom_minimum_size = Vector2(200, 90)
-		beacon.position = Vector2(8, 100)
-		hud_layer.add_child(beacon)
+	# Station-guide NavBeacon widget removed — the screen-space POI HUD
+	# below renders bearing + distance markers for every station / planet
+	# directly on screen, so the duplicate top-left corner widget was
+	# redundant clutter.  Kept the script file (NavBeacon.gd) in place
+	# in case the widget is wanted back later.
 
 	# SCREEN-SPACE POI HUD: NMS-style markers for all stations and planets.
 	var poi_hud_script = load("res://src/ui/ScreenPOIHUD.gd")

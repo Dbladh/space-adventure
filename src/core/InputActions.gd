@@ -20,14 +20,23 @@ const WARP       := "warp"
 const ROLL_LEFT  := "roll_left"
 const ROLL_RIGHT := "roll_right"
 const PAUSE      := "pause"
+# Built-in Godot UI actions — let the player rebind which gamepad button
+# confirms a menu selection ("Confirm" → ui_accept) and which one cancels
+# / closes ("Cancel / Back" → ui_cancel).  The keyboard fallbacks for
+# these (Enter/Space and Escape) stay attached so a rebind only edits
+# the joypad-button event.
+const UI_CONFIRM := "ui_accept"
+const UI_CANCEL  := "ui_cancel"
 
 # label, action_name, default joy button, default key
 const REBINDABLE: Array = [
-	{"label": "Fire",       "action": FIRE,       "joy": JOY_BUTTON_Y,              "key": KEY_F},
-	{"label": "Warp / Boost","action": WARP,      "joy": JOY_BUTTON_A,              "key": KEY_SHIFT},
-	{"label": "Roll Left",  "action": ROLL_LEFT,  "joy": JOY_BUTTON_LEFT_SHOULDER,  "key": KEY_Q},
-	{"label": "Roll Right", "action": ROLL_RIGHT, "joy": JOY_BUTTON_RIGHT_SHOULDER, "key": KEY_E},
-	{"label": "Pause",      "action": PAUSE,      "joy": JOY_BUTTON_START,          "key": KEY_ESCAPE},
+	{"label": "Fire",         "action": FIRE,       "joy": JOY_BUTTON_Y,              "key": KEY_F},
+	{"label": "Warp / Boost", "action": WARP,       "joy": JOY_BUTTON_A,              "key": KEY_SHIFT},
+	{"label": "Roll Left",    "action": ROLL_LEFT,  "joy": JOY_BUTTON_LEFT_SHOULDER,  "key": KEY_Q},
+	{"label": "Roll Right",   "action": ROLL_RIGHT, "joy": JOY_BUTTON_RIGHT_SHOULDER, "key": KEY_E},
+	{"label": "Pause",        "action": PAUSE,      "joy": JOY_BUTTON_START,          "key": KEY_ESCAPE},
+	{"label": "Confirm",      "action": UI_CONFIRM, "joy": JOY_BUTTON_A,              "key": KEY_ENTER},
+	{"label": "Cancel / Back","action": UI_CANCEL,  "joy": JOY_BUTTON_B,              "key": KEY_ESCAPE},
 ]
 
 

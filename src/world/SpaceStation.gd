@@ -699,6 +699,15 @@ func _process(delta: float) -> void:
 			if _ui_visible:
 				_hide_ui()
 
+	# Hide the DOCK prompt while the pause menu is up so the prompt
+	# button can't steal focus from the pause-menu Resume button.
+	# (process_mode = ALWAYS means this node still ticks during pause.)
+	if _prompt_btn.visible and get_tree().paused:
+		_prompt_btn.hide()
+	elif not _prompt_btn.visible and _in_range and not _ui_visible \
+			and not _cinematic_active and not get_tree().paused:
+		_prompt_btn.show()
+
 func _input(event: InputEvent) -> void:
 	# Close-menu input — Escape OR gamepad B (ui_cancel) OR gamepad START.
 	# Pre-empts the global pause handler so pressing pause-while-docked

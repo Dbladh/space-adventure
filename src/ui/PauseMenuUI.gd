@@ -14,6 +14,8 @@ signal resume_requested()
 signal rebind_requested()
 signal quit_requested()
 
+var _resume_btn: Button = null
+
 func _ready() -> void:
 	process_mode = PROCESS_MODE_ALWAYS
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -44,9 +46,9 @@ func _ready() -> void:
 
 	var pad := Control.new(); pad.custom_minimum_size = Vector2(0, 12); vb.add_child(pad)
 
-	var resume_btn := _make_btn("RESUME")
-	resume_btn.pressed.connect(func() -> void: resume_requested.emit())
-	vb.add_child(resume_btn)
+	_resume_btn = _make_btn("RESUME")
+	_resume_btn.pressed.connect(func() -> void: resume_requested.emit())
+	vb.add_child(_resume_btn)
 
 	var rebind_btn := _make_btn("REBIND CONTROLS")
 	rebind_btn.pressed.connect(func() -> void: rebind_requested.emit())
@@ -56,7 +58,17 @@ func _ready() -> void:
 	quit_btn.pressed.connect(func() -> void: quit_requested.emit())
 	vb.add_child(quit_btn)
 
-	resume_btn.call_deferred("grab_focus")
+	# Re-grab focus every time the menu becomes visible.  _ready only
+	# fires once, but we hide/show this node across the session, so a
+	# one-time grab_focus left the controller stranded after the first
+	# unpause.
+	visibility_changed.connect(_on_visibility_changed)
+	_on_visibility_changed()
+
+
+func _on_visibility_changed() -> void:
+	if visible and is_instance_valid(_resume_btn):
+		_resume_btn.call_deferred("grab_focus")
 
 
 func _make_btn(text: String) -> Button:

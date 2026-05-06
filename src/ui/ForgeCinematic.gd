@@ -81,6 +81,22 @@ static func _ease_out_elastic(x: float) -> float:
 	return pow(2.0, -10.0 * x) * sin((x * 10.0 - 0.75) * c4) + 1.0
 
 
+# Compose a "looking from origin toward target" basis with a world-up
+# reference (falling back to RIGHT if the look direction is colinear
+# with UP).  Pulled out so _process can recompute end-bases per frame
+# from the planet's CURRENT global_position rather than relying on a
+# value cached at setup time — that cache went stale when the
+# floating-origin system shifted WorldRoot during the cinematic.
+static func _look_basis_at(origin: Vector3, target: Vector3) -> Basis:
+	var dir: Vector3 = target - origin
+	if dir.length() < 0.001:
+		return Basis()
+	var up := Vector3.UP
+	if abs(up.dot(dir.normalized())) > 0.99:
+		up = Vector3.RIGHT
+	return Transform3D(Basis(), origin).looking_at(target, up).basis
+
+
 func setup(target_pos: Vector3, player_node: Node3D, planet_node: Node3D, _ignored = null) -> void:
 	_target_pos = target_pos
 	_player_node = player_node
@@ -262,14 +278,23 @@ func _process(_engine_delta: float) -> void:
 		_finish()
 		return
 
+	# Live target — re-read planet's current global_position each frame so
+	# floating-origin shifts and any post-setup planet movement don't
+	# leave the camera looking at empty space where the planet used to be.
+	var target: Vector3 = _target_pos
+	if is_instance_valid(_planet_node):
+		target = _planet_node.global_position
+
 	# ── PLAYER SHIP ROTATION ─────────────────────────────────────────
 	# Rotate the ship's basis from its start orientation to facing the
 	# planet during the rotate-in phase, then hold.  We don't rotate it
 	# back at the end — the player should end the cinematic already
 	# pointed at their new world.
 	if is_instance_valid(_player_node):
+		var ship_pos_now: Vector3 = _player_node.global_position
+		var ship_end_basis_live: Basis = _look_basis_at(ship_pos_now, target)
 		var ship_q_start: Quaternion = _ship_start_basis.get_rotation_quaternion()
-		var ship_q_end: Quaternion = _ship_end_basis.get_rotation_quaternion()
+		var ship_q_end: Quaternion = ship_end_basis_live.get_rotation_quaternion()
 		if ship_q_start.dot(ship_q_end) < 0.0:
 			ship_q_end = -ship_q_end
 		var ship_basis: Basis
@@ -278,15 +303,17 @@ func _process(_engine_delta: float) -> void:
 			ship_basis = Basis(ship_q_start.slerp(ship_q_end, w))
 		else:
 			ship_basis = Basis(ship_q_end)
-		var ship_pos: Vector3 = _player_node.global_position
-		_player_node.global_transform = Transform3D(ship_basis, ship_pos)
+		_player_node.global_transform = Transform3D(ship_basis, ship_pos_now)
 
 	# Cache origin (camera parent may drift slightly).
 	var origin: Vector3 = _camera.global_transform.origin
 
 	# ── BASIS ────────────────────────────────────────────────────────
+	# End basis is also recomputed live so the camera tracks the planet
+	# even if its world position changes mid-cinematic.
+	var end_basis_live: Basis = _look_basis_at(origin, target)
 	var q_start: Quaternion = _start_basis.get_rotation_quaternion()
-	var q_end: Quaternion = _end_basis.get_rotation_quaternion()
+	var q_end: Quaternion = end_basis_live.get_rotation_quaternion()
 	if q_start.dot(q_end) < 0.0:
 		q_end = -q_end
 

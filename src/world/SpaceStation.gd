@@ -1033,11 +1033,17 @@ func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String)
 	planet.add_to_group("ForgedPlanet")
 
 	var world_root = get_tree().get_nodes_in_group("WorldRoot")
-	planet.global_position = custom_pos
 	if world_root.size() > 0:
 		print("--- FORGE: Attaching Planet [%s] to WorldRoot at %s ---" % [planet.name, str(custom_pos)])
 		world_root[0].add_child(planet)
 	else:
 		get_tree().root.add_child(planet)
+	# Set global_position AFTER reparenting so Godot computes the correct
+	# local offset against WorldRoot's transform.  Setting it before
+	# add_child treated custom_pos as a local position, so once the
+	# floating-origin system shifted WorldRoot to track the player, every
+	# new planet landed at (WorldRoot.global_position + custom_pos)
+	# instead of custom_pos — the off-target forge cinematic camera.
+	planet.global_position = custom_pos
 
 	return planet

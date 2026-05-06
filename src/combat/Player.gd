@@ -1398,12 +1398,11 @@ func _process(delta: float) -> void:
 			var enemies_pool = get_tree().get_nodes_in_group("Enemies") if is_inside_tree() else []
 			if is_inside_tree():
 				# Enemies use tight cone (~11°); mineable/passive use wider cone (~28°)
-				# Lock-on range matches actual bolt reach so the player can never
-				# lock onto something a bolt can't hit.  Bolt peak speed 60 km/s
-				# × 4 s lifetime ≈ 220 km effective range; lock-on capped at
-				# 200 km gives a safety margin below that.
-				const RADAR_RANGE_SQ := 200000.0 * 200000.0
-				const LOCK_ON_RANGE_SQ := 200000.0 * 200000.0
+				# Long-range asteroid mining: lock-on capped at 2000 km, kept
+				# under bolt max travel (peak 600 km/s × 5 s ≈ 2700 km) so the
+				# player can never lock onto something a bolt can't reach.
+				const RADAR_RANGE_SQ := 2000000.0 * 2000000.0
+				const LOCK_ON_RANGE_SQ := 2000000.0 * 2000000.0
 				var highest_dot = 0.95 if _mobile_perf else 0.98
 
 				var candidate_pools = [
@@ -1548,12 +1547,11 @@ func _process(delta: float) -> void:
 	if cam_spring: cam_spring.position = Vector3(0, cam_base_y, 0) + recoil_v + turb_v + reentry_v + shake_v
 	
 	# BOLT POOL UPDATE: Relativistic Physics Hardening.
-	# Range significantly extended (peak 35 km/s → 60 km/s, lifetime 2.5 → 4.0 s)
-	# so asteroids can be engaged from much greater distances. Effective max
-	# travel ≈ 220 km. Lock-on range below is kept just under that so the player
-	# can never lock onto something a bolt can't reach.
-	const BOLT_SPEED: float = 25000.0
-	const BOLT_LIFETIME: float = 4.0
+	# Range pushed for long-range asteroid mining: peak 600 km/s, lifetime 5 s
+	# → effective max travel ~2700 km.  Lock-on capped at 2000 km gives a safe
+	# margin below that, so anything lockable is reachable.
+	const BOLT_SPEED: float = 600000.0
+	const BOLT_LIFETIME: float = 5.0
 	var space_state = get_world_3d().direct_space_state
 
 	var i = live_bolts.size() - 1
@@ -1569,13 +1567,13 @@ func _process(delta: float) -> void:
 			i -= 1
 			continue
 
-		# 9,000m/s start (relative) ensures the discharge ignites AT THE MUZZLE in Frame 1.
-		# 60,000m/s peak gives the long-range feel for asteroid engagement.
+		# 9,000m/s start ensures the discharge ignites AT THE MUZZLE in frame 1,
+		# then accelerates over 0.6 s to BOLT_SPEED (peak velocity).
 		var accel_t = clamp(b["life"] / 0.6, 0.0, 1.0)
 
-		# ACE TUNER: non-linear quadratic ramp for 'Muzzle Ignite' feel.
+		# Quadratic ramp for 'muzzle ignite' feel.
 		var ease_t = accel_t * accel_t
-		var current_rel_speed = lerp(9000.0, 60000.0, ease_t)
+		var current_rel_speed = lerp(9000.0, BOLT_SPEED, ease_t)
 
 		# ACE SMART-LOCK HOMING: Fired bolts track the target mid-flight.
 		# Cone widened (0.98 → 0.80, ~37° window) and turn rate ~5× faster so

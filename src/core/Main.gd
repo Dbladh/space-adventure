@@ -22,7 +22,8 @@ var benchmark_manager: Node = null
 var _mineral_spawn_queue: Array = []
 static var instance: Node = null
 var player_node: Node3D
-var _pause_overlay: ColorRect = null
+var _pause_overlay: Control = null  # PauseMenuUI script attached
+var _rebind_ui: Control = null      # transient RebindUI instance
 var _is_loading: bool = true
 var _load_overlay: ColorRect = null
 var _load_label: Label = null
@@ -42,6 +43,11 @@ func _ready() -> void:
 	instance = self
 	Engine.max_fps = 0  # Uncapped — let the monitor's refresh rate govern
 	print("--- [DIAGNOSTIC] EXECUTING TITAN GENESIS BOOT SEQUENCE ---")
+	# Register remappable input actions (fire/warp/roll_left/roll_right/pause)
+	# with default bindings before any subsystem polls Input.is_action_*.
+	var ia_script: Script = load("res://src/core/InputActions.gd")
+	if ia_script and ia_script.has_method("register_all"):
+		ia_script.call("register_all")
 	_setup_titan_splash()
 	
 	# ECONOMY GENESIS: The Architect's Vault
@@ -444,13 +450,19 @@ func _setup_hardened_diag_hud() -> void:
 		_reset_map_to_corner()
 		map_node.hide() # ACE: Hidden during normal play
 	
-	_pause_overlay = ColorRect.new()
-	_pause_overlay.color = Color(0, 0, 0, 0.55)
-	_pause_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_pause_overlay.process_mode = PROCESS_MODE_ALWAYS
-	_pause_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE  # let MobileControlsUI handle touches
-	hud_layer.add_child(_pause_overlay)
-	_pause_overlay.hide()
+	# Pause menu — full-screen Control with Resume / Rebind / Quit buttons.
+	# Has its own _input handler with process_mode = ALWAYS so unpause works
+	# while the scene tree is paused (Main itself is INHERIT-paused so its
+	# _unhandled_input is silent during pause).
+	var pause_script: Script = load("res://src/ui/PauseMenuUI.gd")
+	var pause_node := Control.new()
+	pause_node.set_script(pause_script)
+	hud_layer.add_child(pause_node)
+	pause_node.hide()
+	pause_node.resume_requested.connect(toggle_pause)
+	pause_node.rebind_requested.connect(_on_open_rebind)
+	pause_node.quit_requested.connect(func() -> void: get_tree().quit())
+	_pause_overlay = pause_node
 
 	add_child(hud_layer)
 
@@ -673,6 +685,32 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.button_index == JOY_BUTTON_START:
 			if not get_tree().paused or _pause_overlay.visible:
 				toggle_pause()
+
+func _on_open_rebind() -> void:
+	# Hide the pause menu, show the rebind submenu.  Game stays paused so
+	# nothing moves while the user is rebinding.  RebindUI's `closed`
+	# signal returns us to the pause menu.
+	if is_instance_valid(_rebind_ui): return
+	var script: Script = load("res://src/ui/RebindUI.gd")
+	var ui := Control.new()
+	ui.set_script(script)
+	# Add at the canvas-layer level so it draws on top of the pause overlay.
+	if _pause_overlay and _pause_overlay.get_parent():
+		_pause_overlay.get_parent().add_child(ui)
+	else:
+		add_child(ui)
+	ui.closed.connect(_on_close_rebind)
+	if _pause_overlay: _pause_overlay.hide()
+	_rebind_ui = ui
+
+
+func _on_close_rebind() -> void:
+	if is_instance_valid(_rebind_ui):
+		_rebind_ui.queue_free()
+	_rebind_ui = null
+	if _pause_overlay and get_tree().paused:
+		_pause_overlay.show()
+
 
 func _any_modal_ui_open() -> bool:
 	# True if a SpaceStation has its docking UI open, or a PlanetPlacementUI

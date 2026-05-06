@@ -586,8 +586,11 @@ func _physics_process(delta: float) -> void:
 	
 	# FIRE HEARTBEAT: Tick-down combat timers
 	fire_cooldown -= delta
-	var cur_fire = Input.is_key_pressed(KEY_F) or mobile_fire
-	var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
+	# Fire is bound through InputMap action "fire" so it can be rebound
+	# from the pause menu's REBIND CONTROLS submenu (mobile_fire stays
+	# separate since it's emitted by the on-screen FIRE button).
+	var cur_fire = Input.is_action_pressed("fire") or mobile_fire
+	var cur_joy_fire = false  # legacy path retained: refactor folded into cur_fire
 	
 	# PLANETARY PROXIMITY THROTTLE: Only scan for planets every 15 frames
 	if _hb_tick % 15 == 0:
@@ -753,8 +756,10 @@ func _process_ace_flight(delta: float) -> void:
 	
 
 	var roll_input: float = 0.0
-	if Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER): roll_input += 1.0
-	if Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER): roll_input -= 1.0
+	# Roll uses InputMap actions so the rebind UI can remap them.  Defaults
+	# are LB / RB on a standard gamepad, Q / E on keyboard.
+	if Input.is_action_pressed("roll_left"):  roll_input += 1.0
+	if Input.is_action_pressed("roll_right"): roll_input -= 1.0
 	# Mobile bottom-left rotate buttons: held → continuous roll, double-tap → barrel roll.
 	if _mobile_roll_l: roll_input += 1.0
 	if _mobile_roll_r: roll_input -= 1.0
@@ -819,7 +824,7 @@ func _process_ace_flight(delta: float) -> void:
 	raw_thrust = pow(clamp((raw_thrust - 0.05) / 0.95, 0.0, 1.0), 1.8)
 	raw_reverse = pow(clamp((raw_reverse - 0.05) / 0.95, 0.0, 1.0), 1.8)
 	# BOOST/WARP: gamepad A, keyboard Shift, OR mobile BOOST button
-	var is_warping: bool = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT) or mobile_boost
+	var is_warping: bool = Input.is_action_pressed("warp") or mobile_boost
 
 	# HYPERDRIVE: L1 + R1 held together = 3rd thrust tier (5× warp)
 	# L1 = JOY_BUTTON_LEFT_SHOULDER, R1 = JOY_BUTTON_RIGHT_SHOULDER
@@ -1349,20 +1354,21 @@ func _input(event: InputEvent) -> void:
 			cam_orbit.y -= event.relative.y * 0.005
 			cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
 	
-	# CONTROLLER FIRE: Triangle (PS) / Y (Xbox)
-	if event is InputEventJoypadButton and event.button_index == JOY_BUTTON_Y and event.pressed:
-		print("--- GUNSMITH: Y BUTTON DETECTED --- in_ship:", in_ship)
+	# CONTROLLER FIRE — uses InputMap action so it follows rebinds.
+	if event.is_action_pressed("fire"):
 		if in_ship and fire_cooldown <= 0.0:
 			_fire_alternating_cannon()
-		
-	if event is InputEventJoypadButton and event.pressed:
+
+	# Barrel-roll double-tap detection — also via the rebindable
+	# roll_left / roll_right actions instead of hardcoded shoulder buttons.
+	if event.is_action_pressed("roll_left"):
 		var cur_time = Time.get_ticks_msec() / 1000.0
-		if event.button_index == JOY_BUTTON_LEFT_SHOULDER:
-			if (cur_time - last_tap_l) < 0.22: _trigger_barrel_roll(1.0)
-			last_tap_l = cur_time
-		if event.button_index == JOY_BUTTON_RIGHT_SHOULDER:
-			if (cur_time - last_tap_r) < 0.22: _trigger_barrel_roll(-1.0)
-			last_tap_r = cur_time
+		if (cur_time - last_tap_l) < 0.22: _trigger_barrel_roll(1.0)
+		last_tap_l = cur_time
+	if event.is_action_pressed("roll_right"):
+		var cur_time2 = Time.get_ticks_msec() / 1000.0
+		if (cur_time2 - last_tap_r) < 0.22: _trigger_barrel_roll(-1.0)
+		last_tap_r = cur_time2
 		
 		# ACE LOCK-ON: Left Joystick Click (L3) OR B-Button (Right Face)
 		if event.button_index == JOY_BUTTON_LEFT_STICK or event.button_index == JOY_BUTTON_B:
@@ -1678,17 +1684,17 @@ func _process(delta: float) -> void:
 				
 	# GUNSMITH FINAL SYNC: Fire AFTER bolt pool updates to ensure muzzle-snapping
 	if in_ship and fire_cooldown <= 0.0:
-		var cur_fire = Input.is_key_pressed(KEY_F) or mobile_fire
-		var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
-		# Continuous fire if cur_fire is held, no need for _prev_fire_key
-		if cur_fire or cur_joy_fire:
+		# Continuous-fire path (the line ~1681 audit) — uses the same
+		# remappable "fire" action as the heartbeat tick at line ~589.
+		var cur_fire = Input.is_action_pressed("fire") or mobile_fire
+		if cur_fire:
 			_fire_alternating_cannon()
 			fire_cooldown = 0.18 # ACE RPS NERF: 5.5 shots per second
 		_prev_fire_key = cur_fire
 
 	# Update thruster audio — pitch and volume scale with ship speed
 	if in_ship:
-		var is_boosting = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT) or mobile_boost
+		var is_boosting = Input.is_action_pressed("warp") or mobile_boost
 		var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
 		if md_nodes.size() > 0 and md_nodes[0].has_method("update_thruster_audio"):
 			md_nodes[0].update_thruster_audio(velocity.length(), is_boosting)

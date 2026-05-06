@@ -972,7 +972,14 @@ func _spawn_grass(points: Array[Transform3D]) -> void:
 	
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:
 	if points.is_empty(): return
-	
+	# Cities are intentionally disabled (see "CITY GENERATION DEACTIVATED" tag
+	# below).  The leftover impostor + metropolitan-slab blocks at the bottom
+	# of this function were still spawning, painting flat 4.5 km and 6 km
+	# rectangles tinted in the planet palette across every surface — the
+	# 'magenta diamonds' visible from low orbit.  Bail out before any visual
+	# is created until the city system is reactivated.
+	return
+
 	# ACE ASSET CACHE: Pre-load all metropolitan logic once per session
 	if _skyscraper_shader == null: _init_skyscraper_assets()
 	

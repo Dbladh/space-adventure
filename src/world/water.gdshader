@@ -50,7 +50,9 @@ void vertex() {
 	float d_to_cam = distance((MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz, CAMERA_POSITION_WORLD);
 	float wave_mask = 1.0 - smoothstep(1500.0, 4000.0, d_to_cam);
 	if (wave_mask > 0.01) {
-		float wt = floor(TIME * 8.0) / 8.0 * 0.9;
+		// Smooth continuous time — old shader quantized to 1/8 s
+		// floor steps then scaled, producing visible jerks.
+		float wt = TIME * 0.9;
 		float disp = sin(dot(VERTEX.xz, vec2(0.047,  0.031)) + wt * 1.2) * 2.2
 				   + sin(dot(VERTEX.xz, vec2(-0.039, 0.052)) + wt * 0.9) * 1.8
 				   + sin(dot(VERTEX.xz, vec2(0.028, -0.061)) + wt * 1.5) * 1.4
@@ -62,7 +64,10 @@ void vertex() {
 void fragment() {
 	float d_to_cam = distance((INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz, CAMERA_POSITION_WORLD);
 	float wave_mask = 1.0 - smoothstep(2000.0, 5000.0, d_to_cam);
-	float wt = floor(TIME * 8.0) / 8.0;
+	// Smooth time — was floor(TIME * 8.0) / 8.0, which froze the noise
+	// pattern in 1/8 s steps and made each "frame" of the noise read as a
+	// stamp of discrete cells (the diamond patches in the water).
+	float wt = TIME;
 	float shore = v_shore;
 
 	float SCALE = 0.0018;
@@ -79,10 +84,18 @@ void fragment() {
 			fbm(ocean_uv + vec2(3.4, wt * warp_speed * 0.8))
 		) * 0.8 - 0.4;
 		float shoal_freq = mix(1.0, 1.8, smoothstep(0.2, 0.8, shore));
+		// Add a higher-frequency detail octave so the dominant fbm cell
+		// (~500 m at SCALE=0.0018) doesn't read as one big diamond patch
+		// at low altitude — the detail breaks the silhouette.
 		float ocean_n = fbm((ocean_uv + warp) * shoal_freq + vec2(wt * 0.06, wt * 0.04));
+		float ocean_d = fbm((ocean_uv + warp) * shoal_freq * 4.3 + vec2(-wt * 0.08, wt * 0.05));
+		ocean_n = ocean_n * 0.78 + ocean_d * 0.22;
 
-		if (ocean_n > 0.72) crest_cel = 1.0;
-		else if (ocean_n > 0.52) wave_cel = 1.0;
+		// Soft thresholds via smoothstep — old hard step()s stamped out
+		// discrete polygonal cells when noise crossed the cutoff.  Now
+		// wave swells feather into one another organically.
+		wave_cel  = smoothstep(0.46, 0.62, ocean_n) * (1.0 - smoothstep(0.62, 0.78, ocean_n));
+		crest_cel = smoothstep(0.66, 0.82, ocean_n);
 
 		float deep_mask = smoothstep(0.75, 0.25, shore);
 		wave_cel  *= (deep_mask * wave_mask);
@@ -96,8 +109,11 @@ void fragment() {
 		}
 	}
 
+	// Shimmer — also softened.  step() was creating sharp-edged glitter
+	// patches that read as small diamond highlights against the ocean.
 	float shimmer_n = fbm(v_local_pos.xz * 0.009 + vec2(wt * 0.4, -wt * 0.35));
-	float shimmer = step(0.78, shimmer_n) * step(0.4, dot(v_world_normal, vec3(0.0, 1.0, 0.0)));
+	float shimmer = smoothstep(0.74, 0.88, shimmer_n)
+				  * smoothstep(0.35, 0.55, dot(v_world_normal, vec3(0.0, 1.0, 0.0)));
 	shimmer *= smoothstep(0.45, 0.0, shore);
 
 	float fresnel = pow(1.0 - dot(NORMAL, VIEW), 3.0);

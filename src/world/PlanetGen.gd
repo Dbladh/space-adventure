@@ -335,6 +335,19 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	uniform vec3 sun_dir;
 	uniform vec3 horizon_color;
 	uniform float planet_r;
+	// Per-planet variation knobs:
+	//   cell_scale  — drives blob size. Smaller = more cells per planet
+	//                 (small dense puffs); larger = fewer big blobs.
+	//   thresh_lo   — smoothstep lower edge for coverage. Lower value
+	//                 means more density passes the gate (overcast).
+	//   thresh_hi   — smoothstep upper edge. We keep a 0.20 band width
+	//                 so feather softness stays consistent across planets.
+	//   alpha_max   — peak per-fragment alpha; thicker for very dense
+	//                 worlds, thinner for hazy ones.
+	uniform float cell_scale = 0.005;
+	uniform float thresh_lo  = 0.55;
+	uniform float thresh_hi  = 0.78;
+	uniform float alpha_max  = 0.70;
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
@@ -383,14 +396,15 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		// solid quad in the sky. Sample on the unit-direction × planet_r so the
 		// cell size is in metres regardless of planet scale.
 		vec3 dir = normalize(v_local_pos);
-		vec3 lp = dir * planet_r * 0.005 + vec3(t, t * 0.5, -t * 0.3);
+		vec3 lp = dir * planet_r * cell_scale + vec3(t, t * 0.5, -t * 0.3);
 		float macro = fbm(lp);
 		float puff  = fbm(lp * 3.7 + vec3(100.0));
 		float density = macro * 0.7 + puff * 0.3;          // ~0..1 typical 0.3..0.7
 
-		// Sparse coverage: only the top ~30% of fbm values become clouds.
-		// smoothstep gives soft edges so cloud blobs feather into clear sky.
-		float coverage = smoothstep(0.55, 0.78, density);
+		// Coverage band — per-planet thresholds let some worlds be sparse
+		// (top 15-20% of density values pass) and others be near-overcast
+		// (top 50%+ pass).
+		float coverage = smoothstep(thresh_lo, thresh_hi, density);
 
 		float cam_dist = length(CAMERA_POSITION_WORLD - v_world_pos);
 		// From far away, lift the floor so only the very densest cores are
@@ -408,7 +422,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		vec3 cloud_base = mix(vec3(1.0), horizon_color, 0.15);
 
 		ALBEDO = cloud_base;
-		ALPHA = coverage * 0.7 * mix(0.25, 1.0, terminator);
+		ALPHA = coverage * alpha_max * mix(0.25, 1.0, terminator);
 
 		// CELESTIAL HIBERNATION: Fully transparent if extremely distant
 		if (cam_dist > 4000000.0) ALPHA = 0.0;
@@ -419,6 +433,24 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	c_inst.material_override.set_shader_parameter("sun_dir", sun_dir)
 	c_inst.material_override.set_shader_parameter("horizon_color", Vector3(sky_horizon_color.r, sky_horizon_color.g, sky_horizon_color.b))
 	c_inst.material_override.set_shader_parameter("planet_r", planet_radius)
+
+	# ── Per-planet cloud profile ─────────────────────────────────────
+	# Pick blob size and coverage independently from the planet's RNG so
+	# every world feels distinct.  Cell scale spans ~6× (small puffs to
+	# big anvil masses); threshold spans 0.40-0.72 (overcast to wispy).
+	# alpha_max scales mildly with coverage so dense worlds feel thick
+	# and sparse worlds feel hazy rather than just sparser.
+	var cell_scale: float = rng.randf_range(0.0025, 0.014)
+	var thresh_lo: float  = rng.randf_range(0.40, 0.72)
+	var thresh_hi: float  = thresh_lo + 0.20
+	# Lower threshold (more coverage) → thinner per-fragment alpha so the
+	# layer doesn't blanket-paint the planet white.  Higher threshold
+	# (sparser blobs) → thicker alpha so the few clouds read as dense.
+	var alpha_max: float  = lerpf(0.85, 0.55, smoothstep(0.40, 0.72, thresh_lo))
+	c_inst.material_override.set_shader_parameter("cell_scale", cell_scale)
+	c_inst.material_override.set_shader_parameter("thresh_lo", thresh_lo)
+	c_inst.material_override.set_shader_parameter("thresh_hi", thresh_hi)
+	c_inst.material_override.set_shader_parameter("alpha_max", alpha_max)
 	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
 	

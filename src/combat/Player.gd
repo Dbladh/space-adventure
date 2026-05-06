@@ -1395,9 +1395,11 @@ func _process(delta: float) -> void:
 			var enemies_pool = get_tree().get_nodes_in_group("Enemies") if is_inside_tree() else []
 			if is_inside_tree():
 				# Enemies use tight cone (~11°); mineable/passive use wider cone (~28°)
-				# ACE COMBAT TUNER: Targeting range capped to effective weapon range (12km)
-				const RADAR_RANGE_SQ := 12000.0 * 12000.0
-				const LOCK_ON_RANGE_SQ := 12000.0 * 12000.0
+				# Targeting range raised to 35 km so asteroid mining works at much
+				# longer distances (the laser bolt itself reaches ~37.5 km before
+				# despawning, so 35 km gives a margin without exceeding range).
+				const RADAR_RANGE_SQ := 35000.0 * 35000.0
+				const LOCK_ON_RANGE_SQ := 35000.0 * 35000.0
 				var highest_dot = 0.95 if _mobile_perf else 0.98
 
 				var candidate_pools = [

@@ -290,22 +290,49 @@ func _spawn_station(display_name: String, pos: Vector3, beacon_col: Color) -> vo
 func _setup_asteroid_belt() -> void:
 	var belt_script = load("res://src/world/AsteroidBelt.gd")
 	if belt_script:
-		var belt = Node3D.new(); belt.set_script(belt_script)
-		belt.name = "DeepSpaceAsteroidBelt"
-		belt.set("belt_seed", 9999)
-		# DEEP SPACE BELT:
-		belt.set("inner_radius", 1400000.0)
-		belt.set("outer_radius", 2000000.0)
-		belt.set("thickness", 40000.0)
-		belt.set("count", 3000)
-		belt.set("mmi_count", 14000)
-		belt.set("phys_count", 500)
-		world_root.add_child(belt)
-		belt.global_position = Vector3(0, 0, -1500000.0)
-		belt.add_to_group("World")
-		
+		# Primary "main" belt — densest, near origin.
+		_spawn_asteroid_belt(belt_script, "DeepSpaceAsteroidBelt",
+			9999, Vector3(0, 0, -1500000.0), Vector3.ZERO,
+			1400000.0, 2000000.0, 40000.0, 14000, 500)
+
+		# SECONDARY BELTS — rotated and offset so asteroids aren't only in one
+		# narrow ring, but distributed around the inner system.  Each belt is
+		# itself a flattened ring; stacking several at different orientations
+		# gives the impression of asteroids "everywhere in space".
+		_spawn_asteroid_belt(belt_script, "ScatterBeltAlpha",
+			17371, Vector3(2200000.0, 400000.0, 600000.0),
+			Vector3(deg_to_rad(35), deg_to_rad(60), 0.0),
+			900000.0, 1700000.0, 80000.0, 7000, 300)
+		_spawn_asteroid_belt(belt_script, "ScatterBeltBeta",
+			28983, Vector3(-1800000.0, -300000.0, 1100000.0),
+			Vector3(deg_to_rad(-25), deg_to_rad(-40), deg_to_rad(15)),
+			1100000.0, 1900000.0, 60000.0, 8000, 320)
+		_spawn_asteroid_belt(belt_script, "ScatterBeltGamma",
+			41207, Vector3(500000.0, 1200000.0, 2200000.0),
+			Vector3(deg_to_rad(70), deg_to_rad(20), deg_to_rad(-30)),
+			800000.0, 1500000.0, 100000.0, 6000, 260)
+
 	# DEEP SPACE SALVAGE: Rare minerals floating in the void
 	_setup_deep_space_minerals()
+
+
+func _spawn_asteroid_belt(belt_script: Script, belt_name: String, seed_val: int,
+		pos: Vector3, rot_euler: Vector3,
+		inner_r: float, outer_r: float, thick: float,
+		mmi_count: int, phys_count: int) -> void:
+	var belt = Node3D.new()
+	belt.set_script(belt_script)
+	belt.name = belt_name
+	belt.set("belt_seed", seed_val)
+	belt.set("inner_radius", inner_r)
+	belt.set("outer_radius", outer_r)
+	belt.set("thickness", thick)
+	belt.set("mmi_count", mmi_count)
+	belt.set("phys_count", phys_count)
+	world_root.add_child(belt)
+	belt.global_position = pos
+	belt.rotation = rot_euler
+	belt.add_to_group("World")
 
 func _setup_deep_space_minerals() -> void:
 	var m_script = _get_res("res://src/world/MineableResource.gd")

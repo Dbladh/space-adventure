@@ -584,13 +584,19 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	_apply_planetary_lod_policy(mmi_l, false)
 	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; add_child(mmi_l)
 
-	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Stone", 120, 8.0)
+	# Generous collision sphere (25m radius) so the player's swept-ray bolts
+	# reliably hit rocks even with imprecise aim.  Cap raised so denser rock
+	# fields are fully shootable.
+	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Stone", 200, 25.0)
 
 func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: String, max_count: int, sphere_r: float) -> void:
 	var proxy_script = load("res://src/world/SurfacePropProxy.gd")
 	if not proxy_script: return
 
-	var effective_max = min(max_count, 40)
+	# Old code clamped to 40 proxies per chunk — but that left most visible
+	# rocks/trees lockable yet unhittable.  Raised to 200 so the cap rarely
+	# bites in practice.
+	var effective_max = min(max_count, 200)
 	var sphere := SphereShape3D.new()
 	sphere.radius = sphere_r
 
@@ -684,7 +690,7 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 		_apply_planetary_lod_policy(mti_m, false)
 		_apply_planetary_lod_policy(mti_t, true) # Trunks only visible in High-Detail zone
 
-		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 60, 15.0)
+		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 200, 40.0)
 	else:
 		# Mid/Far Chunk: Single simplified MultiMesh, per-archetype mesh.
 		if not _c_fol_l_by_arch.has(archetype):

@@ -552,7 +552,26 @@ func _get_object_xform(pos: Vector3, up: Vector3, noise_val: float, b_scale: flo
 	var xf = Transform3D(t_bas, pos); var sv = 1.0 + (abs(noise_val) * 7.0)
 	return xf.scaled_local(Vector3(b_scale, b_scale * sv, b_scale))
 
+func _filter_destroyed_props(points: Array[Transform3D]) -> Array[Transform3D]:
+	# Skip points that match a previously-destroyed surface prop.  The
+	# SurfacePropProxy registers hash(global_position.round()) on destroy;
+	# we hash the same way against the chunk-relative point's world
+	# position. Mirrors the destroyed-position guard in _spawn_minerals.
+	var proxy_script: Script = load("res://src/world/SurfacePropProxy.gd")
+	if proxy_script == null: return points
+	var destroyed: Dictionary = proxy_script.get("_destroyed_positions")
+	if destroyed.is_empty(): return points
+	var out: Array[Transform3D] = []
+	for xf in points:
+		var world_pos: Vector3 = (global_transform * xf).origin
+		if not destroyed.has(hash(world_pos.round())):
+			out.append(xf)
+	return out
+
+
 func _spawn_rock(points: Array[Transform3D]) -> void:
+	points = _filter_destroyed_props(points)
+	if points.is_empty(): return
 	if _c_r == null: _c_r = _build_faceted_rock_mesh(12)
 	
 	var mmi_h = MultiMeshInstance3D.new()
@@ -632,6 +651,8 @@ func _apply_planetary_lod_policy(mmi: MultiMeshInstance3D, is_high_detail: bool)
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 func _spawn_tree_lods(points: Array[Transform3D]) -> void:
+	points = _filter_destroyed_props(points)
+	if points.is_empty(): return
 	var foliage_mat = planet.foliage_material if is_instance_valid(planet) and planet.get("foliage_material") else _get_foliage_mat()
 	var trunk_mat = planet.trunk_material if is_instance_valid(planet) and planet.get("trunk_material") else _get_trunk_mat()
 

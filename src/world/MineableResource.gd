@@ -68,11 +68,15 @@ func _ready() -> void:
 	max_health = health
 	
 	_generate_low_poly_node()
-	# MOBILE: Skip the SubViewport HUD. 80 transparent SubViewports in flight
-	# shred the forward-cluster budget on A14-class GPUs and the health bar
-	# is rarely read against a moving ship reticle.
-	if not _mobile_perf:
-		_setup_tactical_hud()
+	# Health-bar HUD permanently disabled: with hundreds of mineable
+	# resources alive at once on a forged planet, every instance spawning
+	# its own SubViewport + ProgressBar + billboard Sprite3D produced a
+	# stack of green bars that read as a noise field from any altitude
+	# above ~500 m, on top of the per-instance render cost on desktop
+	# and the GPU budget hit on mobile.  Re-enable per-instance via an
+	# @export bool if a tactical view is wanted later.
+	# if not _mobile_perf:
+	#     _setup_tactical_hud()
 
 func _generate_low_poly_node() -> void:
 	# ACE GEOMETRY: Procedural 'Rupee' Octahedron (Anchored at Tip)

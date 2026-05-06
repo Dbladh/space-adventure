@@ -447,8 +447,11 @@ func _process_ace_camera(delta: float) -> void:
 	if target_planet:
 		surface_assist = clamp(1.0 - (true_altitude / 9000.0), 0.0, 1.0)
 	if cam_spring and surface_assist > 0.0:
-		var target_spring_y: float = lerp(10.0, 4.0, surface_assist)
-		var target_spring_len: float = lerp(250.0, 140.0, surface_assist)
+		# On planet surface push the camera FURTHER back (250 → 420 m) and
+		# slightly up, so the player can see the terrain + nearby mineable
+		# resources properly instead of having the ship fill the screen.
+		var target_spring_y: float = lerp(10.0, 16.0, surface_assist)
+		var target_spring_len: float = lerp(250.0, 420.0, surface_assist)
 		cam_spring.position.y = lerp(cam_spring.position.y, target_spring_y, 8.0 * delta)
 		cam_spring.spring_length = lerp(cam_spring.spring_length, target_spring_len, 6.0 * delta)
 	elif cam_spring:
@@ -1570,18 +1573,21 @@ func _process(delta: float) -> void:
 		var ease_t = accel_t * accel_t # Quadratic Ramp
 		var current_rel_speed = lerp(9000.0, 35000.0, ease_t)
 
-		# ACE SMART-LOCK HOMING: Fired bolts track the target mid-flight
+		# ACE SMART-LOCK HOMING: Fired bolts track the target mid-flight.
+		# Cone widened (0.98 → 0.80, ~37° window) and turn rate ~5× faster so
+		# bolts reliably curve onto small mineable resources.  Without this,
+		# small targets like flora-mineable crystals frequently slipped past
+		# the bolt even though the player was locked on.
 		if is_instance_valid(b["target"]) and b["target"].is_inside_tree():
-			var target_pos = b["target"].global_position
-			var t_dir = (target_pos - node.global_position).normalized()
-			
-			# PRECISION CONE: Only pull if the pilot's aim is already high-quality (>0.98 dot)
-			# 0.98 dot product is roughly a 1.5-degree correction window.
+			var aim_pos: Vector3
+			if b["target"].has_method("get_target_center"):
+				aim_pos = b["target"].get_target_center()
+			else:
+				aim_pos = b["target"].global_position
+			var t_dir = (aim_pos - node.global_position).normalized()
 			var align = b["dir"].dot(t_dir)
-			if align > 0.98:
-				# Snappy but subtle corrective steering (Rewarding the pilot's lead)
-				b["dir"] = b["dir"].lerp(t_dir, 2.5 * delta).normalized()
-				# Align rod: High-fidelity visual update only when correction is active
+			if align > 0.80:
+				b["dir"] = b["dir"].lerp(t_dir, 12.0 * delta).normalized()
 				if b["dir"].length() > 0.01:
 					node.look_at(node.global_position + b["dir"])
 					node.rotate_object_local(Vector3.RIGHT, PI / 2.0)

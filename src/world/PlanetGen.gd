@@ -328,9 +328,13 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	# 1. PUFFY CLOUD BELTS: Massive celestial sphere at 2.5km altitude (Hugging closer)
 	var c_mesh = SphereMesh.new(); c_mesh.radius = planet_radius + 2500.0; c_mesh.height = c_mesh.radius * 2.0
 	c_mesh.radial_segments = 64; c_mesh.rings = 32
-	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, depth_draw_always, cull_disabled;
+	var c_shader = Shader.new(); c_shader.code = """shader_type spatial; render_mode unshaded, blend_mix, cull_disabled;
+	// depth_draw_always removed: previously the cloud layer wrote depth even
+	// for partially-transparent fragments, which caused alpha-blended cloud
+	// pixels to occlude the terrain & ship behind them in the same frame.
 	uniform vec3 sun_dir;
 	uniform vec3 horizon_color;
+	uniform float planet_r;
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
@@ -359,41 +363,52 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	}
 	float fbm(vec3 p) {
 		float v = 0.0; float a = 0.5;
-		for (int i = 0; i < 4; i++) {
+		for (int i = 0; i < 5; i++) {
 			v += a * vnoise(p);
 			p = p * 2.13 + vec3(13.7, 5.1, 19.3);
 			a *= 0.5;
 		}
-		return v; // 0..1-ish
+		return v; // 0..~1
 	}
 
 	void fragment() {
-		// Slow continuous drift — old shader quantized TIME to 1/8 s steps
+		// Smooth continuous drift — old shader quantized TIME to 1/8 s steps
 		// then multiplied by 1500, causing visible cloud teleportation
 		// 8× per second (the 'flashing diamonds' bug).
-		float t = TIME * 0.02;
-		vec3 lp = v_local_pos * 0.00012 + vec3(t, 0.0, t * 0.7);
+		float t = TIME * 0.015;
+
+		// Noise frequency must be high enough that many cells fit inside one
+		// face of the cloud sphere (radial_segments = 64, ring_segments = 32).
+		// Otherwise each face becomes uniformly cloudy or clear and reads as a
+		// solid quad in the sky. Sample on the unit-direction × planet_r so the
+		// cell size is in metres regardless of planet scale.
+		vec3 dir = normalize(v_local_pos);
+		vec3 lp = dir * planet_r * 0.005 + vec3(t, t * 0.5, -t * 0.3);
 		float macro = fbm(lp);
-		float puff = fbm(lp * 3.5 + vec3(100.0));
-		float cloud_mask = smoothstep(0.45, 0.85, macro * 0.65 + puff * 0.45);
+		float puff  = fbm(lp * 3.7 + vec3(100.0));
+		float density = macro * 0.7 + puff * 0.3;          // ~0..1 typical 0.3..0.7
+
+		// Sparse coverage: only the top ~30% of fbm values become clouds.
+		// smoothstep gives soft edges so cloud blobs feather into clear sky.
+		float coverage = smoothstep(0.55, 0.78, density);
 
 		float cam_dist = length(CAMERA_POSITION_WORLD - v_world_pos);
-		float proximity = smoothstep(50.0, 12000.0, cam_dist);
-		// Wispy from far away, denser when up close.
-		float active_threshold = mix(0.1, 0.55, proximity);
+		// From far away, lift the floor so only the very densest cores are
+		// visible (keeps the planet silhouette clean from orbit).
+		float proximity = smoothstep(50.0, 30000.0, cam_dist);
+		coverage *= mix(1.0, 0.6, proximity);
+
+		if (coverage < 0.02) discard;
 
 		float dot_nl = dot(v_normal, sun_dir);
-		float terminator = smoothstep(-0.2, 0.2, dot_nl);
+		float terminator = smoothstep(-0.2, 0.25, dot_nl);
 
-		// Tint clouds slightly with the planet's atmospheric color for variety
-		vec3 cloud_base = mix(vec3(1.0), horizon_color, 0.3);
+		// Light tint of the horizon palette for atmospheric variety. Capped at
+		// 15% so pink/magenta sky planets don't show solid pink overcast.
+		vec3 cloud_base = mix(vec3(1.0), horizon_color, 0.15);
 
-		if (cloud_mask > active_threshold) {
-			ALBEDO = cloud_base;
-			ALPHA = 0.55 * smoothstep(active_threshold, active_threshold + 0.15, cloud_mask) * mix(0.2, 1.0, terminator);
-		} else {
-			discard;
-		}
+		ALBEDO = cloud_base;
+		ALPHA = coverage * 0.7 * mix(0.25, 1.0, terminator);
 
 		// CELESTIAL HIBERNATION: Fully transparent if extremely distant
 		if (cam_dist > 4000000.0) ALPHA = 0.0;
@@ -403,6 +418,7 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	var sun_dir = Vector3(0.5, 0.5, 0.707).normalized()
 	c_inst.material_override.set_shader_parameter("sun_dir", sun_dir)
 	c_inst.material_override.set_shader_parameter("horizon_color", Vector3(sky_horizon_color.r, sky_horizon_color.g, sky_horizon_color.b))
+	c_inst.material_override.set_shader_parameter("planet_r", planet_radius)
 	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
 	

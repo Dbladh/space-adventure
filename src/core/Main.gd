@@ -652,6 +652,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			# a SpaceStation or Cinematic has the stage.
 			if not get_tree().paused or _pause_overlay.visible:
 				toggle_pause()
+	# Gamepad START toggles pause too — without this, once paused with a
+	# gamepad-only input chain there was no way to unpause, since the
+	# pause overlay has no buttons of its own.  Same gating as ESCAPE.
+	if event is InputEventJoypadButton and event.pressed:
+		if event.button_index == JOY_BUTTON_START:
+			if not get_tree().paused or _pause_overlay.visible:
+				toggle_pause()
 		if event.keycode == KEY_B:
 			if benchmark_manager: benchmark_manager.start_automated_test(_player_ref)
 		# Debug instrumentation: F5 dumps a world-content audit, F6 inspects

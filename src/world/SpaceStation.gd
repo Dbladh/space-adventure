@@ -56,6 +56,10 @@ static var _active_planets: Array[Dictionary] = []
 class ForgeSlot extends PanelContainer:
 	var slot_index: int = 0
 	var station_ref: Node = null
+	func _init() -> void:
+		# Gamepad navigation: focusable so ui_accept (Enter / gamepad A)
+		# triggers the same "remove this slot" action that drag-out does.
+		focus_mode = Control.FOCUS_ALL
 	func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
 		return typeof(data) == TYPE_DICTIONARY and data.has("type") and data["type"] == "resource"
 	func _drop_data(_at_position: Vector2, data: Variant) -> void:
@@ -75,11 +79,20 @@ class ForgeSlot extends PanelContainer:
 		set_drag_preview(preview)
 		station_ref._on_remove_slot(slot_index)
 		return {"type": "removed_resource", "res": r}
+	func _gui_input(event: InputEvent) -> void:
+		if event.is_action_pressed("ui_accept"):
+			if station_ref and slot_index < station_ref._forge_selected.size():
+				station_ref._on_remove_slot(slot_index)
+				accept_event()
 
 class ResourceCard extends PanelContainer:
 	var resource_id: String = ""
 	var available_count: int = 0
 	var station_ref: Node = null
+	func _init() -> void:
+		# Gamepad navigation: focusable so ui_accept (Enter / gamepad A)
+		# triggers the same "add to forge" action that drag-in does.
+		focus_mode = Control.FOCUS_ALL
 	func _get_drag_data(_at_position: Vector2) -> Variant:
 		if available_count <= 0 or station_ref._forge_selected.size() >= 3: return null
 		var preview := PanelContainer.new()
@@ -93,6 +106,11 @@ class ResourceCard extends PanelContainer:
 		preview.add_child(lbl)
 		set_drag_preview(preview)
 		return {"type": "resource", "res": resource_id}
+	func _gui_input(event: InputEvent) -> void:
+		if event.is_action_pressed("ui_accept"):
+			if station_ref and available_count > 0 and station_ref._forge_selected.size() < 3:
+				station_ref._on_card_pressed(resource_id)
+				accept_event()
 
 func _ready() -> void:
 	add_to_group("SpaceStation")
@@ -528,6 +546,36 @@ func _rebuild_forge_cards() -> void:
 		empty_lbl.add_theme_font_size_override("font_size", 16)
 		empty_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
 		_forge_card_grid.add_child(empty_lbl)
+
+	# Gamepad: card grid was just rebuilt, so any previously-focused card
+	# is gone.  If the user was navigating with a controller, drop focus
+	# onto the first usable card so they can keep selecting; if none is
+	# usable, fall through to the Forge button (handled in caller).
+	_grab_first_usable_card_focus_deferred()
+
+
+func _grab_first_usable_card_focus_deferred() -> void:
+	# Defer one frame so the new cards are inside the tree before we ask
+	# for focus — grab_focus on a freshly-added Control is a no-op.
+	call_deferred("_grab_first_usable_card_focus")
+
+
+func _grab_first_usable_card_focus() -> void:
+	if _forge_card_grid == null: return
+	# Only steal focus if the previously-focused control is gone (i.e. it
+	# was a card we just freed) — otherwise the user might have moved to
+	# a slot or the Forge button and we'd yank them back.
+	var f: Control = get_viewport().gui_get_focus_owner()
+	if f != null and is_instance_valid(f): return
+	for c in _forge_card_grid.get_children():
+		if c is ResourceCard:
+			var card: ResourceCard = c
+			if card.available_count > 0 and _forge_selected.size() < 3:
+				card.grab_focus()
+				return
+	# No usable cards left — try the Forge Planet button.
+	if _forge_btn and not _forge_btn.disabled:
+		_forge_btn.grab_focus()
 
 func _on_card_pressed(r: String) -> void:
 	if _forge_selected.size() >= 3: return

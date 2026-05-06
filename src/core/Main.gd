@@ -657,8 +657,20 @@ func _unhandled_input(event: InputEvent) -> void:
 			# a SpaceStation or Cinematic has the stage.
 			if not get_tree().paused or _pause_overlay.visible:
 				toggle_pause()
-		if event.keycode == KEY_B: 
+		if event.keycode == KEY_B:
 			if benchmark_manager: benchmark_manager.start_automated_test(_player_ref)
+		# Debug instrumentation: F5 dumps a world-content audit, F6 inspects
+		# whatever mesh is under the cursor.  Both write to MCPRuntime's log
+		# (fetchable via the godot_mcp `get_runtime_log` tool) and stdout.
+		if event.keycode == KEY_F5:
+			var WorldAudit = load("res://src/debug/WorldAudit.gd")
+			if WorldAudit: WorldAudit.dump()
+		if event.keycode == KEY_F6:
+			var p_ref := get_tree().get_first_node_in_group("Player")
+			if p_ref and "camera" in p_ref:
+				var MeshInspector = load("res://src/debug/MeshInspector.gd")
+				if MeshInspector:
+					MeshInspector.inspect_at(get_viewport(), p_ref.camera)
 
 func toggle_pause() -> void:
 	if _is_loading: return

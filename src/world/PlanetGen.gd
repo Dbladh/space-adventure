@@ -467,11 +467,14 @@ func _spawn_hero_landmarks(rng: RandomNumberGenerator) -> void:
 			fwd = up.cross(Vector3.FORWARD).normalized()
 		var basis := Basis(fwd.cross(up).normalized(), up, -fwd)
 
-		var landmark_type: int = rng.randi() % 3
+		# Floating-island landmarks intentionally disabled: their disc-shaped
+		# tops read as flat magenta diamonds on the surface from orbit and
+		# z-fight with the cloud layer.  Only spires + arches spawn now —
+		# both have proper 3D silhouettes from every angle.
+		var landmark_type: int = rng.randi() % 2
 		match landmark_type:
 			0: _build_spire(base_pos, basis, rng, rock_col, accent_col)
 			1: _build_arch(base_pos, basis, rng, rock_col)
-			2: _build_floating_island(base_pos, basis, rng, rock_col, accent_col)
 
 # ---------------------------------------------------------------------------
 # SPIRE — a tapered hexagonal monolith, stacked in 8 rings that narrow toward

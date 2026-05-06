@@ -1591,7 +1591,10 @@ func _process(delta: float) -> void:
 			if align > 0.80:
 				b["dir"] = b["dir"].lerp(t_dir, 12.0 * delta).normalized()
 				if b["dir"].length() > 0.01:
-					node.look_at(node.global_position + b["dir"])
+					# Project look-at target 1 km along the direction so float32
+					# precision at large origin offsets can still distinguish it
+					# from the bolt's own position.
+					node.look_at(node.global_position + b["dir"] * 1000.0)
 					node.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 
 

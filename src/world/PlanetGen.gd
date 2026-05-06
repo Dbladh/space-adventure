@@ -467,14 +467,13 @@ func _spawn_hero_landmarks(rng: RandomNumberGenerator) -> void:
 			fwd = up.cross(Vector3.FORWARD).normalized()
 		var basis := Basis(fwd.cross(up).normalized(), up, -fwd)
 
-		# Floating-island landmarks intentionally disabled: their disc-shaped
-		# tops read as flat magenta diamonds on the surface from orbit and
-		# z-fight with the cloud layer.  Only spires + arches spawn now —
-		# both have proper 3D silhouettes from every angle.
-		var landmark_type: int = rng.randi() % 2
+		# Three landmark archetypes: tapered spire, stone arch, and a
+		# Hallelujah-Mountain style floating island with stalactite tip.
+		var landmark_type: int = rng.randi() % 3
 		match landmark_type:
 			0: _build_spire(base_pos, basis, rng, rock_col, accent_col)
 			1: _build_arch(base_pos, basis, rng, rock_col)
+			2: _build_floating_island(base_pos, basis, rng, rock_col, accent_col)
 
 # ---------------------------------------------------------------------------
 # SPIRE — a tapered hexagonal monolith, stacked in 8 rings that narrow toward
@@ -617,60 +616,103 @@ func _build_arch(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: C
 	add_child(mi)
 
 # ---------------------------------------------------------------------------
-# FLOATING ISLAND — a lozenge-shaped rock mass hovering above the terrain,
-# suspended by one narrow stalactite column. Iconic NMS visual signature.
+# FLOATING ISLAND — Hallelujah-Mountain style: dome-topped grass plateau atop
+# a tapered rocky stalactite that hangs deep below.  Multi-ring revolution
+# geometry with per-vertex jitter + a slight off-axis tilt so the silhouette
+# reads as a real 3D landmass from every viewing angle (orbit included),
+# not a flat disc.
 # ---------------------------------------------------------------------------
 func _build_floating_island(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: Color, accent: Color) -> void:
-	var island_r: float = rng.randf_range(200.0, 400.0)
-	var island_h: float = island_r * rng.randf_range(0.25, 0.45)  # Flat disc shape
-	var float_alt: float = rng.randf_range(350.0, 650.0)         # Float height above terrain
-	var sides: int = 8  # Octagonal island
+	var r: float = rng.randf_range(220.0, 380.0)
+	var float_alt: float = rng.randf_range(1200.0, 2400.0)  # well above clouds @ 35 km? no — clouds at planet_radius+35 km, we're metres above terrain. Comfortably below cloud sphere.
+	var sides: int = 12
+
+	# Random off-axis tilt (±15°) so the top isn't always perfectly aligned
+	# with the surface normal — eliminates the "flat octagon from above" look.
+	var tilt_axis_angle := rng.randf() * TAU
+	var horizontal_axis: Vector3 = (basis.x * cos(tilt_axis_angle) + basis.z * sin(tilt_axis_angle)).normalized()
+	var tilt_amount: float = rng.randf_range(-0.26, 0.26)  # ±15°
+	var tb: Basis = basis.rotated(horizontal_axis, tilt_amount)
+
+	var centre: Vector3 = base + basis * Vector3(0, float_alt, 0)
+
+	# Latitude rings: y / radius / colour.  Each ring is built per-side with
+	# small radius/y jitter for organic irregularity.  Top apex is a slight
+	# bump above the plateau; bottom apex is a deep stalactite point.
+	var rock_dark: Color = col.darkened(0.25)
+	var rock_deep: Color = col.darkened(0.45)
+	var rings: Array = [
+		# y_factor (× r), radius_factor (× r), colour
+		[ 0.18, 0.00, accent],                          # top apex (dome bump)
+		[ 0.14, 0.45, accent],                          # plateau ring
+		[ 0.04, 0.85, accent.lerp(col, 0.55)],          # transition (grass → rock)
+		[-0.12, 1.00, col],                             # widest middle (rock)
+		[-0.45, 0.65, col],                             # tapering rock
+		[-0.85, 0.30, rock_dark],                       # narrow rock
+		[-1.30, 0.00, rock_deep],                       # bottom apex (deep stalactite)
+	]
+
+	# Build vertex grid: rings × sides.  Per-vertex jitter for organic look.
+	var verts := []
+	verts.resize(rings.size())
+	for ring_i in range(rings.size()):
+		var ring_y: float = rings[ring_i][0] * r
+		var ring_r: float = rings[ring_i][1] * r
+		var per_side := PackedVector3Array()
+		for s in range(sides):
+			var ang := float(s) / float(sides) * TAU
+			# Jitter — radius ±10%, y ±3% — only on intermediate rings (not apex).
+			var rj: float = 1.0
+			var yj: float = 0.0
+			if ring_r > 0.001:
+				rj = 1.0 + sin(ang * 2.7 + float(ring_i) * 1.3) * 0.10 \
+						+ rng.randf_range(-0.05, 0.05)
+				yj = sin(ang * 3.1 + float(ring_i) * 0.7) * 0.03 * r
+			var lp := Vector3(cos(ang) * ring_r * rj, ring_y + yj, sin(ang) * ring_r * rj)
+			per_side.append(centre + tb * lp)
+		verts[ring_i] = per_side
 
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	# Island centre
-	var centre: Vector3 = base + basis * Vector3(0, float_alt, 0)
-
-	# Build top cap: fan from centre-top to edge ring
-	var top_y: float = island_h * 0.5
-	var bot_y: float = -island_h * 0.6  # Slightly deeper bottom gives cliff-like underside
+	# Top apex fan: triangle from apex0 (which is at radius=0 so single point)
+	# down to the ring below.
+	var top_apex: Vector3 = (verts[0] as PackedVector3Array)[0]  # all sides collapse to the same point at r=0
+	var ring_1 := verts[1] as PackedVector3Array
 	for s in range(sides):
-		var a0: float = float(s)       / float(sides) * TAU
-		var a1: float = float(s + 1)   / float(sides) * TAU
-		var t0 := centre + basis * Vector3(cos(a0) * island_r, top_y, sin(a0) * island_r)
-		var t1 := centre + basis * Vector3(cos(a1) * island_r, top_y, sin(a1) * island_r)
-		var b0 := centre + basis * Vector3(cos(a0) * island_r * 0.7, bot_y, sin(a0) * island_r * 0.7)
-		var b1 := centre + basis * Vector3(cos(a1) * island_r * 0.7, bot_y, sin(a1) * island_r * 0.7)
-		var apex_top := centre + basis * Vector3(0, top_y, 0)
-		var apex_bot := centre + basis * Vector3(0, bot_y * 1.3, 0)
-		# Top face
-		_add_tri_flat(st, apex_top, t0, t1, accent)
-		# Sides (quad)
-		_add_tri_flat(st, t0, b0, t1, col)
-		_add_tri_flat(st, t1, b0, b1, col)
-		# Bottom face
-		_add_tri_flat(st, apex_bot, b1, b0, col.darkened(0.2))
+		var ns := (s + 1) % sides
+		_add_tri_flat(st, top_apex, ring_1[s], ring_1[ns], rings[1][2])
 
-	# Stalactite column hanging below the island toward the ground
-	var col_r: float = island_r * 0.08
-	var col_sides: int = 5
-	var col_top: Vector3 = centre + basis * Vector3(0, bot_y * 1.5, 0)
-	var col_bot: Vector3 = base + basis * Vector3(0, 30.0, 0)  # Near ground level
-	for s in range(col_sides):
-		var a0: float = float(s)       / float(col_sides) * TAU
-		var a1: float = float(s + 1)   / float(col_sides) * TAU
-		var t0 := col_top + basis * Vector3(cos(a0) * col_r, 0, sin(a0) * col_r)
-		var t1 := col_top + basis * Vector3(cos(a1) * col_r, 0, sin(a1) * col_r)
-		# Taper to a point at the bottom
-		_add_tri_flat(st, t0, col_bot, t1, col.darkened(0.3))
+	# Quad strips between consecutive non-apex rings.  Colour blends across
+	# the seam so the grass→rock transition feels continuous.
+	for ring_i in range(1, rings.size() - 2):
+		var rl := verts[ring_i] as PackedVector3Array
+		var rh := verts[ring_i + 1] as PackedVector3Array
+		var c_top: Color = rings[ring_i][2]
+		var c_bot: Color = rings[ring_i + 1][2]
+		var c_mid: Color = c_top.lerp(c_bot, 0.5)
+		for s in range(sides):
+			var ns := (s + 1) % sides
+			_add_tri_flat(st, rl[s], rh[s], rl[ns], c_mid)
+			_add_tri_flat(st, rl[ns], rh[s], rh[ns], c_mid)
+
+	# Bottom apex fan from last non-apex ring down to the stalactite tip.
+	var last_ring_i := rings.size() - 2  # second-to-last (just above the apex)
+	var last_ring := verts[last_ring_i] as PackedVector3Array
+	var bot_apex: Vector3 = (verts[rings.size() - 1] as PackedVector3Array)[0]
+	for s in range(sides):
+		var ns := (s + 1) % sides
+		_add_tri_flat(st, last_ring[ns], last_ring[s], bot_apex, rings[rings.size() - 1][2])
 
 	st.generate_normals(false)
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
 	mi.material_override = _landmark_material(col)
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	mi.custom_aabb = AABB(Vector3(-600, -100, -600), Vector3(1200, 1400, 1200))
+	# AABB sized to encompass tilted island + deep stalactite; ~2× radius
+	# horizontally, full vertical span from top bump to deep apex.
+	var ext: float = r * 1.4
+	mi.custom_aabb = AABB(Vector3(-ext, -r * 1.5, -ext), Vector3(ext * 2.0, r * 2.0, ext * 2.0))
 	add_child(mi)
 
 # Shared unshaded-style material for all landmarks — uses the terrain rock colour

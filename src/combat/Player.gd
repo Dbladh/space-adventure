@@ -264,25 +264,29 @@ func _setup_combat_hud() -> void:
 		arrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		arrow.set_script(load("res://src/combat/TargetLockUI.gd"))
 		hud.add_child(arrow); arrow.hide()
-	# ACE: MOBILE CONTROLS OVERLAY
-	var mobile_ui_script = load("res://src/ui/MobileControlsUI.gd")
-	if mobile_ui_script:
-		var mc = Control.new()
-		mc.set_script(mobile_ui_script)
-		mc.mouse_filter = Control.MOUSE_FILTER_STOP
-		hud.add_child(mc)
-		mobile_ui_ref = mc
-		mc.throttle_changed.connect(func(val): mobile_throttle = val)
-		mc.throttle_dragging_changed.connect(func(active): mobile_throttle_dragging = active)
-		mc.fire_pressed.connect(func(p): mobile_fire = p)
-		mc.boost_pressed.connect(func(p): mobile_boost = p)
-		mc.brake_pressed.connect(_on_mobile_brake)
-		mc.roll_triggered.connect(func(dir): _trigger_barrel_roll(dir))
-		mc.roll_held.connect(_on_mobile_roll_held)
-		mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
-		mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
-		mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
-		mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
+	# ACE: MOBILE CONTROLS OVERLAY — only on touch platforms.  Desktop uses
+	# keyboard + mouse, so the on-screen FIRE / BOOST / BRAKE / ROLL /
+	# RECENTER / throttle widgets are pure visual clutter there.  Pause is
+	# still reachable via KEY_ESCAPE (handled in Main._unhandled_input).
+	if _mobile_perf:
+		var mobile_ui_script = load("res://src/ui/MobileControlsUI.gd")
+		if mobile_ui_script:
+			var mc = Control.new()
+			mc.set_script(mobile_ui_script)
+			mc.mouse_filter = Control.MOUSE_FILTER_STOP
+			hud.add_child(mc)
+			mobile_ui_ref = mc
+			mc.throttle_changed.connect(func(val): mobile_throttle = val)
+			mc.throttle_dragging_changed.connect(func(active): mobile_throttle_dragging = active)
+			mc.fire_pressed.connect(func(p): mobile_fire = p)
+			mc.boost_pressed.connect(func(p): mobile_boost = p)
+			mc.brake_pressed.connect(_on_mobile_brake)
+			mc.roll_triggered.connect(func(dir): _trigger_barrel_roll(dir))
+			mc.roll_held.connect(_on_mobile_roll_held)
+			mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
+			mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
+			mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
+			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
 func _on_mobile_brake(pressed: bool) -> void:
 	# BRAKE hold: zero out forward intent and request a rapid slow-down.

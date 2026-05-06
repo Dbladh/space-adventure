@@ -334,45 +334,67 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
-	
+
 	void vertex() {
 		v_local_pos = VERTEX;
 		v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 		v_normal = normalize(VERTEX);
 	}
-	
-	float fluid_noise(vec3 p) {
-		float n = sin(p.x)*cos(p.y) + sin(p.y)*cos(p.z) + sin(p.z)*cos(p.x);
-		p = vec3(p.y - p.z, p.z - p.x, p.x - p.y) * 2.3 + p * 1.5;
-		n += 0.5 * (sin(p.x)*cos(p.y) + sin(p.y)*cos(p.z) + sin(p.z)*cos(p.x));
-		return n * 0.57;
+
+	// Hash-based value noise — replaces the old sin-product 'fluid_noise',
+	// which produced a regular diamond-grid interference pattern when sphere-
+	// projected, making clouds read as flat magenta rhombuses on the surface.
+	float hash3(vec3 p) {
+		p = fract(p * 0.3183099 + 0.1);
+		p *= 17.0;
+		return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
 	}
-	
+	float vnoise(vec3 p) {
+		vec3 i = floor(p); vec3 f = fract(p);
+		f = f * f * (3.0 - 2.0 * f);
+		return mix(mix(mix(hash3(i + vec3(0,0,0)), hash3(i + vec3(1,0,0)), f.x),
+		               mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
+		           mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x),
+		               mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y), f.z);
+	}
+	float fbm(vec3 p) {
+		float v = 0.0; float a = 0.5;
+		for (int i = 0; i < 4; i++) {
+			v += a * vnoise(p);
+			p = p * 2.13 + vec3(13.7, 5.1, 19.3);
+			a *= 0.5;
+		}
+		return v; // 0..1-ish
+	}
+
 	void fragment() {
-		float t = floor(TIME * 8.0) / 8.0 * 1500.0;
-		vec3 lp = v_local_pos * 0.00003 + vec3(t*0.00001, 0.0, t*0.00001);
-		float macro = fluid_noise(lp);
-		float puff = fluid_noise(lp * 4.0 + vec3(100.0));
-		float cloud_mask = smoothstep(0.1, 0.8, macro * 1.5 + puff * 0.4);
-		
+		// Slow continuous drift — old shader quantized TIME to 1/8 s steps
+		// then multiplied by 1500, causing visible cloud teleportation
+		// 8× per second (the 'flashing diamonds' bug).
+		float t = TIME * 0.02;
+		vec3 lp = v_local_pos * 0.00012 + vec3(t, 0.0, t * 0.7);
+		float macro = fbm(lp);
+		float puff = fbm(lp * 3.5 + vec3(100.0));
+		float cloud_mask = smoothstep(0.45, 0.85, macro * 0.65 + puff * 0.45);
+
 		float cam_dist = length(CAMERA_POSITION_WORLD - v_world_pos);
 		float proximity = smoothstep(50.0, 12000.0, cam_dist);
-		// Wispy clouds: threshold is higher, so only peaks of noise become clouds
-		float active_threshold = mix(0.1, 0.65, proximity);
+		// Wispy from far away, denser when up close.
+		float active_threshold = mix(0.1, 0.55, proximity);
 
 		float dot_nl = dot(v_normal, sun_dir);
-		float terminator = smoothstep(-0.2, 0.2, dot_nl); 
-		
+		float terminator = smoothstep(-0.2, 0.2, dot_nl);
+
 		// Tint clouds slightly with the planet's atmospheric color for variety
 		vec3 cloud_base = mix(vec3(1.0), horizon_color, 0.3);
-		
+
 		if (cloud_mask > active_threshold) {
 			ALBEDO = cloud_base;
-			ALPHA = 0.4 * smoothstep(active_threshold, active_threshold + 0.1, cloud_mask) * mix(0.2, 1.0, terminator);
-		} else { 
+			ALPHA = 0.55 * smoothstep(active_threshold, active_threshold + 0.15, cloud_mask) * mix(0.2, 1.0, terminator);
+		} else {
 			discard;
 		}
-		
+
 		// CELESTIAL HIBERNATION: Fully transparent if extremely distant
 		if (cam_dist > 4000000.0) ALPHA = 0.0;
 	}"""

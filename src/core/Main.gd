@@ -22,14 +22,14 @@ var benchmark_manager: Node = null
 var _mineral_spawn_queue: Array = []
 static var instance: Node = null
 var player_node: Node3D
-var _pause_overlay: ColorRect = null
+var _pause_overlay: Control = null  # PauseMenuUI script attached
+var _rebind_ui: Control = null      # transient RebindUI instance
 var _is_loading: bool = true
 var _load_overlay: ColorRect = null
 var _load_label: Label = null
 var _load_progress: float = 0.0
 var _is_finishing: bool = false
 var _boot_timer: float = 0.5 # Mandatory settle time
-var _mobile_perf_mode: bool = false
 var music_director: Node = null
 
 static var _r_cache: Dictionary = {}
@@ -41,26 +41,14 @@ static func _get_tex(path: String) -> Texture2D:
 
 func _ready() -> void:
 	instance = self
-	# Do NOT set PROCESS_MODE_ALWAYS here — that would propagate to ALL children
-	# (Player, physics, enemies) and prevent get_tree().paused from working.
-	# Only specific UI nodes (MobileControlsUI, GalaxyMapUI, _pause_overlay) need ALWAYS.
-	_mobile_perf_mode = OS.get_name() == "iOS" or OS.has_feature("mobile")
-	if _mobile_perf_mode:
-		DebugSettings.terrain_complexity = 0.8
+	Engine.max_fps = 0  # Uncapped — let the monitor's refresh rate govern
 	print("--- [DIAGNOSTIC] EXECUTING TITAN GENESIS BOOT SEQUENCE ---")
+	# Register remappable input actions (fire/warp/roll_left/roll_right/pause)
+	# with default bindings before any subsystem polls Input.is_action_*.
+	var ia_script: Script = load("res://src/core/InputActions.gd")
+	if ia_script and ia_script.has_method("register_all"):
+		ia_script.call("register_all")
 	_setup_titan_splash()
-	
-	# ... existing initialization ...
-	# CELESTIAL HEADROOM: Increase engine ceiling to 60fps to provide the budget
-	# needed for 30fps quantization without stuttering.
-	# MOBILE LOCK: iOS/Android run a hard 30fps cap (with matching physics tick)
-	# to fit within A14-class thermal/power budgets and avoid hitches.
-	# Desktop still runs 60fps ceiling.
-	if _mobile_perf_mode:
-		Engine.max_fps = 30
-		Engine.physics_ticks_per_second = 30
-	else:
-		Engine.max_fps = 60
 	
 	# ECONOMY GENESIS: The Architect's Vault
 	var econ_script = load("res://src/core/EconomyManager.gd")
@@ -137,22 +125,16 @@ func _setup_stellar_horizon() -> void:
 	sky_env.background_mode = Environment.BG_SKY
 	var master_sky = Sky.new()
 	var sky_mat = ShaderMaterial.new()
-	# MOBILE: load a stripped sky variant (1 cloud lookup vs 5, no trig phasing,
-	# no starburst). Keeps the same uniform interface so the per-frame
-	# space_blend / atmospheric updates work unchanged.
-	var _sky_path := "res://src/world/cel_sky_mobile.gdshader" if _mobile_perf_mode else "res://src/world/cel_sky.gdshader"
-	sky_mat.shader = load(_sky_path)
+	sky_mat.shader = load("res://src/world/cel_sky.gdshader")
 	
 	var fn_s = FastNoiseLite.new(); fn_s.noise_type = FastNoiseLite.TYPE_CELLULAR; fn_s.frequency = 0.05
-	var sky_tex_size = 256 if _mobile_perf_mode else 512
-	var nt_s = NoiseTexture2D.new(); nt_s.width = sky_tex_size; nt_s.height = sky_tex_size; nt_s.noise = fn_s
+	var nt_s = NoiseTexture2D.new(); nt_s.width = 512; nt_s.height = 512; nt_s.noise = fn_s
 	
 	var fn_n = FastNoiseLite.new(); fn_n.noise_type = FastNoiseLite.TYPE_SIMPLEX; fn_n.frequency = 0.02
-	var nt_n = NoiseTexture2D.new(); nt_n.width = sky_tex_size; nt_n.height = sky_tex_size; nt_n.noise = fn_n; nt_n.seamless = true
+	var nt_n = NoiseTexture2D.new(); nt_n.width = 512; nt_n.height = 512; nt_n.noise = fn_n; nt_n.seamless = true
 	
-	# MACROSCOPIC CLOUD NOISE: Mobile uses a smaller source texture to cut startup and shader cost
 	var fn_c = FastNoiseLite.new(); fn_c.noise_type = FastNoiseLite.TYPE_SIMPLEX; fn_c.frequency = 0.025; fn_c.fractal_octaves = 2
-	var nt_c = NoiseTexture2D.new(); nt_c.width = sky_tex_size; nt_c.height = sky_tex_size; nt_c.noise = fn_c; nt_c.seamless = true
+	var nt_c = NoiseTexture2D.new(); nt_c.width = 512; nt_c.height = 512; nt_c.noise = fn_c; nt_c.seamless = true
 	
 	sky_mat.set_shader_parameter("star_noise", nt_s)
 	sky_mat.set_shader_parameter("nebula_noise", nt_n)
@@ -162,9 +144,11 @@ func _setup_stellar_horizon() -> void:
 	main_sky_mat = sky_mat
 	
 	sky_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	# Warm neutral ambient so shadow-side terrain reads as dark amber, not pitch black
-	sky_env.ambient_light_color = Color("#C8B89A")
-	sky_env.ambient_light_energy = 1.1
+	# Cool blue ambient (pre-regression value) — the warm-beige bump in commit
+	# d7fb9a9 ("Shadowglass retro-snapping") combined with the new ambient
+	# energy of 1.1 was the main cause of bleach-white planet impostors.
+	sky_env.ambient_light_color = Color("#3A75C4")
+	sky_env.ambient_light_energy = 0.65
 	
 	# BOTW-STYLE ATMOSPHERIC HAZE: Exponential distance fog for aerial perspective
 	# This will fade distant mountains into a soft haze, giving enormous perceived depth
@@ -174,36 +158,30 @@ func _setup_stellar_horizon() -> void:
 	sky_env.fog_density = 0.0   # Start at 0, updated per-frame in _update_atmospheric_transition
 	sky_env.fog_aerial_perspective = 0.3  # Subtle sky blend — only affects very distant horizon
 	sky_env.fog_sun_scatter = 0.25  # Warm glow near the sun direction for golden horizon feel
-	# CINEMATIC BLOOM: Critical for energy bolt visibility in Retro/Pixelated modes.
-	# MOBILE: Glow is one of the most expensive post effects on tiled-GPU chips
-	# (A14/A15). Disable entirely on iOS/Android — the flat toon look holds up.
-	if not _mobile_perf_mode:
-		sky_env.glow_enabled = true
-		sky_env.glow_intensity = 0.8
-		sky_env.glow_strength = 1.0
-		sky_env.glow_bloom = 0.4
-		sky_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
-	else:
-		sky_env.glow_enabled = false
+	# Subtle bloom: only HDR highlights (>1.05) glow, lit surfaces don't bleach.
+	sky_env.glow_enabled = true
+	sky_env.glow_intensity = 0.35
+	sky_env.glow_strength = 0.7
+	sky_env.glow_bloom = 0.05
+	sky_env.glow_hdr_threshold = 1.05
+	sky_env.glow_hdr_scale = 1.4
+	sky_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
 	
 	env.environment = sky_env
 	add_child(env); move_child(env, 0); main_env = env
 	
 	var vp = get_viewport()
-	# ACE EXTREME RETRO SCALING: 25% internal resolution (Super-Chunky)
-	# This drastically reduces fragment shader pressure while leaning into the aesthetic.
+	# DESKTOP RETRO SCALING: 40% internal resolution gives the chunky pixel aesthetic
+	# while keeping the GPU well within budget on a 1080p/1440p monitor.
+	# FSR 1.0 upscales cleanly from ~540p/720p → native.
 	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
-	# MOBILE: Drop to 15% internal resolution on iOS so iPhone 12-class GPUs
-	# can maintain a locked 30fps under planet-scale fragment loads.
-	# The FSR upscale + nearest-neighbour filter keeps the toon look readable.
-	vp.scaling_3d_scale = 0.15 if _mobile_perf_mode else 0.25
+	vp.scaling_3d_scale = 0.40
 	vp.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
-	if _mobile_perf_mode:
-		# MSAA is cheap on desktop but very expensive on tiled-GPU chips
-		vp.msaa_3d = Viewport.MSAA_DISABLED
-		vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
-		vp.use_debanding = false
-		vp.use_taa = false
+	# 2x MSAA is essentially free on desktop discrete GPUs and eliminates the worst
+	# aliasing on geometry edges at our resolution scale.
+	vp.msaa_3d = Viewport.MSAA_2X
+	vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED  # FSR already handles this
+	vp.use_debanding = true
 
 func _setup_titan_splash() -> void:
 	_load_overlay = ColorRect.new()
@@ -256,13 +234,13 @@ func _setup_hardened_solar_genesis() -> void:
 	add_child(world_env)
 	
 	var sun = DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-45, 45, 0) 
+	sun.rotation_degrees = Vector3(-45, 45, 0)
 	sun.light_color = Color("#FFF0CE")
-	sun.light_energy = 1.4
-	sun.shadow_enabled = not _mobile_perf_mode
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.light_energy = 1.2
+	sun.shadow_enabled = true
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	sun.directional_shadow_blend_splits = false # Sharp splits for that retro feel
-	sun.directional_shadow_max_distance = 2500.0 if _mobile_perf_mode else 6500.0 
+	sun.directional_shadow_max_distance = 6500.0 
 	
 	sun.add_to_group("World")
 	add_child(sun)
@@ -302,6 +280,10 @@ func _spawn_station(display_name: String, pos: Vector3, beacon_col: Color) -> vo
 	station.add_to_group("SpaceStation")
 	world_root.add_child(station)
 	station.global_position = pos
+	
+	# ACE UNIVERSE SYNC: Link station events to the cosmic density controller
+	if station.has_signal("planet_forged"):
+		station.planet_forged.connect(_on_planet_count_changed)
 
 	var marker_script = load("res://src/ui/POIMarker.gd")
 	if marker_script:
@@ -314,23 +296,49 @@ func _spawn_station(display_name: String, pos: Vector3, beacon_col: Color) -> vo
 func _setup_asteroid_belt() -> void:
 	var belt_script = load("res://src/world/AsteroidBelt.gd")
 	if belt_script:
-		var belt = Node3D.new(); belt.set_script(belt_script)
-		belt.name = "DeepSpaceAsteroidBelt"
-		belt.set("belt_seed", 9999)
-		# DEEP SPACE BELT:
-		belt.set("inner_radius", 1400000.0)
-		belt.set("outer_radius", 2000000.0)
-		belt.set("thickness", 40000.0)
-		belt.set("count", 1800 if _mobile_perf_mode else 3000)
-		belt.set("mmi_count", 8000 if _mobile_perf_mode else 14000)
-		belt.set("phys_count", 240 if _mobile_perf_mode else 500)
-		belt.set("mobile_perf", _mobile_perf_mode)
-		world_root.add_child(belt)
-		belt.global_position = Vector3(0, 0, -1500000.0)
-		belt.add_to_group("World")
-		
+		# Primary "main" belt — densest, near origin.
+		_spawn_asteroid_belt(belt_script, "DeepSpaceAsteroidBelt",
+			9999, Vector3(0, 0, -1500000.0), Vector3.ZERO,
+			1400000.0, 2000000.0, 40000.0, 14000, 500)
+
+		# SECONDARY BELTS — rotated and offset so asteroids aren't only in one
+		# narrow ring, but distributed around the inner system.  Each belt is
+		# itself a flattened ring; stacking several at different orientations
+		# gives the impression of asteroids "everywhere in space".
+		_spawn_asteroid_belt(belt_script, "ScatterBeltAlpha",
+			17371, Vector3(2200000.0, 400000.0, 600000.0),
+			Vector3(deg_to_rad(35), deg_to_rad(60), 0.0),
+			900000.0, 1700000.0, 80000.0, 7000, 300)
+		_spawn_asteroid_belt(belt_script, "ScatterBeltBeta",
+			28983, Vector3(-1800000.0, -300000.0, 1100000.0),
+			Vector3(deg_to_rad(-25), deg_to_rad(-40), deg_to_rad(15)),
+			1100000.0, 1900000.0, 60000.0, 8000, 320)
+		_spawn_asteroid_belt(belt_script, "ScatterBeltGamma",
+			41207, Vector3(500000.0, 1200000.0, 2200000.0),
+			Vector3(deg_to_rad(70), deg_to_rad(20), deg_to_rad(-30)),
+			800000.0, 1500000.0, 100000.0, 6000, 260)
+
 	# DEEP SPACE SALVAGE: Rare minerals floating in the void
 	_setup_deep_space_minerals()
+
+
+func _spawn_asteroid_belt(belt_script: Script, belt_name: String, seed_val: int,
+		pos: Vector3, rot_euler: Vector3,
+		inner_r: float, outer_r: float, thick: float,
+		mmi_count: int, phys_count: int) -> void:
+	var belt = Node3D.new()
+	belt.set_script(belt_script)
+	belt.name = belt_name
+	belt.set("belt_seed", seed_val)
+	belt.set("inner_radius", inner_r)
+	belt.set("outer_radius", outer_r)
+	belt.set("thickness", thick)
+	belt.set("mmi_count", mmi_count)
+	belt.set("phys_count", phys_count)
+	world_root.add_child(belt)
+	belt.global_position = pos
+	belt.rotation = rot_euler
+	belt.add_to_group("World")
 
 func _setup_deep_space_minerals() -> void:
 	var m_script = _get_res("res://src/world/MineableResource.gd")
@@ -340,9 +348,8 @@ func _setup_deep_space_minerals() -> void:
 	var rng = RandomNumberGenerator.new(); rng.seed = 77777 
 	
 	# ACE: We queue these for staggered spawning to prevent Physics Server lock-up
-	# MOBILE: Cut from 250 → 80 minerals on iOS; each mineral carries an OmniLight3D
-	# + SubViewport HUD, so count directly drives draw calls and touch latency.
-	var _mineral_count = 80 if _mobile_perf_mode else 250
+	# ADAPTIVE DENSITY: Starting with 600 minerals when the universe is empty.
+	var _mineral_count = 600
 	for i in range(_mineral_count):
 		var type_idx = 0
 		var r = rng.randf()
@@ -356,6 +363,19 @@ func _setup_deep_space_minerals() -> void:
 		var pos = Vector3(rng.randf_range(-1,1), rng.randf_range(-0.3, 0.3), rng.randf_range(-1,1)).normalized()
 		var g_pos = pos * rng.randf_range(2000000.0, 15000000.0)
 		_mineral_spawn_queue.append({"type": types[type_idx], "pos": g_pos, "script": m_script})
+
+var _active_minerals: Array[Node] = []
+
+func _on_planet_count_changed(count: int) -> void:
+	# ACE: Adaptive Universe density. 
+	# More planets -> less deep space debris to maintain frame budget.
+	# We cull 150 asteroids per forged planet.
+	var target_count = 600 - (count * 150)
+	print("--- ARCHITECT: Adaptive Density Sync (Planets: %d, Target Asteroids: %d) ---" % [count, target_count])
+	while _active_minerals.size() > target_count and not _active_minerals.is_empty():
+		var m = _active_minerals.pop_back()
+		if is_instance_valid(m):
+			m.queue_free()
 
 func _setup_hardened_diag_hud() -> void:
 	hud_layer = CanvasLayer.new()
@@ -405,16 +425,11 @@ func _setup_hardened_diag_hud() -> void:
 			inv_label.text = "  ".join(parts)
 		inv.inventory_changed.connect(_refresh_inv)
 
-	# NAVIGATION BEACON: Compact corner widget — bearing + distance to nearest station.
-	# Positioned below RECENTER GYRO (which ends at roughly y=90 on most screens).
-	var beacon_script = load("res://src/ui/NavBeacon.gd")
-	if beacon_script:
-		var beacon = Control.new()
-		beacon.set_script(beacon_script)
-		beacon.set_anchors_preset(Control.PRESET_TOP_LEFT)
-		beacon.custom_minimum_size = Vector2(200, 90)
-		beacon.position = Vector2(8, 100)
-		hud_layer.add_child(beacon)
+	# Station-guide NavBeacon widget removed — the screen-space POI HUD
+	# below renders bearing + distance markers for every station / planet
+	# directly on screen, so the duplicate top-left corner widget was
+	# redundant clutter.  Kept the script file (NavBeacon.gd) in place
+	# in case the widget is wanted back later.
 
 	# SCREEN-SPACE POI HUD: NMS-style markers for all stations and planets.
 	var poi_hud_script = load("res://src/ui/ScreenPOIHUD.gd")
@@ -435,13 +450,19 @@ func _setup_hardened_diag_hud() -> void:
 		_reset_map_to_corner()
 		map_node.hide() # ACE: Hidden during normal play
 	
-	_pause_overlay = ColorRect.new()
-	_pause_overlay.color = Color(0, 0, 0, 0.55)
-	_pause_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_pause_overlay.process_mode = PROCESS_MODE_ALWAYS
-	_pause_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE  # let MobileControlsUI handle touches
-	hud_layer.add_child(_pause_overlay)
-	_pause_overlay.hide()
+	# Pause menu — full-screen Control with Resume / Rebind / Quit buttons.
+	# Has its own _input handler with process_mode = ALWAYS so unpause works
+	# while the scene tree is paused (Main itself is INHERIT-paused so its
+	# _unhandled_input is silent during pause).
+	var pause_script: Script = load("res://src/ui/PauseMenuUI.gd")
+	var pause_node := Control.new()
+	pause_node.set_script(pause_script)
+	hud_layer.add_child(pause_node)
+	pause_node.hide()
+	pause_node.resume_requested.connect(toggle_pause)
+	pause_node.rebind_requested.connect(_on_open_rebind)
+	pause_node.quit_requested.connect(func() -> void: get_tree().quit())
+	_pause_overlay = pause_node
 
 	add_child(hud_layer)
 
@@ -471,28 +492,35 @@ func _process(_delta: float) -> void:
 		return
 		
 	# ACE: Spawn minerals and check readiness BEFORE any early-returns
-	var batch_size = 50 if _is_loading else 15
+	var batch_size = 80 if _is_loading else 25
 	for i in range(min(_mineral_spawn_queue.size(), batch_size)):
-		var data = _mineral_spawn_queue.pop_back()
-		var mineral = StaticBody3D.new()
-		mineral.set_script(data.script)
-		mineral.set("resource_type", data.type)
-		world_root.add_child(mineral)
-		mineral.global_position = data.pos
+		var entry = _mineral_spawn_queue.pop_back()
+		var m = entry.script.new()
+		m.set("resource_type", entry.type)
+		world_root.add_child(m)
+		m.global_position = entry.pos
+		_active_minerals.append(m)
 	
 	# Check if all planets have finished their staggered initialization
 	var all_ready = _mineral_spawn_queue.is_empty()
 	var planets = get_tree().get_nodes_in_group("Planet")
-	for pl in planets:
-		if pl.get("_prewarm_count") < pl.get("_prewarm_target"):
-			all_ready = false
-			break
+	if not planets.is_empty() and _is_loading:
+		for pl in planets:
+			var pc = pl.get("_prewarm_count")
+			var pt = pl.get("_prewarm_target")
+			if pc != null and pt != null:
+				if pc < pt:
+					all_ready = false
+					break
+			else:
+				# Script not loaded or variables missing
+				printerr("--- ARCHITECT: Planet [%s] has no prewarm data! ---" % pl.name)
 	
 	if _is_loading:
 		if all_ready:
 			_finish_loading()
 		else:
-			var _mtotal = 80 if _mobile_perf_mode else 250
+			var _mtotal = 250
 			_load_label.text = "CALIBRATING QUANTUM FIELD: %d%%" % (100 - _mineral_spawn_queue.size() * 100 / max(_mtotal, 1))
 		return # Stay focused on loading
 
@@ -516,19 +544,14 @@ func _process(_delta: float) -> void:
 	# hud rebuilds NEVER land on the same frame (mobile: env=phase 0, hud=phase 3
 	# of a 6-frame cycle → zero overlap, halves the worst-case spike).
 	var fr := Engine.get_process_frames()
-	var _env_target: int = 6 if _mobile_perf_mode else 4
-	if fr % _env_target == 0:
+	if fr % 4 == 0:
 		_update_atmospheric_transition(p)
 		_update_shadow_distance(p)
 
 	if not hud_visible or not diag_label: return
 
-	# HUD THROTTLE: Rebuild text only every N frames.
-	# String construction + label reflow is surprisingly expensive at 60fps.
-	# MOBILE: Stretch to 6 frames — telemetry readability is fine at ~5Hz.
-	var _hud_target: int = 6 if _mobile_perf_mode else 3
-	var _hud_phase: int = 3 if _mobile_perf_mode else 2
-	if (fr + _hud_phase) % _hud_target != 0: return
+	# HUD THROTTLE: Rebuild text only every 3 frames (~20Hz at 60fps).
+	if (fr + 2) % 3 != 0: return
 	
 	var alt = floor(alt_m / 1000.0)
 	var speed = floor(p.velocity.length() if "velocity" in p else 0.0)
@@ -597,14 +620,18 @@ func _update_atmospheric_transition(p: Node) -> void:
 		# ACE: Use altitude-based ratio for lighting so surface gets warm ambient fill
 		# Surface (ratio=0): warm amber ambient at 1.3, good fill for shadow faces
 		# Space  (ratio=1): near-black ambient at 0.08, authentic vacuum lighting
-		sky_env.ambient_light_color = Color("C8B89A").lerp(Color("0B1021"), lighting_ratio)
-		sky_env.ambient_light_energy = lerp(1.3, 0.08, lighting_ratio)
+		sky_env.ambient_light_color = Color("3A75C4").lerp(Color("0B1021"), lighting_ratio)
+		sky_env.ambient_light_energy = lerp(0.65, 0.1, lighting_ratio)
 		
 		# ATMOSPHERIC HAZE: Drastically reduced density so distant planets remain visible!
 		# Godot's exponential fog math completely wipes out geometry > 500km away at normal densities.
 		var surface_fog_density = 0.000005
 		sky_env.fog_density = lerp(surface_fog_density, 0.0, lighting_ratio)
-		sky_env.fog_aerial_perspective = 0.85 # Cranks up horizon haze to compensate for thinner fog
+		# Aerial perspective at 0.85 was blending 85% of the bright sky colour
+		# into distant terrain, so even a vivid pink CANDY planet read as
+		# uniform cyan-white from any distance. 0.2 keeps subtle horizon haze
+		# without erasing the procedural biome colour.
+		sky_env.fog_aerial_perspective = 0.2
 		
 		# Tint the fog to the planet's horizon color for per-biome atmosphere feel
 		var fog_col = Color(0.72, 0.82, 0.95) # Default sky blue
@@ -615,7 +642,7 @@ func _update_atmospheric_transition(p: Node) -> void:
 		
 	if main_sun:
 		main_sun.light_color = Color("#FFF0CE").lerp(Color.WHITE, lighting_ratio)
-		main_sun.light_energy = lerp(0.90, 1.6, lighting_ratio)
+		main_sun.light_energy = lerp(1.2, 1.6, lighting_ratio)
 
 func _update_shadow_distance(p: Node) -> void:
 	if not main_sun: return
@@ -637,13 +664,78 @@ func _unhandled_input(event: InputEvent) -> void:
 			# a SpaceStation or Cinematic has the stage.
 			if not get_tree().paused or _pause_overlay.visible:
 				toggle_pause()
-		if event.keycode == KEY_B: 
+		if event.keycode == KEY_B:
 			if benchmark_manager: benchmark_manager.start_automated_test(_player_ref)
+		# Debug instrumentation: F5 dumps a world-content audit, F6 inspects
+		# whatever mesh is under the cursor.  Both write to MCPRuntime's log
+		# (fetchable via the godot_mcp `get_runtime_log` tool) and stdout.
+		if event.keycode == KEY_F5:
+			var WorldAudit = load("res://src/debug/WorldAudit.gd")
+			if WorldAudit: WorldAudit.dump()
+		if event.keycode == KEY_F6:
+			var p_ref := get_tree().get_first_node_in_group("Player")
+			if p_ref and "camera" in p_ref:
+				var MeshInspector = load("res://src/debug/MeshInspector.gd")
+				if MeshInspector:
+					MeshInspector.inspect_at(get_viewport(), p_ref.camera)
+	# Gamepad START toggles pause — without this, once paused with a
+	# gamepad-only input chain there's no way to unpause (the pause
+	# overlay has no buttons of its own).  Same gating as ESCAPE.
+	if event is InputEventJoypadButton and event.pressed:
+		if event.button_index == JOY_BUTTON_START:
+			if not get_tree().paused or _pause_overlay.visible:
+				toggle_pause()
+
+func _on_open_rebind() -> void:
+	# Hide the pause menu, show the rebind submenu.  Game stays paused so
+	# nothing moves while the user is rebinding.  RebindUI's `closed`
+	# signal returns us to the pause menu.
+	if is_instance_valid(_rebind_ui): return
+	var script: Script = load("res://src/ui/RebindUI.gd")
+	var ui := Control.new()
+	ui.set_script(script)
+	# Add at the canvas-layer level so it draws on top of the pause overlay.
+	if _pause_overlay and _pause_overlay.get_parent():
+		_pause_overlay.get_parent().add_child(ui)
+	else:
+		add_child(ui)
+	ui.closed.connect(_on_close_rebind)
+	if _pause_overlay: _pause_overlay.hide()
+	_rebind_ui = ui
+
+
+func _on_close_rebind() -> void:
+	if is_instance_valid(_rebind_ui):
+		_rebind_ui.queue_free()
+	_rebind_ui = null
+	if _pause_overlay and get_tree().paused:
+		_pause_overlay.show()
+
+
+func _any_modal_ui_open() -> bool:
+	# True if a SpaceStation has its docking UI open, or a PlanetPlacementUI
+	# is in flight — used to suppress the global pause overlay so we never
+	# stack two menus on top of each other.
+	for s in get_tree().get_nodes_in_group("SpaceStation"):
+		if "_ui_visible" in s and bool(s.get("_ui_visible")):
+			return true
+	# PlanetPlacementUI doesn't add itself to a group; detect via class
+	# (it extends Control and has placement_confirmed signal).
+	for n in get_tree().get_nodes_in_group("PlacementUI"):
+		if n is Control and n.visible:
+			return true
+	return false
+
 
 func toggle_pause() -> void:
 	if _is_loading: return
+	# Mutual exclusion: don't layer the pause overlay over an already-open
+	# station/forge UI.  If a station has a UI visible, do nothing — that
+	# UI's own _input already handles its own close-button (Escape / START
+	# / B).  Same for an in-flight placement UI.
+	if not get_tree().paused and _any_modal_ui_open(): return
 	get_tree().paused = !get_tree().paused
-	
+
 	if get_tree().paused:
 		_pause_overlay.show()
 		_toggle_map_fullscreen_to(true)

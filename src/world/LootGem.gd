@@ -183,10 +183,7 @@ func _on_collected() -> void:
 	if music_director.size() > 0:
 		music_director[0].call("play_item_collect")
 
-	# Add resource to inventory
+	# Add resource to inventory — player sells at station for credits
 	if Engine.has_meta("InventoryManager"):
 		Engine.get_meta("InventoryManager").add(resource_type, 1)
-	# Also award credits until SpaceStation exists
-	if Engine.has_meta("EconomyManager"):
-		Engine.get_meta("EconomyManager").add_credits(value)
 	queue_free()

@@ -9,8 +9,27 @@ var is_valid_placement: bool = false
 var name_input: LineEdit
 var map_display: Control
 
+# Minimum-distance tuning for the placement validator.  Old constants
+# (1500 km between planets, 500 km from stations, 2000 km from player)
+# were sized for a previous era of much larger planets and didn't read
+# any actual radii — they were both too loose against stations (a
+# scaled station model is ~500 km across, so 500 km from centre still
+# clipped) and far too conservative against tiny planets (60-140 km
+# now, so the old 1500 km guard reserved ~10× the actual contact
+# distance).  All three checks are now (existing_radius +
+# new_planet_radius + safety_margin) using whatever radius data the
+# nodes expose.
+const NEW_PLANET_RADIUS_ASSUMED: float = 150000.0  # 150 km — generous for the about-to-spawn planet
+const PLANET_SAFETY_MARGIN: float = 50000.0        # 50 km buffer between planet surfaces
+const STATION_SAFETY_MARGIN: float = 100000.0      # 100 km buffer around station extent
+const STATION_RADIUS_ASSUMED: float = 500000.0     # 500 km — visual extent of the scaled station model
+const PLAYER_SAFETY_MARGIN: float = 100000.0       # 100 km buffer around player ship
+
 func _ready() -> void:
 	process_mode = PROCESS_MODE_ALWAYS
+	# Group so Main._any_modal_ui_open() can detect us and suppress the
+	# global pause overlay — keeps the rule "one menu at a time".
+	add_to_group("PlacementUI")
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	
 	# 1. Dark Background
@@ -71,15 +90,31 @@ func _ready() -> void:
 	confirm_btn.add_theme_font_size_override("font_size", 28)
 	confirm_btn.pressed.connect(_on_confirm)
 	hbox.add_child(confirm_btn)
-	
+
 	var cancel_btn = Button.new()
 	cancel_btn.text = "  CANCEL  "
 	cancel_btn.add_theme_font_size_override("font_size", 28)
 	cancel_btn.pressed.connect(func(): placement_canceled.emit(); queue_free())
 	hbox.add_child(cancel_btn)
 
+	# Grab focus on Confirm so a gamepad user can press A immediately
+	# after picking a spot, and B / START / Esc to back out without
+	# having to mouse to the Cancel button.  Deferred so the buttons
+	# are fully in the tree before grab_focus runs.
+	cancel_btn.set_meta("placement_cancel_btn", true)
+	confirm_btn.call_deferred("grab_focus")
+
 func _input(event: InputEvent) -> void:
+	# Cancel via Escape OR gamepad B (ui_cancel) OR gamepad START.
+	# Pre-empts the global pause toggle so pause-while-placing closes
+	# this UI rather than stacking the pause overlay on top.
+	var cancel_pressed := false
 	if event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
+		cancel_pressed = true
+	elif event is InputEventJoypadButton and event.pressed:
+		if event.button_index == JOY_BUTTON_START or event.button_index == JOY_BUTTON_B:
+			cancel_pressed = true
+	if cancel_pressed:
 		placement_canceled.emit()
 		queue_free()
 		get_viewport().set_input_as_handled()
@@ -94,20 +129,31 @@ func _check_placement_valid(ui_pos: Vector2) -> bool:
 	var w_pos = _map_to_world(ui_pos)
 	var planets = get_tree().get_nodes_in_group("Planet")
 	var stations = get_tree().get_nodes_in_group("SpaceStation")
-	
-	# Minimum 1500km from any planet, 500km from any station, 2000km from player
+
+	# Each minimum is (existing_radius + new_planet_radius + margin) so
+	# planets can sit close to one another / to stations / to the player
+	# while still leaving a buffer that prevents surface clipping.
 	for p in planets:
-		if p.global_position.distance_to(w_pos) < 1500000.0:
+		var pr: float = float(p.get("planet_radius")) if "planet_radius" in p else 100000.0
+		var min_d: float = pr + NEW_PLANET_RADIUS_ASSUMED + PLANET_SAFETY_MARGIN
+		if p.global_position.distance_to(w_pos) < min_d:
 			return false
+
 	for s in stations:
-		if s.global_position.distance_to(w_pos) < 500000.0:
+		# SpaceStations don't currently expose a radius — fall back to a
+		# conservative footprint matching the scaled model's visible
+		# extent, with an extra margin so the docking ring stays clear.
+		var sr: float = float(s.get("station_radius")) if "station_radius" in s else STATION_RADIUS_ASSUMED
+		var min_d: float = sr + NEW_PLANET_RADIUS_ASSUMED + STATION_SAFETY_MARGIN
+		if s.global_position.distance_to(w_pos) < min_d:
 			return false
-			
+
 	var players = get_tree().get_nodes_in_group("Player")
 	if players.size() > 0:
-		if players[0].global_position.distance_to(w_pos) < 2000000.0:
+		var min_d: float = NEW_PLANET_RADIUS_ASSUMED + PLAYER_SAFETY_MARGIN
+		if players[0].global_position.distance_to(w_pos) < min_d:
 			return false
-			
+
 	return true
 
 func _on_confirm() -> void:

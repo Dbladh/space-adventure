@@ -5,6 +5,7 @@ uniform sampler2D albedo_tex : source_color;
 uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
 uniform float flash_intensity : hint_range(0.0, 1.0) = 0.0;
 uniform vec3 flash_color : source_color = vec3(1.0, 0.1, 0.0);
+uniform float biolum_intensity : hint_range(0.0, 2.0) = 0.0;
 
 varying vec3 v_color;
 varying vec2 v_uv;
@@ -53,6 +54,10 @@ void light() {
 	
 	vec3 final_col = mix(shadow_col, mid_col, t2);
 	final_col = mix(final_col, ALBEDO, t1);
+	
+	// ACE BIOLUMINESCENCE: Rare planetary glow
+	float bio_pulse = (sin(TIME * 1.5) * 0.5 + 0.5) * biolum_intensity;
+	final_col += ALBEDO * bio_pulse * 1.2;
 	
 	DIFFUSE_LIGHT += final_col * LIGHT_COLOR;
 }

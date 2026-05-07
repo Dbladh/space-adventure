@@ -4,6 +4,9 @@ extends CharacterBody3D
 # PILOT ADVERSARY: Crimson Starhawk Interceptor
 # Managed by THE ARCHITECT (Physics) and THE GUNSMITH (Armaments).
 
+const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+
+
 @onready var health = $HealthComponent
 var player: Node3D = null
 var hp_bar: MeshInstance3D
@@ -18,6 +21,8 @@ var acceleration: float = 0.10
 # WEAPONRY: Pilot-Tier Cannons
 var fire_cooldown: float = 0.0
 var bolt_script: Script = null
+var explosion_fx_script: Script = preload("res://src/combat/ExplosionFX.gd")
+var loot_gem_script: Script = preload("res://src/world/LootGem.gd")
 var live_bolts: Array = []
 
 # AI DYNAMICS
@@ -25,15 +30,28 @@ var current_yaw: float = 0.0
 var current_pitch: float = 0.0
 var current_thrust: float = 0.0
 var _v_tick: int = 0
-# MOBILE PERF + POOLED RAY QUERY: mirrors Player.gd so enemy bolt tracing doesn't
-# allocate a new PhysicsRayQueryParameters3D every bolt × frame.
-var _mobile_perf: bool = false
 var _ray_q: PhysicsRayQueryParameters3D = null
+
+# LOOT TABLE: weighted drop pool. Higher weight = more common.
+# Tier 1 commons drop most often; Tier 3 rares are occasional jackpots.
+const LOOT_TABLE: Array[Dictionary] = [
+	{res="Stone",         weight=30},
+	{res="Wood",          weight=25},
+	{res="Silica Dust",   weight=25},
+	{res="Carbon Fiber",  weight=20},
+	{res="Neon Moss",     weight=20},
+	{res="Copper",        weight=15},
+	{res="Silver",        weight=10},
+	{res="Azure Sap",     weight=8},
+	{res="Living Resin",  weight=6},
+	{res="Gold",          weight=4},
+	{res="Platinum",      weight=2},
+	{res="Primal Fruit",  weight=1},
+]
 
 func _ready():
 	add_to_group("Targets")
 	add_to_group("Enemies")
-	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
 	_ray_q = PhysicsRayQueryParameters3D.new()
 	_ray_q.collision_mask = 1 | 2
 	_ray_q.exclude = [self]
@@ -88,9 +106,7 @@ func _physics_process(delta):
 	var dir = rel_to_player.normalized()
 	
 	# ACE PERFORMANCE: Celestial Hibernation
-	# MOBILE: tighten to 80km so distant AI never enters the steering/firing
-	# pipeline on iOS. Desktop keeps the cinematic 150km horizon.
-	var _hib = 80000.0 if _mobile_perf else 150000.0
+	var _hib = 150000.0
 	if dist > _hib: return
 	
 	# ACE STEERING: Converge on target
@@ -208,9 +224,8 @@ func _apply_bolt_impact(target, pos):
 		hp.take_damage(25.0)
 
 	# ACE: VISUAL FEEDBACK SYNC (Hit Spark vs Destruction Nova)
-	var fx_script = load("res://src/combat/ExplosionFX.gd")
-	if fx_script:
-		var fx = Node3D.new(); fx.set_script(fx_script)
+	if explosion_fx_script:
+		var fx = Node3D.new(); fx.set_script(explosion_fx_script)
 		
 		# HULL WELDING: sparks follow the target
 		if not is_dying and is_instance_valid(target):
@@ -241,12 +256,51 @@ func _on_health_changed(new_hp):
 
 func _die():
 	# ACE: TITANIC NOVA - 6x Bigger Destruction Payload
-	var fx_script = load("res://src/combat/ExplosionFX.gd")
-	if fx_script:
+	if explosion_fx_script:
 		var fx = Node3D.new()
-		fx.set_script(fx_script)
+		fx.set_script(explosion_fx_script)
 		get_tree().root.add_child(fx)
 		fx.global_position = global_position
-		fx.set("explosion_scale", 600.0) # Massive cinematic Nova
-	
+		fx.set("explosion_scale", 600.0)
+
+	# LOOT DROP: Spawn 1-3 resource gems from the wreckage
+	_drop_loot()
+
 	queue_free()
+
+func _drop_loot() -> void:
+	# Build cumulative weight table for random weighted selection
+	var total_weight: int = 0
+	for entry in LOOT_TABLE: total_weight += entry.weight
+
+	# Desktop: drop 2-3 gems
+	var drop_count: int = randi_range(2, 3)
+
+	for _i in range(drop_count):
+		# Weighted random pick
+		var roll: int = randi() % total_weight
+		var cumulative: int = 0
+		var picked_res: String = LOOT_TABLE[0].res
+		for entry in LOOT_TABLE:
+			cumulative += entry.weight
+			if roll < cumulative:
+				picked_res = entry.res
+				break
+
+		var gem := Node3D.new()
+		if loot_gem_script:
+			gem.set_script(loot_gem_script)
+		# Set gem properties before adding to tree
+		gem.set("resource_type", picked_res)
+		gem.set("value", ResourceRegistry.get_value(picked_res))
+		gem.set("col", ResourceRegistry.get_color(picked_res))
+		# No planet context — gem is loose in space, will timeout to HOMING after 1.5s
+		gem.set("planet", null)
+		gem.set("surface_dist", 0.0)
+		get_tree().root.add_child(gem)
+		gem.global_position = global_position + Vector3(
+			randf_range(-80.0, 80.0),
+			randf_range(-80.0, 80.0),
+			randf_range(-80.0, 80.0)
+		)
+		print("--- GUNSMITH: Dropped ", picked_res, " gem ---")

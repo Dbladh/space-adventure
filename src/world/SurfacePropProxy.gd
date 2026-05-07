@@ -17,6 +17,13 @@ const GEM_COLOR: Dictionary = {
 	"Wood":  Color(0.45, 0.28, 0.12),   # brown
 }
 
+# PERSISTENT DESTRUCTION REGISTRY: Track destroyed surface-prop positions
+# (rocks / trees) so they don't reappear when a chunk reloads. Mirrors the
+# MineableResource pattern.  Keyed by hash(global_position.round()) for
+# O(1) lookup; PlanetChunk._spawn_rock and _spawn_tree_lods filter against
+# this dict before building their MultiMeshes.
+static var _destroyed_positions: Dictionary = {}
+
 var resource_type: String = "Copper"
 var _mmis: Array = []          # MultiMeshInstance3D references
 var _instance_idx: int = -1
@@ -29,7 +36,7 @@ func _ready() -> void:
 	add_to_group("Destructible")
 	# Layer 6 (bit 32): dedicated proxy layer so bolt raycasts bypass terrain (layer 1).
 	# Terrain and proxies on the same layer caused terrain to intercept first on mobile.
-	collision_layer = 32
+	collision_layer = 1 << 5 # Layer 6
 	collision_mask = 0
 
 func setup(mmis: Array, idx: int, res_type: String) -> void:
@@ -38,12 +45,18 @@ func setup(mmis: Array, idx: int, res_type: String) -> void:
 	resource_type = res_type
 
 func take_damage(_amount: float) -> void:
+	print("--- PROCEDURALIST: Proxy Hit! health=%d ---" % [_health - 1])
 	_health -= 1
 	health = _health
 	if _health <= 0:
 		_on_destroyed()
 
 func _on_destroyed() -> void:
+	# Register this position so the prop doesn't respawn when the chunk
+	# reloads. Use the same rounded-position hash convention as the
+	# spawner (PlanetChunk._filter_destroyed_props).
+	_destroyed_positions[hash(global_position.round())] = true
+
 	# Remove the visual prop by zeroing its MultiMesh transform
 	if _instance_idx >= 0:
 		var zero := Transform3D().scaled(Vector3.ZERO)

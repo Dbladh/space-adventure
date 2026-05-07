@@ -18,6 +18,7 @@ extends CharacterBody3D
 
 var camera: Camera3D
 var ship_model: Node3D
+var _cached_cel_mat: ShaderMaterial = null
 var target_planet: Node3D
 var true_altitude: float = 300000.0
 var mouse_locked: bool = true
@@ -129,10 +130,10 @@ func _ready() -> void:
 	self.add_to_group("Player")
 	_mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
 	_ray_q = PhysicsRayQueryParameters3D.new()
-	_ray_q.collision_mask = 1 | 2 | 4  # terrain + ship + mineable props
+	_ray_q.collision_mask = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) # Layer 1,2,3,4,6
 	_ray_q.exclude = [self]
 	_proxy_ray_q = PhysicsRayQueryParameters3D.new()
-	_proxy_ray_q.collision_mask = 32  # layer 6: SurfacePropProxy only, bypasses terrain
+	_proxy_ray_q.collision_mask = (1 << 2) | (1 << 5) # ACE: Prioritize Minerals (Layer 3) and Proxies (Layer 6)
 	_proxy_ray_q.exclude = [self]
 	lock_mouse()
 	
@@ -158,7 +159,8 @@ func _ready() -> void:
 	coll_node.shape = shape
 	add_child(coll_node)
 	self.collision_layer = 2 # THE SHIP
-	self.collision_mask = 1 | 4 # World + Sun/Others
+	# Layer 1: World, 4: Mineable, 8: Space Station
+	self.collision_mask = 1 | 4 | 8 
 	
 	# COMBAT HARDENING: Player Health Tracking
 	health_component = HealthComponent.new(); health_component.max_health = 1000.0
@@ -262,25 +264,29 @@ func _setup_combat_hud() -> void:
 		arrow.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		arrow.set_script(load("res://src/combat/TargetLockUI.gd"))
 		hud.add_child(arrow); arrow.hide()
-	# ACE: MOBILE CONTROLS OVERLAY
-	var mobile_ui_script = load("res://src/ui/MobileControlsUI.gd")
-	if mobile_ui_script:
-		var mc = Control.new()
-		mc.set_script(mobile_ui_script)
-		mc.mouse_filter = Control.MOUSE_FILTER_STOP
-		hud.add_child(mc)
-		mobile_ui_ref = mc
-		mc.throttle_changed.connect(func(val): mobile_throttle = val)
-		mc.throttle_dragging_changed.connect(func(active): mobile_throttle_dragging = active)
-		mc.fire_pressed.connect(func(p): mobile_fire = p)
-		mc.boost_pressed.connect(func(p): mobile_boost = p)
-		mc.brake_pressed.connect(_on_mobile_brake)
-		mc.roll_triggered.connect(func(dir): _trigger_barrel_roll(dir))
-		mc.roll_held.connect(_on_mobile_roll_held)
-		mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
-		mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
-		mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
-		mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
+	# ACE: MOBILE CONTROLS OVERLAY — only on touch platforms.  Desktop uses
+	# keyboard + mouse, so the on-screen FIRE / BOOST / BRAKE / ROLL /
+	# RECENTER / throttle widgets are pure visual clutter there.  Pause is
+	# still reachable via KEY_ESCAPE (handled in Main._unhandled_input).
+	if _mobile_perf:
+		var mobile_ui_script = load("res://src/ui/MobileControlsUI.gd")
+		if mobile_ui_script:
+			var mc = Control.new()
+			mc.set_script(mobile_ui_script)
+			mc.mouse_filter = Control.MOUSE_FILTER_STOP
+			hud.add_child(mc)
+			mobile_ui_ref = mc
+			mc.throttle_changed.connect(func(val): mobile_throttle = val)
+			mc.throttle_dragging_changed.connect(func(active): mobile_throttle_dragging = active)
+			mc.fire_pressed.connect(func(p): mobile_fire = p)
+			mc.boost_pressed.connect(func(p): mobile_boost = p)
+			mc.brake_pressed.connect(_on_mobile_brake)
+			mc.roll_triggered.connect(func(dir): _trigger_barrel_roll(dir))
+			mc.roll_held.connect(_on_mobile_roll_held)
+			mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
+			mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
+			mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
+			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
 func _on_mobile_brake(pressed: bool) -> void:
 	# BRAKE hold: zero out forward intent and request a rapid slow-down.
@@ -402,11 +408,20 @@ func _apply_toon_shading(node: Node) -> void:
 	if node is MeshInstance3D:
 		var mat = node.mesh.surface_get_material(0)
 		if mat is StandardMaterial3D:
-			# ACE UNIVERSAL SYNC: 3-Tier Cel-Shading across all hull surfaces
-			var cel_mat = ShaderMaterial.new()
-			cel_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
+			# ACE UNIVERSAL SYNC: Reuse cached materials to reduce draw-state changes
+			if not _cached_cel_mat:
+				_cached_cel_mat = ShaderMaterial.new()
+				_cached_cel_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
+				
+				# SCREEN-SPACE OUTLINE: Shared outline pass
+				var outline = ShaderMaterial.new()
+				outline.shader = load("res://src/shaders/outline.gdshader")
+				outline.set_shader_parameter("outline_width", 1.2)
+				outline.set_shader_parameter("outline_color", Color.BLACK)
+				_cached_cel_mat.next_pass = outline
 			
-			# Pass through original texture or use a white fallback to prevent 'Black Silhouettes'
+			var cel_mat = _cached_cel_mat.duplicate() # Duplicate for unique textures if needed
+			# Pass through original texture
 			if mat.albedo_texture:
 				cel_mat.set_shader_parameter("albedo_tex", mat.albedo_texture)
 			else:
@@ -436,8 +451,11 @@ func _process_ace_camera(delta: float) -> void:
 	if target_planet:
 		surface_assist = clamp(1.0 - (true_altitude / 9000.0), 0.0, 1.0)
 	if cam_spring and surface_assist > 0.0:
-		var target_spring_y: float = lerp(10.0, 4.0, surface_assist)
-		var target_spring_len: float = lerp(250.0, 140.0, surface_assist)
+		# On planet surface push the camera FURTHER back (250 → 420 m) and
+		# slightly up, so the player can see the terrain + nearby mineable
+		# resources properly instead of having the ship fill the screen.
+		var target_spring_y: float = lerp(10.0, 16.0, surface_assist)
+		var target_spring_len: float = lerp(250.0, 420.0, surface_assist)
 		cam_spring.position.y = lerp(cam_spring.position.y, target_spring_y, 8.0 * delta)
 		cam_spring.spring_length = lerp(cam_spring.spring_length, target_spring_len, 6.0 * delta)
 	elif cam_spring:
@@ -568,8 +586,11 @@ func _physics_process(delta: float) -> void:
 	
 	# FIRE HEARTBEAT: Tick-down combat timers
 	fire_cooldown -= delta
-	var cur_fire = Input.is_key_pressed(KEY_F) or mobile_fire
-	var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
+	# Fire is bound through InputMap action "fire" so it can be rebound
+	# from the pause menu's REBIND CONTROLS submenu (mobile_fire stays
+	# separate since it's emitted by the on-screen FIRE button).
+	var cur_fire = Input.is_action_pressed("fire") or mobile_fire
+	var cur_joy_fire = false  # legacy path retained: refactor folded into cur_fire
 	
 	# PLANETARY PROXIMITY THROTTLE: Only scan for planets every 15 frames
 	if _hb_tick % 15 == 0:
@@ -735,8 +756,10 @@ func _process_ace_flight(delta: float) -> void:
 	
 
 	var roll_input: float = 0.0
-	if Input.is_joy_button_pressed(0, JOY_BUTTON_LEFT_SHOULDER): roll_input += 1.0
-	if Input.is_joy_button_pressed(0, JOY_BUTTON_RIGHT_SHOULDER): roll_input -= 1.0
+	# Roll uses InputMap actions so the rebind UI can remap them.  Defaults
+	# are LB / RB on a standard gamepad, Q / E on keyboard.
+	if Input.is_action_pressed("roll_left"):  roll_input += 1.0
+	if Input.is_action_pressed("roll_right"): roll_input -= 1.0
 	# Mobile bottom-left rotate buttons: held → continuous roll, double-tap → barrel roll.
 	if _mobile_roll_l: roll_input += 1.0
 	if _mobile_roll_r: roll_input -= 1.0
@@ -801,7 +824,7 @@ func _process_ace_flight(delta: float) -> void:
 	raw_thrust = pow(clamp((raw_thrust - 0.05) / 0.95, 0.0, 1.0), 1.8)
 	raw_reverse = pow(clamp((raw_reverse - 0.05) / 0.95, 0.0, 1.0), 1.8)
 	# BOOST/WARP: gamepad A, keyboard Shift, OR mobile BOOST button
-	var is_warping: bool = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT) or mobile_boost
+	var is_warping: bool = Input.is_action_pressed("warp") or mobile_boost
 
 	# HYPERDRIVE: L1 + R1 held together = 3rd thrust tier (5× warp)
 	# L1 = JOY_BUTTON_LEFT_SHOULDER, R1 = JOY_BUTTON_RIGHT_SHOULDER
@@ -1146,7 +1169,13 @@ func _process_ace_flight(delta: float) -> void:
 				velocity = velocity.bounce(n) * 0.6 # 60% energy retention
 				reentry_intensity += impact_force * 0.05
 				_trigger_hit_flash(clamp(impact_force / 400.0, 0.4, 0.95))
-				if health_component: health_component.take_damage(impact_force * 0.02)
+				
+				# ACE: Negligible damage for Space Stations (Layer 8)
+				var damage_mult = 0.02
+				if coll.get_collider().collision_layer & 8:
+					damage_mult = 0.0001
+				
+				if health_component: health_component.take_damage(impact_force * damage_mult)
 	
 	# 5. VISUAL HULL DYNAMICS
 	# Simulates physical G-Forces forcing the Starhawk to bank and pitch violently during maneuvers
@@ -1257,8 +1286,9 @@ func _fire_alternating_cannon() -> void:
 		
 		# MUZZLE SYNC
 		bolt.global_position = bolt_origin
-		bolt.look_at(bolt.global_position + fire_dir)
-		bolt.rotate_object_local(Vector3.RIGHT, PI / 2.0)
+		if fire_dir.length() > 0.001:
+			bolt.look_at(bolt.global_position + fire_dir)
+			bolt.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 		
 		# ACE RELATIVISTIC MOMENTUM: inherited ship full vector + 9k-35k Acceleration Ramp
 		live_bolts.append({
@@ -1292,11 +1322,17 @@ func _spawn_muzzle_flash(pos: Vector3, _dir: Vector3) -> void:
 # LEGACY CAMERA SYSTEM DELETED FOR ALPHA-ORBIT STABILITY
 
 func _input(event: InputEvent) -> void:
+	# YIELD INPUT TO STATION UI: When docked, Player must not consume any events.
+	var stations := get_tree().get_nodes_in_group("SpaceStation")
+	for s in stations:
+		if s.get("_ui_visible") == true:
+			return
+
 	# ESC: Toggle mouse lock
 	if event is InputEventKey and event.keycode == KEY_ESCAPE and event.pressed:
 		if mouse_locked: unlock_mouse()
 		else: lock_mouse()
-	
+
 	# KEYBOARD FIRE: F key (single press, no hold repeat)
 	if event is InputEventKey and event.keycode == KEY_F and event.pressed and not event.echo:
 		print("--- GUNSMITH: F KEY DETECTED --- in_ship:", in_ship, " cooldown:", fire_cooldown)
@@ -1318,20 +1354,21 @@ func _input(event: InputEvent) -> void:
 			cam_orbit.y -= event.relative.y * 0.005
 			cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
 	
-	# CONTROLLER FIRE: Triangle (PS) / Y (Xbox)
-	if event is InputEventJoypadButton and event.button_index == JOY_BUTTON_Y and event.pressed:
-		print("--- GUNSMITH: Y BUTTON DETECTED --- in_ship:", in_ship)
+	# CONTROLLER FIRE — uses InputMap action so it follows rebinds.
+	if event.is_action_pressed("fire"):
 		if in_ship and fire_cooldown <= 0.0:
 			_fire_alternating_cannon()
-		
-	if event is InputEventJoypadButton and event.pressed:
+
+	# Barrel-roll double-tap detection — also via the rebindable
+	# roll_left / roll_right actions instead of hardcoded shoulder buttons.
+	if event.is_action_pressed("roll_left"):
 		var cur_time = Time.get_ticks_msec() / 1000.0
-		if event.button_index == JOY_BUTTON_LEFT_SHOULDER:
-			if (cur_time - last_tap_l) < 0.22: _trigger_barrel_roll(1.0)
-			last_tap_l = cur_time
-		if event.button_index == JOY_BUTTON_RIGHT_SHOULDER:
-			if (cur_time - last_tap_r) < 0.22: _trigger_barrel_roll(-1.0)
-			last_tap_r = cur_time
+		if (cur_time - last_tap_l) < 0.22: _trigger_barrel_roll(1.0)
+		last_tap_l = cur_time
+	if event.is_action_pressed("roll_right"):
+		var cur_time2 = Time.get_ticks_msec() / 1000.0
+		if (cur_time2 - last_tap_r) < 0.22: _trigger_barrel_roll(-1.0)
+		last_tap_r = cur_time2
 		
 		# ACE LOCK-ON: Left Joystick Click (L3) OR B-Button (Right Face)
 		if event.button_index == JOY_BUTTON_LEFT_STICK or event.button_index == JOY_BUTTON_B:
@@ -1371,8 +1408,12 @@ func _process(delta: float) -> void:
 			var enemies_pool = get_tree().get_nodes_in_group("Enemies") if is_inside_tree() else []
 			if is_inside_tree():
 				# Enemies use tight cone (~11°); mineable/passive use wider cone (~28°)
+				# Long-range asteroid mining: lock-on capped at 2000 km, kept
+				# under bolt max travel (peak 600 km/s × 5 s ≈ 2700 km) so the
+				# player can never lock onto something a bolt can't reach.
+				const RADAR_RANGE_SQ := 2000000.0 * 2000000.0
+				const LOCK_ON_RANGE_SQ := 2000000.0 * 2000000.0
 				var highest_dot = 0.95 if _mobile_perf else 0.98
-				const RADAR_RANGE_SQ := 25000.0 * 25000.0
 
 				var candidate_pools = [
 					enemies_pool,
@@ -1515,39 +1556,55 @@ func _process(delta: float) -> void:
 	var cam_base_y = 10.0 if in_ship else 1.85
 	if cam_spring: cam_spring.position = Vector3(0, cam_base_y, 0) + recoil_v + turb_v + reentry_v + shake_v
 	
-	# BOLT POOL UPDATE: Relativistic Physics Hardening
-	# 25km/s base creates the 'Cracked the Code' visual lead observed in elite titles (Starfox/NMS).
-	const BOLT_SPEED: float = 25000.0 
-	const BOLT_LIFETIME: float = 1.5
+	# BOLT POOL UPDATE: Relativistic Physics Hardening.
+	# Range pushed for long-range asteroid mining: peak 600 km/s, lifetime 5 s
+	# → effective max travel ~2700 km.  Lock-on capped at 2000 km gives a safe
+	# margin below that, so anything lockable is reachable.
+	const BOLT_SPEED: float = 600000.0
+	const BOLT_LIFETIME: float = 5.0
 	var space_state = get_world_3d().direct_space_state
-	
+
 	var i = live_bolts.size() - 1
 	while i >= 0:
 		var b = live_bolts[i]
 		var node = b["node"]
-		
-		# 9,000m/s start (relative) ensures the discharge ignites AT THE MUZZLE in Frame 1.
-		# 35,000m/s peak ensures a more cinematic planetary dogfight feel.
-		var accel_t = clamp(b["life"] / 0.6, 0.0, 1.0)
-		
-		# ACE TUNER: I will use a non-linear quadratic ramp for 'Muzzle Ignite' feel.
-		var ease_t = accel_t * accel_t # Quadratic Ramp
-		var current_rel_speed = lerp(9000.0, 35000.0, ease_t)
+		b["life"] += delta
 
-		# ACE SMART-LOCK HOMING: Fired bolts track the target mid-flight
-		if is_instance_valid(b["target"]):
-			var target_pos = b["target"].global_position
-			var t_dir = (target_pos - node.global_position).normalized()
-			
-			# PRECISION CONE: Only pull if the pilot's aim is already high-quality (>0.98 dot)
-			# 0.98 dot product is roughly a 1.5-degree correction window.
+		# Despawn expired bolts to prevent memory leaks and zombie nodes
+		if b["life"] > BOLT_LIFETIME:
+			if is_instance_valid(node): node.queue_free()
+			live_bolts.remove_at(i)
+			i -= 1
+			continue
+
+		# 9,000m/s start ensures the discharge ignites AT THE MUZZLE in frame 1,
+		# then accelerates over 0.6 s to BOLT_SPEED (peak velocity).
+		var accel_t = clamp(b["life"] / 0.6, 0.0, 1.0)
+
+		# Quadratic ramp for 'muzzle ignite' feel.
+		var ease_t = accel_t * accel_t
+		var current_rel_speed = lerp(9000.0, BOLT_SPEED, ease_t)
+
+		# ACE SMART-LOCK HOMING: Fired bolts track the target mid-flight.
+		# Cone widened (0.98 → 0.80, ~37° window) and turn rate ~5× faster so
+		# bolts reliably curve onto small mineable resources.  Without this,
+		# small targets like flora-mineable crystals frequently slipped past
+		# the bolt even though the player was locked on.
+		if is_instance_valid(b["target"]) and b["target"].is_inside_tree():
+			var aim_pos: Vector3
+			if b["target"].has_method("get_target_center"):
+				aim_pos = b["target"].get_target_center()
+			else:
+				aim_pos = b["target"].global_position
+			var t_dir = (aim_pos - node.global_position).normalized()
 			var align = b["dir"].dot(t_dir)
-			if align > 0.98:
-				# Snappy but subtle corrective steering (Rewarding the pilot's lead)
-				b["dir"] = b["dir"].lerp(t_dir, 2.5 * delta).normalized()
-				# Align rod: High-fidelity visual update only when correction is active
+			if align > 0.80:
+				b["dir"] = b["dir"].lerp(t_dir, 12.0 * delta).normalized()
 				if b["dir"].length() > 0.01:
-					node.look_at(node.global_position + b["dir"])
+					# Project look-at target 1 km along the direction so float32
+					# precision at large origin offsets can still distinguish it
+					# from the bolt's own position.
+					node.look_at(node.global_position + b["dir"] * 1000.0)
 					node.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 
 
@@ -1559,7 +1616,7 @@ func _process(delta: float) -> void:
 		var next_pos = old_pos + move_dist
 		b["pos"] = next_pos # Update internal physical pos
 		
-		# SWEPT-FRAME PHYSICS: proxy check first (layer 32, bypasses terrain),
+		# SWEPT-FRAME PHYSICS: proxy check first (layer 6, bypasses terrain),
 		# then normal world/enemy check. Two raycasts prevent terrain from
 		# intercepting bolts before they reach surface prop collision spheres.
 		_proxy_ray_q.from = old_pos
@@ -1571,6 +1628,10 @@ func _process(delta: float) -> void:
 			result = space_state.intersect_ray(_ray_q)
 		
 		if result and is_instance_valid(result.collider):
+			var c = result.collider
+			var p_name = c.get_parent().name if c.get_parent() else "NONE"
+			var c_groups = c.get_groups()
+			print("--- GUNSMITH: Bolt Hit! [%s] (Parent: %s) Layer: %d Groups: %s ---" % [c.name, p_name, c.collision_layer, str(c_groups)])
 			var target = result.collider
 			var hp = target.get_node_or_null("HealthComponent")
 			var is_dying = false
@@ -1623,17 +1684,17 @@ func _process(delta: float) -> void:
 				
 	# GUNSMITH FINAL SYNC: Fire AFTER bolt pool updates to ensure muzzle-snapping
 	if in_ship and fire_cooldown <= 0.0:
-		var cur_fire = Input.is_key_pressed(KEY_F) or mobile_fire
-		var cur_joy_fire = Input.is_joy_button_pressed(0, JOY_BUTTON_Y)
-		# Continuous fire if cur_fire is held, no need for _prev_fire_key
-		if cur_fire or cur_joy_fire:
+		# Continuous-fire path (the line ~1681 audit) — uses the same
+		# remappable "fire" action as the heartbeat tick at line ~589.
+		var cur_fire = Input.is_action_pressed("fire") or mobile_fire
+		if cur_fire:
 			_fire_alternating_cannon()
 			fire_cooldown = 0.18 # ACE RPS NERF: 5.5 shots per second
 		_prev_fire_key = cur_fire
 
 	# Update thruster audio — pitch and volume scale with ship speed
 	if in_ship:
-		var is_boosting = Input.is_joy_button_pressed(0, JOY_BUTTON_A) or Input.is_key_pressed(KEY_SHIFT) or mobile_boost
+		var is_boosting = Input.is_action_pressed("warp") or mobile_boost
 		var md_nodes = get_tree().get_nodes_in_group("MusicDirector")
 		if md_nodes.size() > 0 and md_nodes[0].has_method("update_thruster_audio"):
 			md_nodes[0].update_thruster_audio(velocity.length(), is_boosting)

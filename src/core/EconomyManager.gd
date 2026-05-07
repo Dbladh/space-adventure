@@ -32,14 +32,11 @@ func add_credits(amount: int) -> void:
 	emit_signal("currency_changed", credits)
 
 func add_resource(type: String, amount: int = 1) -> void:
-	if inventory.has(type):
-		inventory[type] += amount
-		# For now, auto-sell resources for credits to keep it simple!
-		var profit = amount * RESOURCE_VALUES[type]
-		credits += profit
-		emit_signal("inventory_changed", type, inventory[type])
-		emit_signal("currency_changed", credits)
-		print("--- ECONOMY: +", profit, " Credits (", type, ") ---")
+	# ACE: Resources now sit in inventory until manually sold at a station.
+	# InventoryManager is the canonical store; this keeps legacy callers working.
+	if Engine.has_meta("InventoryManager"):
+		Engine.get_meta("InventoryManager").add(type, amount)
+		print("--- ECONOMY: +", amount, "x ", type, " added to inventory ---")
 
 func get_credits_formatted() -> String:
 	return "$" + str(credits)

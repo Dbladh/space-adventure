@@ -87,33 +87,36 @@ void fragment() {
 	float c_noise = noise(NORMAL * 2.2) * 1.5; 
 	float major_mask = smoothstep(0.48, 0.52, c_noise + proximity * 0.9);
 
-	// ACE CONTINENTAL HANDOVER: Map landmasses and oceans to the orbital proxy
+	// ACE CONTINENTAL HANDOVER: Map landmasses and oceans to the orbital proxy.
+	// land_base picks up small-scale variation (n) so equator regions get a
+	// blend of grass/forest tones instead of a uniform col_a slab.
 	vec3 land_base = mix(col_a, col_b, smoothstep(0.4, 0.9, lat));
+	land_base = mix(land_base, col_b, n * 0.55);
 	vec3 base_col = mix(w_col, land_base, major_mask);
-	
-	// POLAR ICE CAPS: Mandatory snow overlay at the high latitudes
-	float pole_mask = smoothstep(0.82, 0.92, lat);
-	base_col = mix(base_col, vec3(0.95, 0.98, 1.0), pole_mask);
-	
+
+	// POLAR ICE CAPS: tighter than before so ice doesn't drown the visible disc
+	// when the player views from a high latitude.
+	float pole_mask = smoothstep(0.88, 0.96, lat);
+	vec3 polar_col = mix(col_a, vec3(0.92, 0.95, 1.0), 0.6);
+	base_col = mix(base_col, polar_col, pole_mask);
+
 	// ACE MANUAL TERMINATOR
 	vec3 light_dir = normalize(-NODE_POSITION_WORLD);
 	// ACE SPACE SYNC: Transform world-space light direction to view-space for accurate fragment shading
 	vec3 v_light_dir = (VIEW_MATRIX * vec4(light_dir, 0.0)).xyz;
 	float d = dot(NORMAL, v_light_dir);
-	
-	// MINIMALIST GLOW: Core metropolitan grid only
-	float darkness = 1.0 - smoothstep(-0.2, 0.2, d);
-	vec2 grid_uv = fract(NORMAL.xz * 60.0);
-	float grid_noise = step(0.4, grid_uv.x) * step(0.4, grid_uv.y);
+
 	vec3 lights = vec3(0.0);
-	
-	// High-fidelity planetary lighting
-	float l = smoothstep(-0.4, 0.5, d) * 0.3 + 0.7;
-	
-	// ACE ATMOSPHERIC HALO: Vibrant rim glow keyed to the planet's unique sky palette
-	float fresnel = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 4.0);
-	vec3 atmosphere = h_col * fresnel * smoothstep(-0.4, 1.0, d) * 1.5;
-	
+
+	// Day/night terminator: stronger contrast — was floor 0.7 (dark side was
+	// 70% lit, giving every planet a flat washed-out look).  Now 0.35 → 1.0.
+	float l = smoothstep(-0.25, 0.35, d) * 0.65 + 0.35;
+
+	// ACE ATMOSPHERIC HALO: Tighter, dimmer rim glow keyed to the planet's
+	// horizon palette.  Was *1.5 — bloomed the silhouette into a smear.
+	float fresnel = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 5.0);
+	vec3 atmosphere = h_col * fresnel * smoothstep(-0.3, 0.9, d) * 0.7;
+
 	ALBEDO = base_col * l + lights;
 	EMISSION = atmosphere + lights;
 }"""

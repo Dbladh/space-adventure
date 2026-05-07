@@ -7,6 +7,7 @@ uniform float normal_strength : hint_range(0.0, 5.0) = 1.2;
 uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
 uniform float wind_speed : hint_range(0.0, 10.0) = 1.2;
 uniform float wind_strength : hint_range(0.0, 5.0) = 0.8;
+uniform float biolum_intensity : hint_range(0.0, 2.0) = 0.0;
 
 varying vec3 v_color;
 varying vec2 v_uv;
@@ -126,13 +127,18 @@ void light() {
 	vec3 final_col = mix(shadow_col, mid_col, t2);
 	final_col = mix(final_col, ALBEDO, t1);
 	
-	// 1. BACKLIT TRANSLUCENCY (Fake SSS): Leaves glow when the sun is behind them
-	float sss = pow(clamp(dot(LIGHT, VIEW), 0.0, 1.0), 3.0) * 0.6;
+	// 1. BACKLIT TRANSLUCENCY (Fake SSS): Leaves softly transmit when the sun is behind them.
+	float sss = pow(clamp(dot(LIGHT, VIEW), 0.0, 1.0), 4.0) * 0.18;
 	final_col += ALBEDO * sss;
-	
-	// 2. ILLUSTRATIVE RIM LIGHT: Edge-lighting against the sky
-	float rim = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 4.0) * dot(NORMAL, LIGHT);
-	final_col += LIGHT_COLOR * clamp(rim, 0.0, 1.0) * 0.5;
-	
-	DIFFUSE_LIGHT += final_col * LIGHT_COLOR;
+
+	// 2. ILLUSTRATIVE RIM LIGHT: Subtle edge-lighting (was 0.5 — read as a glow halo on every tree).
+	float rim = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 5.0) * max(dot(NORMAL, LIGHT), 0.0);
+	final_col += LIGHT_COLOR * clamp(rim, 0.0, 1.0) * 0.12;
+
+	// 3. BIOLUMINESCENT PULSE: Rare planetary attribute (driven by biolum_intensity uniform).
+	float bio_pulse = (sin(TIME * 1.5) * 0.5 + 0.5) * biolum_intensity;
+	final_col += ALBEDO * bio_pulse * 1.2;
+
+	// ATTENUATION respect — leaves now darken in shadow instead of being full-bright.
+	DIFFUSE_LIGHT += final_col * LIGHT_COLOR * ATTENUATION;
 }

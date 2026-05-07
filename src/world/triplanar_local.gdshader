@@ -1,78 +1,91 @@
-shader_type black; // Error here, I will use standard syntax
-// Correcting to a functional Godot 4 shader
 shader_type spatial;
+render_mode diffuse_lambert, specular_disabled;
 
-// Local-Space Triplanar Shader (FloatingOrigin-Proof)
-// Managed by THE PROCEDURALIST.
+// Biome-aware planet land shader (FloatingOrigin-proof: samples in LOCAL space).
+// Drives ground / forest / rock / snow / beach colour from the planet's
+// procedurally-rolled palette uniforms.
 
 uniform sampler2D albedo_tex : source_color;
 uniform float texture_scale = 1.0;
-uniform vec3 layer_color = vec3(0.5);
+uniform float planet_radius = 1000000.0;
+uniform float sea_level = -120.0;
+
+// Procedural biome palette (set per-planet from PlanetGen.pal_*).
+uniform vec3 col_beach   : source_color = vec3(0.76, 0.70, 0.50);
+uniform vec3 col_grass   : source_color = vec3(0.27, 0.67, 0.27);
+uniform vec3 col_forest  : source_color = vec3(0.20, 0.55, 0.20);
+uniform vec3 col_rock    : source_color = vec3(0.50, 0.45, 0.40);
+uniform vec3 col_snow    : source_color = vec3(0.92, 0.94, 0.98);
 
 varying vec3 v_local_pos;
-varying vec3 v_normal;
+varying vec3 v_local_norm;
+varying float v_height;
+varying float v_steepness;
 
 void vertex() {
 	v_local_pos = VERTEX;
-	v_normal = NORMAL;
-}
-
-void fragment() {
-	// Calculate Tri-planar weights based on LOCAL Normal
-	vec3 blending = abs(v_normal);
-	blending /= (blending.x + blending.y + blending.z);
-	
-	// Sample texture using LOCAL Position (Immune to world-space jitter)
-	vec3 x_tex = texture(albedo_tex, v_local_pos.zy * texture_scale).rgb;
-	vec3 y_tex = texture(albedo_tex, v_local_pos.xz * texture_scale).rgb;
-	vec3 z_tex = texture(albedo_tex, v_local_pos.xy * texture_scale).rgb;
-	
-	vec3 final_tex = x_tex * blending.x + y_tex * blending.y + z_tex * blending.z;
-	
-	# NEON ROADS: Procedural Cyberpunk Grid
-	# ACE RADIAL STABILITY: We use a high-contrast radial mask for the 1000m city grid
-	vec2 road_grid = fract(v_local_pos.xz * 0.001); 
-	float road_mask = step(0.8, road_grid.x) + step(0.8, road_grid.y);
-	
-	// Robust City Height Mask: 850m is the plateau height. 
-	// We use the distance from center minus the planet base radius (estimated 1M-ish)
-	// Since v_local_pos is absolute local coordinate on the sphere:
-	float dist_from_center = length(v_local_pos);
-	// We'll use a derivative-based mask or a wider threshold to ensure visibility
-	float city_height_mask = smoothstep(500.0, 800.0, dist_from_center - 1000000.0 * (length(v_normal))); 
-	// That's tricky because radius varies. Let's use a simpler heuristic:
-	// A high-pass filter on the distance from center
-	float h_mask = smoothstep(150.0, 250.0, dist_from_center - 1000000.0); // Assume 1M radius base
-	
-	vec3 road_col = vec3(0.0, 1.0, 1.0) * road_mask * 15.0; // High intensity neon
-	
-	ALBEDO = COLOR.rgb * final_tex;
-	EMISSION = road_col * step(0.5, h_mask); 
-	ROUGHNESS = 1.0;
-	SPECULAR = 0.0;
+	v_local_norm = normalize(VERTEX);
+	v_height = length(VERTEX) - planet_radius;
+	v_steepness = dot(normalize(VERTEX), NORMAL);
 }
 
 float aa_step(float edge, float val) {
-	// ACE ANTI-ALIASING: Surgical softening of planetary cel-bands
-	float delta = fwidth(val) * 1.5; 
+	float delta = fwidth(val) * 1.5;
 	return smoothstep(edge - delta, edge + delta, val);
 }
 
+void fragment() {
+	// 1. Triplanar texture (modulates intensity only, not hue).
+	vec3 blending = abs(NORMAL);
+	blending /= (blending.x + blending.y + blending.z);
+	vec3 tex_x = texture(albedo_tex, v_local_pos.zy * texture_scale).rgb;
+	vec3 tex_y = texture(albedo_tex, v_local_pos.xz * texture_scale).rgb;
+	vec3 tex_z = texture(albedo_tex, v_local_pos.xy * texture_scale).rgb;
+	vec3 detail = tex_x * blending.x + tex_y * blending.y + tex_z * blending.z;
+	float detail_level = mix(0.88, 1.12, detail.r);
+
+	// 2. Patchy grass mix between forest (darker) and grass (lighter).
+	float grass_patch = smoothstep(0.1, 0.4, detail.r + sin(v_local_pos.x * 0.05) * 0.1);
+	vec3 base_grass = mix(col_forest, col_grass, grass_patch);
+
+	// 3. Height-based zone bands (organic warp on each edge).
+	float warp = sin(v_local_pos.x * 0.0015) * 300.0 + cos(v_local_pos.z * 0.002) * 200.0;
+	float warped_h = v_height + warp;
+
+	float beach_warp = sin(v_local_pos.x * 0.008) * 15.0 + cos(v_local_pos.z * 0.01) * 10.0;
+	float t_beach_end  = aa_step(sea_level + 120.0 + beach_warp, v_height);
+	float t_rock_start = aa_step(2200.0, warped_h);
+	float t_snow       = aa_step(4000.0, warped_h);
+
+	vec3 albedo = col_beach;
+	albedo = mix(albedo, base_grass, t_beach_end);
+	albedo = mix(albedo, col_rock, t_rock_start);
+	albedo = mix(albedo, col_snow, t_snow);
+
+	// 4. Polar caps — tight band so ice doesn't dominate the visible disc.
+	float polar_snow = smoothstep(0.88, 0.96, abs(v_local_norm.y));
+	albedo = mix(albedo, col_snow, polar_snow);
+
+	// 5. Steep cliffs read as rock regardless of altitude.
+	float slope = abs(v_steepness);
+	float cliff_mask = 1.0 - smoothstep(0.3, 0.65, slope);
+	vec3 cliff_col = mix(col_rock, col_forest, smoothstep(0.3, 0.65, slope));
+	albedo = mix(albedo, cliff_col, cliff_mask * (1.0 - t_snow));
+
+	albedo *= detail_level;
+
+	ALBEDO = albedo;
+	ROUGHNESS = 0.92;
+	SPECULAR = 0.05;
+}
+
 void light() {
-	// UNIVERSAL CLEAN-TOON: 3-Tier Cel-Shading for Planet Surface
-	float n_dot_l = dot(NORMAL, LIGHT);
-	float atten = ATTENUATION;
-	float l_level = n_dot_l * atten;
-	
-	// COLOR TIERING: Match asteroid clean-cel aesthetic
-	float t2 = aa_step(0.25, l_level);
-	float t1 = aa_step(0.65, l_level);
-	
-	vec3 shadow_col = ALBEDO * 0.15;
-	vec3 mid_col = ALBEDO * 0.45;
-	
-	vec3 final_col = mix(shadow_col, mid_col, t2);
+	float l_level = dot(NORMAL, LIGHT);
+	float t2 = aa_step(0.20, l_level);
+	float t1 = aa_step(0.60, l_level);
+	vec3 shadow_col = ALBEDO * 0.55;
+	vec3 mid_col    = ALBEDO * 0.78;
+	vec3 final_col  = mix(shadow_col, mid_col, t2);
 	final_col = mix(final_col, ALBEDO, t1);
-	
-	DIFFUSE_LIGHT += final_col * LIGHT_COLOR;
+	DIFFUSE_LIGHT += final_col * LIGHT_COLOR * ATTENUATION;
 }

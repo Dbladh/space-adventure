@@ -1369,12 +1369,12 @@ func _input(event: InputEvent) -> void:
 		var cur_time2 = Time.get_ticks_msec() / 1000.0
 		if (cur_time2 - last_tap_r) < 0.22: _trigger_barrel_roll(-1.0)
 		last_tap_r = cur_time2
-		
-		# ACE LOCK-ON: Left Joystick Click (L3) OR B-Button (Right Face)
-		if event.button_index == JOY_BUTTON_LEFT_STICK or event.button_index == JOY_BUTTON_B:
-			pinned_target = lock_on_target
-			if pinned_target: print("--- PILOT: TARGET PINNED ---")
-		
+
+	# ACE LOCK-ON: Left Joystick Click (L3) OR B-Button (Right Face)
+	if event is InputEventJoypadButton and event.pressed and (event.button_index == JOY_BUTTON_LEFT_STICK or event.button_index == JOY_BUTTON_B):
+		pinned_target = lock_on_target
+		if pinned_target: print("--- PILOT: TARGET PINNED ---")
+
 	# E: Embark / Disembark
 	if event is InputEventKey and event.keycode == KEY_E and event.pressed:
 		if in_ship and true_altitude < 500.0: _disembark()
@@ -2006,6 +2006,14 @@ func _setup_polar_weather() -> void:
 	snow_particles.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
 	snow_particles.emission_box_extents = Vector3(200, 100, 200)
 	snow_particles.position = Vector3(0, 80.0, -50.0) # Spawn overhead and slightly ahead
+	# CRITICAL: Default visibility_aabb is ~8-unit cube — particles outside
+	# get frustum-culled and never render. Without this, snow/sand/wind only
+	# show up coincidentally (e.g., when the camera freezes during the
+	# station menu and the AABB happens to overlap drifting particles).
+	snow_particles.visibility_aabb = AABB(Vector3(-250, -180, -250), Vector3(500, 360, 500))
+	# Particles fall in world space rather than locked to the camera transform —
+	# more natural look + the AABB tracks the emitter, not particle positions.
+	snow_particles.local_coords = false
 	snow_particles.emitting = false
 
 func prewarm_vfx() -> void:

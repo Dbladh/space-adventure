@@ -490,6 +490,14 @@ func _process(_delta: float) -> void:
 	if _boot_timer > 0:
 		_boot_timer -= _delta
 		return
+
+	# Beat-sync: push MusicDirector's beat intensity into the sky shader so
+	# stars twinkle in time with the music.
+	if main_sky_mat:
+		var md_nodes := get_tree().get_nodes_in_group("MusicDirector")
+		if md_nodes.size() > 0:
+			var beat_v: float = float(md_nodes[0].beat_intensity)
+			main_sky_mat.set_shader_parameter("music_beat", beat_v)
 		
 	# ACE: Spawn minerals and check readiness BEFORE any early-returns
 	var batch_size = 80 if _is_loading else 25

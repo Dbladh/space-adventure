@@ -7,29 +7,39 @@ extends Node3D
 
 var poi_name: String = ""
 var poi_type: String = "station"   # "station" | "planet"
-var label_height: float = 200000.0  # local Y offset — beacon column height
+var label_height: float = 200000.0  # total height of marker (planet_radius * 1.4)
+var planet_radius: float = 0.0      # surface radius — cylinder sits *above* this
 var beacon_color: Color = Color(0.95, 0.85, 0.2)
 
 var _beacon_ring: MeshInstance3D = null
 var _beacon_light: OmniLight3D = null
 var _pulse_t: float = 0.0
 
-func setup(p_name: String, p_type: String, height: float, color: Color) -> void:
+func setup(p_name: String, p_type: String, height: float, color: Color, p_radius: float = 0.0) -> void:
 	poi_name = p_name
 	poi_type = p_type
 	label_height = height
 	beacon_color = color
+	# Backward-compat: callers that don't pass p_radius get the old behaviour
+	# of `radius = height / 1.4` (PlanetGen sets height = planet_radius * 1.4).
+	planet_radius = p_radius if p_radius > 0.0 else height / 1.4
 
 func _ready() -> void:
 	_build_beacon()
 	set_process(true)
 
 func _build_beacon() -> void:
-	# Vertical glowing column — a thin tall cylinder in the beacon color
+	# The cylinder must sit ENTIRELY above the planet's surface — if it
+	# extends from the planet center (the old behaviour), the inside-planet
+	# portion renders through transparent water/lava as hex-shaped artifacts
+	# (the cylinder is a 6-sided prism; cross-sections look like circles or
+	# diamonds depending on viewing angle).
+	var visible_height: float = max(label_height - planet_radius, label_height * 0.25)
+
 	var col_mesh = CylinderMesh.new()
 	col_mesh.top_radius    = 800.0
 	col_mesh.bottom_radius = 800.0
-	col_mesh.height        = label_height
+	col_mesh.height        = visible_height
 	col_mesh.radial_segments = 6
 
 	var col_mat = StandardMaterial3D.new()
@@ -43,7 +53,9 @@ func _build_beacon() -> void:
 
 	_beacon_ring = MeshInstance3D.new()
 	_beacon_ring.mesh = col_mesh
-	_beacon_ring.position = Vector3(0, label_height * 0.5, 0)
+	# Center the cylinder above the surface so its bottom edge meets the
+	# planet at +Y pole and the top reaches label_height.
+	_beacon_ring.position = Vector3(0, planet_radius + visible_height * 0.5, 0)
 	_beacon_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_beacon_ring)
 

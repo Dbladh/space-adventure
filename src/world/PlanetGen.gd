@@ -281,7 +281,12 @@ func _ready() -> void:
 	_spawn_majestic_clouds_and_rings(rng, base_hue)
 	# ACE: Scatter colossal Hero Landmarks as navigation anchors across the planet surface
 	_spawn_hero_landmarks(rng)
-	_spawn_poi_marker()
+	# Per-planet POI beacon disabled — the off-axis pillar wasn't useful as a
+	# navigation aid (it pointed at +Y pole, not the player) and rendered as
+	# stray geometry through transparent water/lava surfaces. Stations keep
+	# their POIMarker (spawned from Main.gd) since those are real landmarks
+	# the player can dock at.
+	# _spawn_poi_marker()
 	# print("--- ARCHITECT: PLANET [%s] SYNCHRONIZED (terrain_seed=%d) ---" % [name, noise.seed])
 
 func get_terrain_height_at(pos: Vector3) -> float:
@@ -358,13 +363,12 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		v_normal = normalize(VERTEX);
 	}
 
-	// Hash-based value noise — replaces the old sin-product 'fluid_noise',
-	// which produced a regular diamond-grid interference pattern when sphere-
-	// projected, making clouds read as flat magenta rhombuses on the surface.
+	// Hash-based value noise. Old form was `fract(p.x*p.y*p.z*(p.x+p.y+p.z))`
+	// — symmetric in (x,y,z) and near-zero along the x+y+z=0 plane, so cloud
+	// cells aligned to octahedral diagonals and read as rhombuses on the
+	// surface. Use IQ-style sin-dot hash with asymmetric coefficients.
 	float hash3(vec3 p) {
-		p = fract(p * 0.3183099 + 0.1);
-		p *= 17.0;
-		return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+		return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
 	}
 	float vnoise(vec3 p) {
 		vec3 i = floor(p); vec3 f = fract(p);
@@ -494,22 +498,28 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
 		r_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(r_inst)
 
-	# 3. POLAR AURORAS: Reduced scale to hug the planet
-	_spawn_polar_auroras(pal_grass_col)
+	# 3. POLAR AURORAS — disabled. The transparent sphere shader's smoothstep
+	# gradient quantized into ~8 visible latitude rings under the halftone
+	# post-process no matter how low we pushed the alpha. Snowy poles are
+	# now driven entirely by the surface shader's polar_snow band.
+	# _spawn_polar_auroras(pal_grass_col)
 
 func _spawn_polar_auroras(base_color: Color) -> void:
 	var a_mesh = SphereMesh.new(); a_mesh.radius = planet_radius + 4500.0; a_mesh.height = a_mesh.radius * 2.0; a_mesh.radial_segments = 48; a_mesh.rings = 24
+	# Toned down: narrower polar band (0.85→0.97 instead of 0.68→0.92) so the
+	# aura only kisses the poles, plus much lower alpha so the halftone
+	# post-process quantization isn't visible as concentric rings.
 	var a_shader = Shader.new(); a_shader.code = """shader_type spatial; render_mode unshaded, blend_add, depth_draw_always, cull_disabled;
 	uniform vec3 aura_col;
 	varying vec3 v_local_pos;
 	void vertex() { v_local_pos = VERTEX; }
 	void fragment() {
-		float polar = smoothstep(0.68, 0.92, abs(normalize(v_local_pos).y));
+		float polar = smoothstep(0.85, 0.97, abs(normalize(v_local_pos).y));
 		if (polar <= 0.01) { discard; }
-		ALBEDO = aura_col; ALPHA = polar * 0.65;
+		ALBEDO = aura_col; ALPHA = polar * 0.22;
 	}"""
 	var a_inst = MeshInstance3D.new(); a_inst.mesh = a_mesh; a_inst.material_override = ShaderMaterial.new(); a_inst.material_override.shader = a_shader
-	a_inst.material_override.set_shader_parameter("aura_col", base_color.lightened(0.5))
+	a_inst.material_override.set_shader_parameter("aura_col", base_color.lightened(0.25))
 	a_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(a_inst)
 
 func _spawn_hero_landmarks(rng: RandomNumberGenerator) -> void:
@@ -796,7 +806,10 @@ func _spawn_poi_marker() -> void:
 	var col = pal_grass_col.lerp(Color.WHITE, 0.5)
 	var marker := Node3D.new()
 	marker.set_script(marker_script)
-	marker.call_deferred("setup", display_name, "planet", height, col)
+	# Pass planet_radius so the marker can position its cylinder above the
+	# surface (preventing the hex-prism cylinder from poking through water/
+	# lava at the surface intersection).
+	marker.call_deferred("setup", display_name, "planet", height, col, planet_radius)
 	add_child(marker)
 
 func _landmark_material(col: Color) -> StandardMaterial3D:

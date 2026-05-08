@@ -6,6 +6,10 @@ uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
 uniform float flash_intensity : hint_range(0.0, 1.0) = 0.0;
 uniform vec3 flash_color : source_color = vec3(1.0, 0.1, 0.0);
 uniform float biolum_intensity : hint_range(0.0, 2.0) = 0.0;
+// Per-material vertex scale. Default 1.0 = no effect (other meshes using
+// this shader are unaffected). Music-driven beat sync sets this on
+// asteroid materials only.
+uniform float pulse_scale : hint_range(0.5, 2.0) = 1.0;
 
 varying vec3 v_color;
 varying vec2 v_uv;
@@ -13,6 +17,9 @@ varying vec2 v_uv;
 void vertex() {
 	v_color = COLOR.rgb;
 	v_uv = UV;
+	// Scale geometry around the local origin — asteroid positions in the
+	// MultiMesh transforms stay put, only the mesh "puffs up" on the beat.
+	VERTEX *= pulse_scale;
 }
 
 void fragment() {

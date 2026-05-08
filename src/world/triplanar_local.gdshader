@@ -62,8 +62,13 @@ void fragment() {
 	albedo = mix(albedo, col_rock, t_rock_start);
 	albedo = mix(albedo, col_snow, t_snow);
 
-	// 4. Polar caps — tight band so ice doesn't dominate the visible disc.
-	float polar_snow = smoothstep(0.88, 0.96, abs(v_local_norm.y));
+	// 4. Polar caps — soft transition that's broken up by triplanar detail
+	// noise so the dither pattern lands on irregular pixels instead of clean
+	// latitude rings. The transition centers around lat ≈ 65° and varies by
+	// ±0.04 (~3°) based on local detail, so the snowline reads as an
+	// organic frost edge rather than a sharp circle or a smooth ring band.
+	float polar_lat = abs(v_local_norm.y) + (detail.r - 0.5) * 0.08;
+	float polar_snow = aa_step(0.90, polar_lat);
 	albedo = mix(albedo, col_snow, polar_snow);
 
 	// 5. Steep cliffs read as rock regardless of altitude.

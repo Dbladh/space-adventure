@@ -295,11 +295,21 @@ func _process(_delta: float) -> void:
 	if flash_timer > 0.0:
 		flash_timer = maxf(flash_timer - _delta, 0.0)
 
+	# Beat sync — read MusicDirector's intensity floats. Cached lookup so we
+	# only do the group query once per node (cleared if invalid).
+	var beat_pulse: float = 0.0
+	var kick_pulse: float = 0.0
+	var md = _get_music_director()
+	if md:
+		beat_pulse = md.beat_intensity
+		kick_pulse = md.kick_intensity
+
 	# The glint and HUD fade do not need a 60Hz refresh; update them on a lower cadence
 	# unless the resource is actively flashing from damage.
 	_visual_tick = (_visual_tick + 1) % 4
 	if not was_flashing and flash_timer <= 0.0 and _visual_tick != 0:
-		rotate_object_local(Vector3.UP, _delta * 0.4)
+		# Spin rate gets a beat boost so minerals visibly accelerate on each hit.
+		rotate_object_local(Vector3.UP, _delta * (0.4 + beat_pulse * 1.2))
 		return
 
 	# ACE: Extreme Glint for high-contrast 'Discovery'
@@ -311,8 +321,10 @@ func _process(_delta: float) -> void:
 			# ACE: Damage flash takes priority — keep loud so hits read clearly
 			mesh_inst.material_override.emission_energy_multiplier = 12.0
 		elif glows:
-			# Subtle gem-like shimmer for real deposits; non-glowing flora skips this entirely.
-			mesh_inst.material_override.emission_energy_multiplier = 0.15 + (glint * 6.0)
+			# Subtle gem-like shimmer + beat-synced shine. Kick adds the biggest
+			# pop (pulse multiplied by 4x); regular beats add a smaller bump.
+			var beat_glow: float = kick_pulse * 4.0 + beat_pulse * 1.2
+			mesh_inst.material_override.emission_energy_multiplier = 0.15 + (glint * 6.0) + beat_glow
 
 	if hud_sprite:
 		var cam = get_viewport().get_camera_3d()
@@ -322,9 +334,21 @@ func _process(_delta: float) -> void:
 			var hud_range = 10000.0
 			hud_sprite.visible = dist < hud_range
 			hud_sprite.modulate.a = clamp(1.0 - (dist / hud_range), 0.0, 1.0)
-			
-	# Subtle local spin for tactical consistency
-	rotate_object_local(Vector3.UP, _delta * 0.4)
+
+	# Spin gets a kick-synced burst on top of the base rate — minerals visibly
+	# pulse-spin on every kick.
+	rotate_object_local(Vector3.UP, _delta * (0.4 + kick_pulse * 1.8))
+
+# Cached MusicDirector ref — looked up via group on first miss.
+var _md_ref = null
+func _get_music_director():
+	if _md_ref and is_instance_valid(_md_ref):
+		return _md_ref
+	var nodes := get_tree().get_nodes_in_group("MusicDirector")
+	if nodes.size() > 0:
+		_md_ref = nodes[0]
+		return _md_ref
+	return null
 
 func _on_mined() -> void:
 	# ACE: Award the player $1 for destroying this mineral (immediate payout),

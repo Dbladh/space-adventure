@@ -65,6 +65,10 @@ func _spawn_deterministic_belt() -> void:
 	
 	var mmi_mat = _cached_cel_mat.duplicate()
 	var phys_mat = _cached_cel_mat.duplicate()
+	# Stash these refs so the beat-sync code in _process can pulse their
+	# pulse_scale uniform without scaling the parent (which would move
+	# asteroids' positions).
+	_pulse_mats = [mmi_mat, phys_mat]
 	
 	# TIER 1: DISTANT IMPOSTOR RING (Low Poly, 14k)
 	mmi_back = MultiMeshInstance3D.new()
@@ -133,6 +137,17 @@ func _cleanup_destroyed_asteroids() -> void:
 			if proc_idx > i: proc_idx -= 1
 		i -= 1
 
+var _md_ref = null
+var _pulse_mats: Array = []   # ShaderMaterial refs for asteroid LODs
+
+func _get_music_director():
+	if _md_ref and is_instance_valid(_md_ref):
+		return _md_ref
+	var nodes := get_tree().get_nodes_in_group("MusicDirector")
+	if nodes.size() > 0:
+		_md_ref = nodes[0]
+	return _md_ref
+
 func _process(delta: float) -> void:
 	if _is_spawning_phys:
 		_process_physical_spawning()
@@ -142,6 +157,19 @@ func _process(delta: float) -> void:
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0: player = found[0]
 		return
+
+	# Beat sync: pulse each asteroid's mesh size in place. Big swing on
+	# kicks (up to +14%) plus a smaller bump on every other step (+4%) so
+	# the belt visibly breathes between kicks too. Driven by a per-material
+	# shader uniform so positions never move.
+	var md = _get_music_director()
+	if md and not _pulse_mats.is_empty():
+		var kick_amt: float = float(md.kick_intensity) * 0.14
+		var beat_amt: float = float(md.beat_intensity) * 0.04
+		var s: float = 1.0 + kick_amt + beat_amt
+		for mat in _pulse_mats:
+			if mat:
+				mat.set_shader_parameter("pulse_scale", s)
 
 	# Periodically clean up destroyed asteroids
 	_cleanup_destroyed_asteroids()

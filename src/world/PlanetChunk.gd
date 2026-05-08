@@ -693,14 +693,15 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 			elif trk_seed == 2: tr_c = Color(0.85, 0.85, 0.8) # Birch White
 			mt_th.set_instance_transform(i, points[i]); mt_th.set_instance_color(i, tr_c)
 			
-			# AMBIENT LEAF DRIFT: Throttled to only spawn for the immediate local neighborhood (Optimization)
-			if not _mobile_perf and i % 15 == 0:
-				var cam_p = Vector3.ZERO
-				if is_instance_valid(get_viewport().get_camera_3d()):
-					cam_p = get_viewport().get_camera_3d().global_position
-				
-				if pos.distance_to(cam_p) < 150.0:
-					_spawn_leaf_emitter(points[i].origin, t_col)
+			# AMBIENT LEAF DRIFT: spawn one emitter every 30 trees, regardless of
+			# camera position. The previous "camera within 150u at gen time"
+			# check meant emitters only existed for the brief moment you were
+			# sitting still close to a chunk during generation — leaves only
+			# accumulated visibly when frozen at a station for minutes. Density
+			# halved (was i % 15) since emitters now persist for the chunk's
+			# lifetime, not just 60 seconds.
+			if not _mobile_perf and i % 30 == 0:
+				_spawn_leaf_emitter(points[i].origin, t_col)
 		
 		var mti_h = MultiMeshInstance3D.new(); mti_h.multimesh = mm_h; mti_h.material_override = foliage_mat; add_child(mti_h)
 		var mti_m = MultiMeshInstance3D.new(); mti_m.multimesh = mm_m; mti_m.material_override = foliage_mat; add_child(mti_m)
@@ -872,10 +873,13 @@ func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
 	p.damping_min = 0.05; p.damping_max = 0.1
 	
 	p.scale_amount_curve = _get_leaf_scale_curve()
-	p.speed_scale = 0.02
+	# speed_scale was 0.02 — at amount=20, lifetime=60 that meant one leaf
+	# every ~150 real seconds (effective emit rate 0.0066/s). 0.5 keeps the
+	# slow-drift visual feel while emitting at a real-time rate.
+	p.speed_scale = 0.5
 	p.angle_max = 360.0; p.angle_min = -360.0
 	p.angular_velocity_min = 40.0; p.angular_velocity_max = 180.0
-	p.amount = 20; p.lifetime = 60.0 
+	p.amount = 12; p.lifetime = 30.0   # smaller per-emitter budget; emitters now persist
 	p.local_coords = false 
 	p.color_ramp = _get_leaf_gradient()
 	p.color = col
@@ -883,15 +887,17 @@ func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
 	p.mesh = _get_leaf_mesh()
 	p.position = center + Vector3(0, 25, 0)
 	p.visibility_aabb = AABB(Vector3(-50,-150,-50), Vector3(100,300,100))
-	p.visibility_range_end = 250.0; p.visibility_range_end_margin = 80.0
+	# Visibility range bumped from 250 → 600 so leaves are visible at normal
+	# flight distances rather than only when the camera is right next to a tree.
+	p.visibility_range_end = 600.0; p.visibility_range_end_margin = 120.0
 	p.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	
+
 	add_child(p)
-	
-	# ACE MEMORY HARDENING: Ensure ephemeral botanical emitters are purged!
-	# Without this, high-density forest flight causes a massive 'Node Leak' that kills framerate.
-	var t = get_tree().create_timer(p.lifetime + 1.0)
-	t.timeout.connect(func(): if is_instance_valid(p): p.queue_free())
+	# Emitter is owned by the chunk — it lives as long as the chunk lives,
+	# and is freed automatically when the chunk unloads (Godot frees children
+	# when their parent is queue_freed). The previous 60-second self-destruct
+	# timer was the root cause of "leaves only visible at the station" since
+	# emitters died long before the player got close enough to see them.
 
 static var _leaf_mesh: QuadMesh = null
 static func _get_leaf_mesh() -> QuadMesh:
@@ -1447,10 +1453,14 @@ void fragment() {
 	albedo = mix(albedo, col_rock * m_detail_level, t_rock_start); // Mid -> high-alt rock
 	albedo = mix(albedo, col_snow * s_detail_level, t_snow); // Rock -> snow caps
 
-	// POLAR SNOW CAP: Overlays snow regardless of altitude at the North/South poles
-	// Tighter polar caps (was 0.78–0.94) so the ice doesn't drown half the
-	// visible disc and bleach out the procedural biome colour.
-	float polar_snow = smoothstep(0.88, 0.96, abs(v_local_norm.y));
+	// POLAR SNOW CAP: sharp ~1px transition (aa_step) instead of a wide
+	// smoothstep gradient. The previous 0.88→0.96 fade was being quantized
+	// by the halftone post-process into ~7 visible latitude rings on the
+	// surface (the rings that "popped in" once chunks finished generating).
+	// Latitude is offset by triplanar detail noise (~±3°) so the snowline
+	// reads as an organic frost edge, not a clean circle.
+	float polar_lat = abs(v_local_norm.y) + (detail_tex.r - 0.5) * 0.08;
+	float polar_snow = aa_step(0.90, polar_lat);
 	albedo = mix(albedo, col_snow * s_detail_level, polar_snow);
 	
 	// Override steep cliff faces with rock color regardless of their altitude

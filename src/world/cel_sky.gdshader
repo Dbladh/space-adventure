@@ -12,6 +12,10 @@ uniform sampler2D star_noise;
 uniform sampler2D nebula_noise;
 uniform sampler2D cloud_noise;
 
+// Driven by MusicDirector's beat intensity each frame — peaks on every
+// 16th-note step. Stars twinkle in time with the music when this is high.
+uniform float music_beat : hint_range(0.0, 2.0) = 0.0;
+
 void sky() {
 	// 0. LOCAL PLANETARY HORIZON ROTATION
 	vec3 up = normalize(POSITION - vec3(0.0, 0.0, -1800000.0));
@@ -28,12 +32,17 @@ void sky() {
 	if (space_blend > 0.01) {
 		vec2 polar_uv = vec2(atan(EYEDIR.z, EYEDIR.x) / (2.0 * PI) + 0.5, acos(EYEDIR.y) / PI);
 		
-		// Procedural Twinkling Stars
+		// Procedural Twinkling Stars — phase modulated by per-star noise so
+		// each star peaks at a different point of the beat. music_beat
+		// drives the overall brightness amplitude.
 		float raw_stars = texture(star_noise, polar_uv * vec2(16.0, 8.0)).r;
 		float star_mask = step(0.85, raw_stars);
-		
-		float twinkle = 0.5; 
-		vec3 stars = vec3(star_mask * (0.6 + twinkle * 1.5)); 
+
+		// Per-star phase comes from the noise value itself — different stars
+		// twinkle at different phases of the same beat, so the field shimmers.
+		float star_phase = raw_stars * 6.2832;
+		float twinkle = 0.5 + music_beat * (0.5 + 0.5 * sin(star_phase));
+		vec3 stars = vec3(star_mask * (0.6 + twinkle * 1.8));
 		
 		vec2 nebula_uv = polar_uv * vec2(2.0, 1.0);
 		float dust = texture(nebula_noise, nebula_uv).r;

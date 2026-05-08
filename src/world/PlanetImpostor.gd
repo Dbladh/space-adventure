@@ -61,9 +61,10 @@ uniform vec3 h_col; // Atmosphere (Horizon)
 uniform vec3 w_col; // Water
 
 float hash(vec3 p) {
-	p = fract(p * 0.3183099 + 0.1);
-	p *= 17.0;
-	return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+	// Old hash multiplied symmetric terms (x*y*z * (x+y+z)) which collapses
+	// to similar values along octahedral diagonals — produced visible diamond
+	// patches when sphere-projected via NORMAL.
+	return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
 }
 
 float noise(vec3 p) {
@@ -80,12 +81,22 @@ void fragment() {
 	
 	// ACE SURFACE NOISE: Re-implementing the orbital landmass generator
 	float n = noise(NORMAL * 5.0) * 0.4 + noise(NORMAL * 12.0) * 0.1;
-	float warp_n = noise(NORMAL * 1.2) * 2.0 - 1.0;
-	vec3 warped_sn = normalize(NORMAL + vec3(warp_n, warp_n, warp_n) * 0.35);
+	// Per-axis decorrelated warp — old form used vec3(w,w,w) which moved
+	// along the (1,1,1) octahedral diagonal, preserving rotational symmetry.
+	vec3 warp_v = vec3(
+		noise(NORMAL * 1.2),
+		noise(NORMAL * 1.2 + vec3(11.3)),
+		noise(NORMAL * 1.2 + vec3(23.7))
+	) * 2.0 - 1.0;
+	vec3 warped_sn = normalize(NORMAL + warp_v * 0.35);
 	float dist_to_pole = length(warped_sn - c_pole);
 	float proximity = smoothstep(1.0, 0.4, dist_to_pole);
-	float c_noise = noise(NORMAL * 2.2) * 1.5; 
-	float major_mask = smoothstep(0.48, 0.52, c_noise + proximity * 0.9);
+	// Multi-octave continent fbm — single octave at freq 2.2 read as ~3
+	// giant round blobs across the whole planet.
+	float c_noise = noise(warped_sn * 2.2) * 0.95
+	              + noise(warped_sn * 5.3) * 0.45
+	              + noise(warped_sn * 11.7) * 0.22;
+	float major_mask = smoothstep(0.42, 0.58, c_noise + proximity * 0.55);
 
 	// ACE CONTINENTAL HANDOVER: Map landmasses and oceans to the orbital proxy.
 	// land_base picks up small-scale variation (n) so equator regions get a

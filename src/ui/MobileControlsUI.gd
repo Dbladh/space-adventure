@@ -144,28 +144,32 @@ func _update_layout() -> void:
 		_THROTTLE_HIT_WIDTH, bar_h + _THROTTLE_HIT_HEIGHT_PAD * 2.0)
 
 	# Top buttons (RECENTER only in play mode; pause menu has gyro/sens)
+	# 50px height was below Apple's 44pt minimum once safe-area scaling kicks
+	# in — bumped to 66 for comfortable thumb hits.
 	var tp = 36.0 + _safe_top
-	_rect_recenter = Rect2(36 + _safe_left, tp, 180, 50)
-	_rect_menu     = Rect2(sx - 180 - 36 - _safe_right, tp, 180, 50)
+	_rect_recenter = Rect2(36 + _safe_left, tp, 200, 66)
+	_rect_menu     = Rect2(sx - 200 - 36 - _safe_right, tp, 200, 66)
 
-	# Combat cluster (bottom-right)
+	# Combat cluster (bottom-right). BRAKE bumped 60 → 76 px so it clears
+	# 44pt; FIRE/BOOST already comfortably above the floor.
 	var pad    = 36.0 + _safe_bottom
 	var col_x  = sx - pad - _safe_right
 	var base_y = sy - pad
 	var btn_w  := 220.0
 	var btn_h  := 104.0
 	var gap    := 10.0
-	var brk_h  := 60.0
+	var brk_h  := 76.0
 	_rect_fire  = Rect2(col_x - btn_w, base_y - btn_h, btn_w, btn_h)
 	_rect_boost = Rect2(col_x - btn_w, base_y - btn_h - gap - btn_h, btn_w, btn_h)
 	_rect_brake = Rect2(col_x - btn_w, base_y - btn_h - gap - btn_h - gap - brk_h, btn_w, brk_h)
 
-	# Roll buttons (bottom-left)
-	var roll_h   := 80.0
+	# Roll buttons (bottom-left). Wider gap (12 → 18 px) for thumb separation,
+	# and bumped to 88 px tall. roll_w stays at 138 since both are paired.
+	var roll_h   := 88.0
 	var roll_w   := 138.0
 	var roll_pad  = 36.0 + _safe_left
 	_rect_rolll  = Rect2(roll_pad,               base_y - roll_h - _safe_bottom, roll_w, roll_h)
-	_rect_rollr  = Rect2(roll_pad + roll_w + 12, base_y - roll_h - _safe_bottom, roll_w, roll_h)
+	_rect_rollr  = Rect2(roll_pad + roll_w + 18, base_y - roll_h - _safe_bottom, roll_w, roll_h)
 
 	# Pause menu buttons (bottom-right, same position as combat cluster)
 	# Stacked bottom-up: RESUME (large) → GYRO → SENS → DEAD (small).

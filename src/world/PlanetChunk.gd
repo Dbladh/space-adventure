@@ -69,7 +69,7 @@ var _static_body: StaticBody3D
 var _collision_node: CollisionShape3D
 var _t_pts: Array[Transform3D] = []
 var _r_pts: Array[Transform3D] = []
-var _mobile_perf: bool = OS.get_name() == "iOS" or OS.has_feature("mobile")
+var _mobile_perf: bool = MobilePerf.is_mobile()
 var _g_pts: Array[Transform3D] = []
 var _c_pts: Array[Transform3D] = []
 var _m_pts: Array = [] # Pairs: [Transform3D, String (Type)]

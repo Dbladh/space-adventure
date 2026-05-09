@@ -147,7 +147,7 @@ var _cloud_cockpit_particles: GPUParticles3D = null
 
 func _ready() -> void:
 	self.add_to_group("Player")
-	_mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
+	_mobile_perf = MobilePerf.is_mobile()
 	# Diagnostic: visible in the runtime console so we can confirm on-device
 	# whether the mobile branches are actually firing.
 	print("[Player] OS.get_name()=", OS.get_name(),

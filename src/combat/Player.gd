@@ -42,6 +42,7 @@ var _mobile_look_last_pos: Vector2 = Vector2.ZERO
 # GYRO STEERING (Star Fox Style)
 @export var gyro_enabled: bool = true
 @export var gyro_sensitivity: float = 1.9 # ACE: Lowered for absolute gravity stability
+var _gyro_neutral_x: float = 0.0 # X-axis (side tilt) neutral — captured alongside Z so both axes are zeroed relative to the player's actual hand pose.
 var _gyro_neutral_z: float = 0.0 # ACE Calibration
 var _is_calibrated: bool = false
 
@@ -369,7 +370,11 @@ func _setup_combat_hud() -> void:
 			mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
 			mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
 			mc.deadzone_changed.connect(func(v): mobile_gyro_dead = v)
-			mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
+			mc.recalibrate_pressed.connect(func():
+				_gyro_neutral_x = 0.0
+				_gyro_neutral_z = 0.0
+				_is_calibrated = false
+			)
 			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
 func _on_mobile_brake(pressed: bool) -> void:
@@ -568,10 +573,14 @@ func _process_ace_camera(delta: float) -> void:
 			# Project the ship's forward onto the horizon plane defined by world_up.
 			var horiz_fwd = (ship_fwd - world_up * ship_fwd.dot(world_up))
 			if horiz_fwd.length_squared() < 0.01:
-				# Ship pointing straight up/down — fall back to current cam fwd
-				# so the camera doesn't snap to a degenerate look-at vector.
+				# Ship pointing straight up/down — fall back to current cam fwd.
 				horiz_fwd = -cam_pivot.global_transform.basis.z
 				horiz_fwd = (horiz_fwd - world_up * horiz_fwd.dot(world_up))
+			# If we're STILL degenerate after the fallback (cam was also vertical),
+			# skip this frame's basis update entirely rather than feed Basis.looking_at
+			# a zero vector — that path produces NaN bases and the camera flip-spins.
+			if horiz_fwd.length_squared() < 0.01:
+				return
 			horiz_fwd = horiz_fwd.normalized()
 			var stable_q = Basis.looking_at(horiz_fwd, world_up).get_rotation_quaternion()
 			target_q = (stable_q * orbit_q).normalized()
@@ -824,23 +833,30 @@ func _process_ace_flight(delta: float) -> void:
 	var pitch = pitch_stick
 	
 	# MOTION STEERING: High-Authority Gravity Vector
-	# ACE MOBILE V2: supports UI "GYRO OFF" pause and a sensitivity multiplier.
+	# Gated on _mobile_perf so desktop never reads accelerometer values (some
+	# laptops report a non-zero "gravity" that the gyro path used to interpret
+	# as constant tilt — and pumped the ship into a continuous spin).
 	# Curve: deadzone → normalized → pow(x, 1.6) so small tilts give fine trim
 	# and larger tilts ramp up quickly (No Man's Sky-style joystick response).
-	if gyro_enabled and not mobile_gyro_paused:
+	if _mobile_perf and gyro_enabled and not mobile_gyro_paused:
 		var grav = Input.get_gravity()
 
-		# ACE AUTO-CALIBRATION: Capture first stable reading as Neutral
+		# ACE AUTO-CALIBRATION: capture the first stable reading on BOTH axes
+		# so the player's actual hand pose becomes "neutral" — including any
+		# habitual side tilt. The previous code only captured Z, which left
+		# X-axis tilt as an absolute offset and produced a constant yaw drift.
 		if not _is_calibrated and grav.length() > 1.0:
+			_gyro_neutral_x = grav.x
 			_gyro_neutral_z = grav.z
 			_is_calibrated = true
 
-		# Deadzone (degrees of tilt that do nothing). User-tunable from the
+		# Deadzone (m/s² of tilt that does nothing) is user-tunable from the
 		# pause-menu DEAD slider — wider for shaky hands, narrower for crisp
-		# precise control. Saturation tilt stays fixed.
+		# precise control. Saturation tilt stays fixed at TILT_FULL.
 		const TILT_FULL = 6.0
-		var tx = grav.x if abs(grav.x) > mobile_gyro_dead else 0.0
+		var tx_raw = grav.x - _gyro_neutral_x
 		var tz_raw = grav.z - _gyro_neutral_z
+		var tx = tx_raw if abs(tx_raw) > mobile_gyro_dead else 0.0
 		var tz = tz_raw if abs(tz_raw) > mobile_gyro_dead else 0.0
 
 		# Map tilt magnitude to [-1, 1] with a power curve for finer control
@@ -876,12 +892,10 @@ func _process_ace_flight(delta: float) -> void:
 		var raw_dist = global_position.distance_to(target_planet.global_position)
 		true_altitude = raw_dist - target_planet.get("planet_radius")
 	var is_in_atmo = target_planet and true_altitude < 26000.0
-	# Mobile: re-arm gyro calibration on every atmosphere entry. The next
-	# stable gravity reading becomes the new neutral, so each planet starts
-	# matched to the player's current hand pose — avoids the
-	# "ship banks forever because I tilted slightly when entering" trap.
-	if _mobile_perf and is_in_atmo and not _was_in_atmo:
-		_is_calibrated = false
+	# Auto-recenter on atmosphere entry was a footgun — the player is almost
+	# always tilted forward when entering, so the new "neutral" captured the
+	# dive pose and made flat-phone read as constant pull-up. Calibration now
+	# only happens once at startup or on explicit RECENTER tap.
 	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
 	var surface_assist: float = 0.0
 

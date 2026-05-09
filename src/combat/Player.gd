@@ -32,7 +32,7 @@ var mobile_interact: bool = false
 var mobile_throttle_dragging: bool = false
 var _mobile_roll_l: bool = false # ◀ ROLL held (continuous +1 roll while down)
 var _mobile_roll_r: bool = false # ROLL ▶ held (continuous -1 roll while down)
-var mobile_gyro_paused: bool = true # ACE: UI toggle — pauses gyro steering entirely. Default OFF — tilt-to-steer is opt-in via the GYRO button in the pause menu.
+var mobile_gyro_paused: bool = false # ACE: UI toggle — pauses gyro steering. Default ON — gyro is the primary mobile steering input. The camera is horizon-stabilised separately so tilt no longer spins the view.
 var mobile_sens_mult: float = 1.0    # ACE: UI-driven sensitivity multiplier on top of gyro_sensitivity
 var mobile_ui_ref: Control = null    # ACE: back-reference so Player can push telemetry to the HUD
 var _mobile_look_touch_idx: int = -1
@@ -554,11 +554,32 @@ func _process_ace_camera(delta: float) -> void:
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
 		cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
 	else:
-		var ship_q = global_transform.basis.get_rotation_quaternion()
+		# Mobile + gyro-active: horizon-stabilised camera. The camera tracks the
+		# ship's heading (yaw) but ignores roll and pitch — phone tilt rotates
+		# the SHIP through a stable world rather than spinning the player's
+		# view. world_up is planet-up in atmosphere, world UP in space.
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
-		var target_q = (ship_q * orbit_q).normalized()
+		var use_stable_cam: bool = _mobile_perf and gyro_enabled and not mobile_gyro_paused
+		var target_q: Quaternion
+		if use_stable_cam:
+			var ship_fwd = -global_transform.basis.z
+			# Project the ship's forward onto the horizon plane defined by world_up.
+			var horiz_fwd = (ship_fwd - world_up * ship_fwd.dot(world_up))
+			if horiz_fwd.length_squared() < 0.01:
+				# Ship pointing straight up/down — fall back to current cam fwd
+				# so the camera doesn't snap to a degenerate look-at vector.
+				horiz_fwd = -cam_pivot.global_transform.basis.z
+				horiz_fwd = (horiz_fwd - world_up * horiz_fwd.dot(world_up))
+			horiz_fwd = horiz_fwd.normalized()
+			var stable_q = Basis.looking_at(horiz_fwd, world_up).get_rotation_quaternion()
+			target_q = (stable_q * orbit_q).normalized()
+		else:
+			var ship_q = global_transform.basis.get_rotation_quaternion()
+			target_q = (ship_q * orbit_q).normalized()
 		var current_q = cam_pivot.global_transform.basis.get_rotation_quaternion()
-		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, 15.0 * delta))
+		# Slower follow on mobile so quick gyro inputs don't snap the camera.
+		var follow_rate: float = 8.0 if use_stable_cam else 15.0
+		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, follow_rate * delta))
 
 	# FOV SYNC
 	var speed_val = velocity.length()

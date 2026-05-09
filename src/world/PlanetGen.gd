@@ -353,6 +353,10 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	uniform float thresh_lo  = 0.55;
 	uniform float thresh_hi  = 0.78;
 	uniform float alpha_max  = 0.70;
+	// Unique 3D offset per cloud layer so stacked shells don't sample the
+	// same noise pattern. Without this, every shell renders identical clouds
+	// and the stack reads as one slab instead of multiple altitudes.
+	uniform vec3  layer_offset = vec3(0.0);
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
@@ -385,16 +389,16 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	// Multi-scale density combiner — produces small + medium + large puffs
 	// in the same field. WEIGHTED SUM rather than MAX so peaks aren't
 	// sharpened (MAX produces triangular spike-like silhouettes; weighted
-	// sum stays soft and cotton-like).
+	// sum stays soft and cotton-like). The layer_offset uniform shifts the
+	// noise position per stacked shell so the layers aren't identical.
 	float cloud_density(vec3 dir, float t, float c_scale) {
-		vec3 lp_large = dir * planet_r * c_scale * 0.35 + vec3(t * 0.6, t * 0.3, -t * 0.2);
-		vec3 lp_med   = dir * planet_r * c_scale * 1.0  + vec3(t, t * 0.5, -t * 0.3) + vec3(50.0);
-		vec3 lp_small = dir * planet_r * c_scale * 2.8  + vec3(-t * 0.4, t * 0.6, t * 0.2) + vec3(100.0);
+		vec3 base = dir * planet_r * c_scale + layer_offset;
+		vec3 lp_large = base * 0.35 + vec3(t * 0.6, t * 0.3, -t * 0.2);
+		vec3 lp_med   = base * 1.0  + vec3(t, t * 0.5, -t * 0.3) + vec3(50.0);
+		vec3 lp_small = base * 2.8  + vec3(-t * 0.4, t * 0.6, t * 0.2) + vec3(100.0);
 		float d_large = fbm(lp_large);
 		float d_med   = fbm(lp_med);
 		float d_small = fbm(lp_small);
-		// Weighted blend keeps the density field smooth — large mass dominates
-		// the silhouette, medium adds shape, small breaks up the edges.
 		return d_large * 0.50 + d_med * 0.35 + d_small * 0.15;
 	}
 
@@ -420,12 +424,33 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		float t = TIME * 0.015;
 		vec3 dir = normalize(v_local_pos);
 
-		// Multi-scale density: small + medium + large puffs in the same field.
+		// Surface density at this fragment.
 		float density = cloud_density(dir, t, cell_scale);
-		// Edge fluff via micro-detail noise — pure variation (mean-centred)
-		// so it doesn't shift the average density up.
-		vec3 lp_micro = dir * planet_r * cell_scale * 8.0 + vec3(t * 0.8, -t * 0.5, t * 0.3);
+		// Edge fluff via micro-detail noise — pure variation (mean-centred).
+		vec3 lp_micro = dir * planet_r * cell_scale * 8.0 + layer_offset
+			+ vec3(t * 0.8, -t * 0.5, t * 0.3);
 		density += fbm(lp_micro) * 0.08 - 0.04;
+
+		// VOLUMETRIC RAYMARCHING: sample density at 4 points along the view
+		// ray, going INTO the cloud sphere, and accumulate coverage. This
+		// approximates flying through a volumetric cloud rather than a 2D
+		// shell — fragments where view ray pierces deep cloud get higher
+		// total coverage than fragments where it just grazes the silhouette.
+		// The local-space camera position lets us march in local coords so
+		// the noise sampling stays consistent with the rest of the shader.
+		vec3 cam_local = (inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz;
+		vec3 view_local = normalize(v_local_pos - cam_local);
+		float march_step = max(planet_r * 0.0015, 200.0);
+		float volumetric_density = density;
+		for (int i = 1; i <= 3; i++) {
+			vec3 sample_pos = v_local_pos + view_local * march_step * float(i);
+			vec3 sample_dir = normalize(sample_pos);
+			volumetric_density += cloud_density(sample_dir, t, cell_scale);
+		}
+		volumetric_density *= 0.25;  // average across 4 samples
+		// Blend surface density with marched density — surface gives sharp
+		// silhouette, marched gives interior thickness.
+		density = mix(density, volumetric_density, 0.55);
 
 		// Coverage smoothstep — slight lower-edge softening for wispy edges
 		// without flooding the whole sphere with low-density haze. The
@@ -502,41 +527,73 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	# puffs overlap. Edge translucency in the shader handles the wispy
 	# silhouette feel — these uniforms control the core opacity.
 	var alpha_max: float  = lerpf(0.95, 0.85, smoothstep(0.42, 0.62, thresh_lo))
-	c_inst.material_override.set_shader_parameter("cell_scale", cell_scale)
-	c_inst.material_override.set_shader_parameter("thresh_lo", thresh_lo)
-	c_inst.material_override.set_shader_parameter("thresh_hi", thresh_hi)
-	c_inst.material_override.set_shader_parameter("alpha_max", alpha_max)
-	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	add_child(c_inst)
 
-	# 1b. UPPER WISP LAYER — second cloud sphere at higher altitude with
-	# smaller, sparser puffs. As the player flies past, the upper layer
-	# parallaxes against the lower layer, giving real depth perception.
-	var c_mesh_hi = SphereMesh.new()
-	c_mesh_hi.radius = planet_radius + 6500.0
-	c_mesh_hi.height = c_mesh_hi.radius * 2.0
-	c_mesh_hi.radial_segments = 64; c_mesh_hi.rings = 32
-	var c_inst_hi = MeshInstance3D.new()
-	c_inst_hi.mesh = c_mesh_hi
-	c_inst_hi.material_override = ShaderMaterial.new()
-	c_inst_hi.material_override.shader = c_shader
-	# Render the upper layer AFTER the lower so it composites on top.
-	c_inst_hi.material_override.render_priority = 6
-	c_inst_hi.material_override.set_shader_parameter("sun_dir", sun_dir)
-	c_inst_hi.material_override.set_shader_parameter("horizon_color", Vector3(sky_horizon_color.r, sky_horizon_color.g, sky_horizon_color.b))
-	c_inst_hi.material_override.set_shader_parameter("planet_r", planet_radius)
-	# Upper layer: smaller cells, slightly higher threshold (sparser), and
-	# proportional alpha so it reads as wisps without disappearing entirely.
-	# Previous +0.10 threshold offset made the upper layer often invisible
-	# because fbm rarely peaked above the offset value — keep at +0.04 max.
-	c_inst_hi.material_override.set_shader_parameter("cell_scale", cell_scale * 2.5)
-	c_inst_hi.material_override.set_shader_parameter("thresh_lo", min(thresh_lo + 0.04, 0.65))
-	c_inst_hi.material_override.set_shader_parameter("thresh_hi", min(thresh_hi + 0.04, 0.85))
-	c_inst_hi.material_override.set_shader_parameter("alpha_max", alpha_max * 0.85)
-	c_inst_hi.visibility_range_end = PROXIMITY_CUTOFF
-	c_inst_hi.visibility_range_end_margin = 100000.0
-	c_inst_hi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	add_child(c_inst_hi)
+	# CLOUD SHADOWS ON LAND — push the cloud-noise parameters onto the
+	# shared land_material so triplanar_local.gdshader can sample the same
+	# density field this planet's clouds use, and darken the surface
+	# accordingly. Strength uniform is also conveyed so the cloud spawn
+	# can dial it down per planet (e.g. 0 for cloudless worlds later).
+	if land_material:
+		land_material.set_shader_parameter("cloud_cell_scale", cell_scale)
+		land_material.set_shader_parameter("cloud_thresh_lo", thresh_lo)
+		land_material.set_shader_parameter("cloud_thresh_hi", thresh_hi)
+		land_material.set_shader_parameter("cloud_strength", 0.40)
+	c_inst.queue_free()  # discard initial layer; the stack below replaces it
+
+	# Multi-shell stack — N cloud spheres at different altitudes, each
+	# sampling the same cloud_density() but with a per-layer offset so the
+	# layers aren't identical. Stacked together they read as cloud volume
+	# rather than a single shell — flying past, the player sees clouds
+	# at different heights cross at different angles and densities, which
+	# is what produces the "thickness" feel.
+	var sun_dir_local: Vector3 = sun_dir
+	var horizon_vec: Vector3 = Vector3(sky_horizon_color.r, sky_horizon_color.g, sky_horizon_color.b)
+	# Layer altitudes in metres above planet surface. Spread across ~7km
+	# of vertical range so the cloud band has real thickness.
+	var layer_altitudes: Array = [1500.0, 2800.0, 4200.0, 5800.0, 7500.0]
+	# Per-layer relative cell scale and alpha — middle layers are densest,
+	# outer layers (top/bottom) thin out so the band has soft edges in
+	# altitude as well.
+	var layer_scale_mul: Array = [1.10, 1.00, 0.95, 1.30, 2.20]
+	var layer_alpha_mul: Array = [0.55, 0.85, 1.00, 0.75, 0.45]
+	# DEBUG: cloud shell stack disabled while diagnosing rectangular missing-
+	# chunk artifacts. The 5 cull_disabled blend_mix spheres at varying
+	# altitudes may be interfering with chunk depth/alpha rendering — testing
+	# without them isolates whether the cloud stack is responsible.
+	for layer_idx in range(0):
+		var alt: float = layer_altitudes[layer_idx]
+		var scale_mul: float = layer_scale_mul[layer_idx]
+		var alpha_mul: float = layer_alpha_mul[layer_idx]
+		var lm = SphereMesh.new()
+		lm.radius = planet_radius + alt
+		lm.height = lm.radius * 2.0
+		lm.radial_segments = 64; lm.rings = 32
+		var li = MeshInstance3D.new()
+		li.mesh = lm
+		li.material_override = ShaderMaterial.new()
+		li.material_override.shader = c_shader
+		li.material_override.render_priority = 5 + layer_idx
+		li.material_override.set_shader_parameter("sun_dir", sun_dir_local)
+		li.material_override.set_shader_parameter("horizon_color", horizon_vec)
+		li.material_override.set_shader_parameter("planet_r", planet_radius)
+		li.material_override.set_shader_parameter("cell_scale", cell_scale * scale_mul)
+		li.material_override.set_shader_parameter("thresh_lo", thresh_lo)
+		li.material_override.set_shader_parameter("thresh_hi", thresh_hi)
+		li.material_override.set_shader_parameter("alpha_max", alpha_max * alpha_mul)
+		# Each layer gets a unique 3D offset so the noise sampled across
+		# layers isn't identical — without this, all 5 shells would render
+		# the exact same cloud pattern and the stack would look like one
+		# thick shell instead of distinct vertical layers.
+		var layer_seed_offset := Vector3(
+			float(layer_idx) * 51.13,
+			float(layer_idx) * 27.71 + 11.0,
+			float(layer_idx) * 73.91 - 5.0
+		)
+		li.material_override.set_shader_parameter("layer_offset", layer_seed_offset)
+		li.visibility_range_end = PROXIMITY_CUTOFF
+		li.visibility_range_end_margin = 100000.0
+		li.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		add_child(li)
 	
 	# 2. PLANETARY RINGS (50% chance per planet)
 	var ring_chance: float = 0.5

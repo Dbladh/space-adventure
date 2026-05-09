@@ -149,6 +149,16 @@ func sleep_and_reset() -> void:
 	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear()
 	_is_generating = false # FORCE RESET
 
+	# Drop any pending finalize/collision tasks that target THIS chunk. Without
+	# this, a stale queue entry from the previous generation cycle can fire
+	# AFTER the chunk has been recycled and a new worker is mid-build, causing
+	# add_surface_from_arrays() to be called with an empty _mesh_data_land
+	# (size 0 instead of ARRAY_MAX) — which in turn produces missing-surface
+	# chunks and rectangular holes in the planet.
+	if face and face.planet:
+		face.planet.finalize_queue.erase(self)
+		face.planet.collision_queue.erase(self)
+
 	# Drop per-instance LOD bookkeeping — the MMIs and proxies it references
 	# are about to be sent to death_row. Holding stale handles would crash the
 	# next _process tick after the chunk is recycled.
@@ -359,8 +369,13 @@ func _calculate_multi_surface_mesh_thread_safe() -> void:
 
 func _finalize_generation_on_main() -> void:
 	# ACE LIFECYCLE HARDENING: Prevent 'Zombie Chunks' from returning from the pool
-	if not _is_generating: return 
-	
+	if not _is_generating: return
+	# Belt-and-suspenders: a stale finalize entry that survived recycling would
+	# read an empty / partially-rebuilt _mesh_data_land. Skip silently so the
+	# next clean finalize cycle (driven by the new worker's call_deferred) can
+	# handle this chunk properly instead of producing a 0-surface mesh.
+	if _mesh_data_land.size() != Mesh.ARRAY_MAX: return
+
 	var final_mesh: ArrayMesh = ArrayMesh.new()
 	final_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _mesh_data_land)
 	if _mesh_data_water.size() > 0:
@@ -1191,7 +1206,12 @@ func _spawn_grass(points: Array[Transform3D]) -> void:
 	if is_instance_valid(planet) and not planet.get("grass_material"): mat.shader = _get_grass_shader()
 	mmi_h.material_override = mat
 	
-	mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 500.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	# Shorter view range on mobile — half the fragments shaded per planet.
+	if _mobile_perf:
+		mmi_h.visibility_range_end = 400.0; mmi_h.visibility_range_end_margin = 200.0
+	else:
+		mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 500.0
+	mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(mmi_h); _flora_nodes.append(mmi_h)
 	
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:
@@ -2125,6 +2145,9 @@ static func _get_foliage_mat() -> ShaderMaterial:
 		_mat_foliage.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
 		_mat_foliage.set_shader_parameter("shadow_strength", 0.6)
 		_mat_foliage.set_shader_parameter("biolum_intensity", 0.0) # Ensure no glow by default
+		# Mobile: skip halftone/SSS/rim/biolum tiers and pull dither fade in.
+		var _is_mobile_foliage := OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
+		_mat_foliage.set_shader_parameter("mobile_simple", _is_mobile_foliage)
 	_mat_foliage.set_shader_parameter("wind_speed", 0.7)
 	_mat_foliage.set_shader_parameter("wind_strength", 0.4)
 	_mat_foliage.set_shader_parameter("leaf_texture", _get_tex("res://assets/textures/tree_leaves_texture.png"))

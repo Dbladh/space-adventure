@@ -32,7 +32,8 @@ var mobile_interact: bool = false
 var mobile_throttle_dragging: bool = false
 var _mobile_roll_l: bool = false # ◀ ROLL held (continuous +1 roll while down)
 var _mobile_roll_r: bool = false # ROLL ▶ held (continuous -1 roll while down)
-var mobile_gyro_paused: bool = true # ACE: UI toggle — pauses gyro steering entirely. Default OFF — tilt-to-steer is opt-in via the GYRO button in the pause menu.
+var mobile_gyro_paused: bool = false # ACE: UI toggle — pauses gyro steering. Default ON — gyro is the primary mobile steering input. The camera is horizon-stabilised separately so tilt no longer spins the view.
+var mobile_gyro_dead: float = 1.4   # Tilt magnitude (degrees) below which gyro does nothing — driven by pause-menu DEAD slider.
 var mobile_sens_mult: float = 1.0    # ACE: UI-driven sensitivity multiplier on top of gyro_sensitivity
 var mobile_ui_ref: Control = null    # ACE: back-reference so Player can push telemetry to the HUD
 var _mobile_look_touch_idx: int = -1
@@ -221,14 +222,20 @@ func _setup_cloud_cockpit_particles() -> void:
 	# rather than a few isolated streaks. 250 active particles covers a
 	# substantial portion of the screen at any given time given the
 	# 1.8-second lifetime.
-	_cloud_cockpit_particles.amount = 250
+	# Mobile: ~third the particle count, smaller AABB. Density still ramps
+	# quadratically toward the surface via amount_ratio so the volume still
+	# feels denser when low.
+	_cloud_cockpit_particles.amount = 80 if _mobile_perf else 250
 	_cloud_cockpit_particles.lifetime = 1.8
 	_cloud_cockpit_particles.preprocess = 0.8
 	_cloud_cockpit_particles.local_coords = false  # particles linger in world space
 	_cloud_cockpit_particles.emitting = false
 	# AABB matches the emission radius so the particles are never frustum-
 	# culled when the camera is anywhere within that cloud volume.
-	_cloud_cockpit_particles.visibility_aabb = AABB(Vector3(-700, -700, -700), Vector3(1400, 1400, 1400))
+	if _mobile_perf:
+		_cloud_cockpit_particles.visibility_aabb = AABB(Vector3(-400, -400, -400), Vector3(800, 800, 800))
+	else:
+		_cloud_cockpit_particles.visibility_aabb = AABB(Vector3(-700, -700, -700), Vector3(1400, 1400, 1400))
 
 	var pmat := ParticleProcessMaterial.new()
 	pmat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
@@ -361,6 +368,7 @@ func _setup_combat_hud() -> void:
 			mc.roll_held.connect(_on_mobile_roll_held)
 			mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
 			mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
+			mc.deadzone_changed.connect(func(v): mobile_gyro_dead = v)
 			mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
 			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
@@ -548,11 +556,32 @@ func _process_ace_camera(delta: float) -> void:
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
 		cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
 	else:
-		var ship_q = global_transform.basis.get_rotation_quaternion()
+		# Mobile + gyro-active: horizon-stabilised camera. The camera tracks the
+		# ship's heading (yaw) but ignores roll and pitch — phone tilt rotates
+		# the SHIP through a stable world rather than spinning the player's
+		# view. world_up is planet-up in atmosphere, world UP in space.
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
-		var target_q = (ship_q * orbit_q).normalized()
+		var use_stable_cam: bool = _mobile_perf and gyro_enabled and not mobile_gyro_paused
+		var target_q: Quaternion
+		if use_stable_cam:
+			var ship_fwd = -global_transform.basis.z
+			# Project the ship's forward onto the horizon plane defined by world_up.
+			var horiz_fwd = (ship_fwd - world_up * ship_fwd.dot(world_up))
+			if horiz_fwd.length_squared() < 0.01:
+				# Ship pointing straight up/down — fall back to current cam fwd
+				# so the camera doesn't snap to a degenerate look-at vector.
+				horiz_fwd = -cam_pivot.global_transform.basis.z
+				horiz_fwd = (horiz_fwd - world_up * horiz_fwd.dot(world_up))
+			horiz_fwd = horiz_fwd.normalized()
+			var stable_q = Basis.looking_at(horiz_fwd, world_up).get_rotation_quaternion()
+			target_q = (stable_q * orbit_q).normalized()
+		else:
+			var ship_q = global_transform.basis.get_rotation_quaternion()
+			target_q = (ship_q * orbit_q).normalized()
 		var current_q = cam_pivot.global_transform.basis.get_rotation_quaternion()
-		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, 15.0 * delta))
+		# Slower follow on mobile so quick gyro inputs don't snap the camera.
+		var follow_rate: float = 8.0 if use_stable_cam else 15.0
+		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, follow_rate * delta))
 
 	# FOV SYNC
 	var speed_val = velocity.length()
@@ -806,12 +835,13 @@ func _process_ace_flight(delta: float) -> void:
 			_gyro_neutral_z = grav.z
 			_is_calibrated = true
 
-		# Deadzone (degrees of tilt that do nothing — now slightly wider)
-		const TILT_DEAD = 1.4
-		const TILT_FULL = 6.0 # Tilt magnitude at which we hit saturation
-		var tx = grav.x if abs(grav.x) > TILT_DEAD else 0.0
+		# Deadzone (degrees of tilt that do nothing). User-tunable from the
+		# pause-menu DEAD slider — wider for shaky hands, narrower for crisp
+		# precise control. Saturation tilt stays fixed.
+		const TILT_FULL = 6.0
+		var tx = grav.x if abs(grav.x) > mobile_gyro_dead else 0.0
 		var tz_raw = grav.z - _gyro_neutral_z
-		var tz = tz_raw if abs(tz_raw) > TILT_DEAD else 0.0
+		var tz = tz_raw if abs(tz_raw) > mobile_gyro_dead else 0.0
 
 		# Map tilt magnitude to [-1, 1] with a power curve for finer control
 		var nx = clamp(tx / TILT_FULL, -1.0, 1.0)
@@ -846,6 +876,12 @@ func _process_ace_flight(delta: float) -> void:
 		var raw_dist = global_position.distance_to(target_planet.global_position)
 		true_altitude = raw_dist - target_planet.get("planet_radius")
 	var is_in_atmo = target_planet and true_altitude < 26000.0
+	# Mobile: re-arm gyro calibration on every atmosphere entry. The next
+	# stable gravity reading becomes the new neutral, so each planet starts
+	# matched to the player's current hand pose — avoids the
+	# "ship banks forever because I tilted slightly when entering" trap.
+	if _mobile_perf and is_in_atmo and not _was_in_atmo:
+		_is_calibrated = false
 	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
 	var surface_assist: float = 0.0
 
@@ -857,14 +893,17 @@ func _process_ace_flight(delta: float) -> void:
 	# atmospheric haze / dust would naturally be thickest) and thinning out
 	# as altitude increases until they fade to nothing past 12 km.
 	if _cloud_cockpit_particles:
-		var in_atmo_band: bool = target_planet != null and true_altitude < 12000.0 and true_altitude > -200.0
+		# Mobile: halve the active altitude band so the emitter is off in the
+		# upper atmosphere where the density ramp is barely visible anyway.
+		var atmo_top: float = 6000.0 if _mobile_perf else 12000.0
+		var in_atmo_band: bool = target_planet != null and true_altitude < atmo_top and true_altitude > -200.0
 		if _cloud_cockpit_particles.emitting != in_atmo_band:
 			_cloud_cockpit_particles.emitting = in_atmo_band
 		if in_atmo_band:
-			# amount_ratio: 1.0 at ground level, 0.0 at 12 km. Apply a slight
-			# curve (square) so density ramps up faster as you descend rather
-			# than scaling perfectly linearly.
-			var alt_norm: float = clamp(true_altitude / 12000.0, 0.0, 1.0)
+			# amount_ratio: 1.0 at ground level, 0.0 at the band top. Apply a
+			# slight curve (square) so density ramps up faster as you descend
+			# rather than scaling perfectly linearly.
+			var alt_norm: float = clamp(true_altitude / atmo_top, 0.0, 1.0)
 			_cloud_cockpit_particles.amount_ratio = (1.0 - alt_norm) * (1.0 - alt_norm)
 	if target_planet:
 		surface_assist = clamp(1.0 - (true_altitude / 9000.0), 0.0, 1.0)
@@ -893,12 +932,21 @@ func _process_ace_flight(delta: float) -> void:
 		if abs(yaw) > 0.001:
 			rotate(world_up, yaw * rotation_speed * delta * 0.9)
 
-		# 3. ROLL — manual only, no auto-level torque
+		# 3. ROLL — manual; mobile gets a gentle auto-level torque when no
+		# active roll input. Cancels small accumulated tilt so the player
+		# doesn't have to fight the horizon between maneuvers.
 		# Use +Z axis (same as space branch) so L/R buttons have consistent
 		# chirality in and out of atmosphere.  The old -Z was a sign error that
 		# reversed the roll direction whenever the ship entered an atmosphere.
 		if abs(roll_input) > 0.001:
 			rotate(global_transform.basis.z, roll_input * roll_speed * delta)
+		elif _mobile_perf:
+			# tilt = how much the ship's right axis lifts off the horizon.
+			# Apply a corrective torque around forward to level it. Strength
+			# scales with surface_assist so it only kicks in near the ground.
+			var tilt: float = global_transform.basis.x.dot(world_up)
+			if abs(tilt) > 0.02:
+				rotate(global_transform.basis.z, -tilt * 1.8 * surface_assist * delta)
 
 		# Cache forward for any downstream consumers that still read _atmo_heading
 		_atmo_heading = (-global_transform.basis.z).normalized()
@@ -2312,15 +2360,22 @@ func _update_polar_weather(delta: float) -> void:
 	# refreshing a few times per second — not every physics tick. Throttle to
 	# ~5Hz on mobile, ~15Hz on desktop to save the planet scan + group iteration.
 	_weather_tick += 1
-	var _w_target: int = 6 if _mobile_perf else 2
+	# Throttle: ~3Hz mobile, ~15Hz desktop. Was 6 on mobile (5Hz) — halved.
+	var _w_target: int = 12 if _mobile_perf else 2
 	if _weather_tick % _w_target != 0:
 		return
 
-	# Detect if we are at a pole of a snowy-capable planet
+	# Detect if we are at a pole of a snowy-capable planet.
+	# Mobile shortcut: skip the all-planets scan when target_planet is set —
+	# weather only matters for the planet you're actually at.
 	var nearest_p = null; var min_d = 1e16
-	for p in get_tree().get_nodes_in_group("Planet"):
-		var d = p.global_position.distance_to(global_position)
-		if d < min_d: min_d = d; nearest_p = p
+	if _mobile_perf and is_instance_valid(target_planet):
+		nearest_p = target_planet
+		min_d = target_planet.global_position.distance_to(global_position)
+	else:
+		for p in get_tree().get_nodes_in_group("Planet"):
+			var d = p.global_position.distance_to(global_position)
+			if d < min_d: min_d = d; nearest_p = p
 	
 	# Atmospheric Layer: Extend detection	# UNIVERSAL VOID: No atmospheric skyboxes per GEMINI mandates
 	# The background color is handled globally by Main.gd (Stark Charcoal)

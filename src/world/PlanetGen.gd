@@ -102,6 +102,12 @@ func _ready() -> void:
 	self.add_to_group("World")
 	print("--- ARCHITECT: Planet [%s] _ready. Parent: %s, Global Pos: %s ---" % [name, get_parent().name if get_parent() else "NONE", str(global_position)])
 	mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
+	# Mobile QuadTree caps: stop subdividing four levels short of desktop and
+	# pull the subdivide-trigger radius in. Cuts worst-case chunk count
+	# dramatically during atmosphere entry — the dominant freeze on iPhone 15.
+	if mobile_perf:
+		max_lod = 14
+		subdivision_bias = 1.2
 	noise = FastNoiseLite.new()
 	_prewarm_target = 32
 	# Always use the explicit planet_seed for terrain noise.
@@ -1043,16 +1049,24 @@ func _process(_delta: float) -> void:
 			chunk_pool.append(z)
 	
 	# ACE FINALIZATION: Predictable Generation Cycles
-	# STRICT BUDGET: Spaced out to prevent frame spikes on mobile
-	MAX_FINALIZE_PER_FRAME = 1 if (OS.get_name() == "iOS" or OS.get_name() == "Android") else 8
+	# STRICT BUDGET: Spaced out to prevent frame spikes on mobile.
+	# Atmosphere-entry boost: when the player is below 26 km AND the queue
+	# has built up (>5), allow 2× drain rate for that frame only. Drains
+	# the entry backlog twice as fast without raising steady-state cost.
+	var _entry_boost: bool = mobile_perf and player != null and finalize_queue.size() > 5 \
+		and player.get("true_altitude") != null and float(player.get("true_altitude")) < 26000.0
+	if (OS.get_name() == "iOS" or OS.get_name() == "Android"):
+		MAX_FINALIZE_PER_FRAME = 2 if _entry_boost else 1
+	else:
+		MAX_FINALIZE_PER_FRAME = 8
 	for i in range(min(finalize_queue.size(), MAX_FINALIZE_PER_FRAME)):
 		var chunk = finalize_queue.pop_front()
 		if is_instance_valid(chunk):
 			chunk._finalize_generation_on_main()
-			
+
 	# ACE PROP THROTTLE: Spread node instantiation across multiple frames
 	# Tightened for M1 — 2 tasks per frame to ensure buttery flight.
-	var prop_batch = 1 if mobile_perf else 2
+	var prop_batch = (2 if _entry_boost else 1) if mobile_perf else 2
 	for i in range(min(prop_spawn_queue.size(), prop_batch)):
 		var task = prop_spawn_queue.pop_front()
 		var node = task[0]
@@ -1284,9 +1298,11 @@ class QuadTreeNode:
 		else:              chunk.resolution = 32
 		var planet_mobile_perf: bool = bool(face.planet.get("mobile_perf")) if face.planet else false
 		if planet_mobile_perf:
-			if scale > 0.05:   chunk.resolution = 12
-			elif scale > 0.01: chunk.resolution = 18
-			else:              chunk.resolution = 24
+			# Halved from 12/18/24. ~55% fewer verts per chunk; collision
+			# baking shrinks the same fraction so the queue drains faster.
+			if scale > 0.05:   chunk.resolution = 8
+			elif scale > 0.01: chunk.resolution = 12
+			else:              chunk.resolution = 16
 		chunk.planet_seed = face.planet.planet_seed
 		chunk.archetype = face.planet.archetype
 		
@@ -1344,6 +1360,10 @@ func _init_shared_materials() -> void:
 	if w_shader:
 		water_material.shader = w_shader
 		water_material.set_shader_parameter("radius", planet_radius)
+		# Mobile: skip the high-frequency detail FBM in waves and the
+		# shimmer FBM (single value_noise instead). ~6 hash() ops saved
+		# per ocean fragment.
+		water_material.set_shader_parameter("mobile_simple", mobile_perf)
 	
 	# FOLIAGE MATERIALS
 	foliage_material = ShaderMaterial.new()
@@ -1354,6 +1374,8 @@ func _init_shared_materials() -> void:
 	foliage_material.set_shader_parameter("leaf_texture", load("res://assets/textures/tree_leaves_texture.png"))
 	foliage_material.set_shader_parameter("normal_map", load("res://assets/textures/tree_leaves_texture_normal.png"))
 	foliage_material.set_shader_parameter("biolum_intensity", 1.0 if has_bioluminescence else 0.0)
+	# Mobile cheap path: simpler light(), shorter dither fade range.
+	foliage_material.set_shader_parameter("mobile_simple", mobile_perf)
 	
 	trunk_material = ShaderMaterial.new()
 	trunk_material.shader = load("res://src/shaders/trunk_toon.gdshader")

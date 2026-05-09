@@ -149,6 +149,16 @@ func sleep_and_reset() -> void:
 	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear()
 	_is_generating = false # FORCE RESET
 
+	# Drop any pending finalize/collision tasks that target THIS chunk. Without
+	# this, a stale queue entry from the previous generation cycle can fire
+	# AFTER the chunk has been recycled and a new worker is mid-build, causing
+	# add_surface_from_arrays() to be called with an empty _mesh_data_land
+	# (size 0 instead of ARRAY_MAX) — which in turn produces missing-surface
+	# chunks and rectangular holes in the planet.
+	if face and face.planet:
+		face.planet.finalize_queue.erase(self)
+		face.planet.collision_queue.erase(self)
+
 	# Drop per-instance LOD bookkeeping — the MMIs and proxies it references
 	# are about to be sent to death_row. Holding stale handles would crash the
 	# next _process tick after the chunk is recycled.
@@ -359,8 +369,13 @@ func _calculate_multi_surface_mesh_thread_safe() -> void:
 
 func _finalize_generation_on_main() -> void:
 	# ACE LIFECYCLE HARDENING: Prevent 'Zombie Chunks' from returning from the pool
-	if not _is_generating: return 
-	
+	if not _is_generating: return
+	# Belt-and-suspenders: a stale finalize entry that survived recycling would
+	# read an empty / partially-rebuilt _mesh_data_land. Skip silently so the
+	# next clean finalize cycle (driven by the new worker's call_deferred) can
+	# handle this chunk properly instead of producing a 0-surface mesh.
+	if _mesh_data_land.size() != Mesh.ARRAY_MAX: return
+
 	var final_mesh: ArrayMesh = ArrayMesh.new()
 	final_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, _mesh_data_land)
 	if _mesh_data_water.size() > 0:

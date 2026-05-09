@@ -923,12 +923,21 @@ func _process_ace_flight(delta: float) -> void:
 		if abs(yaw) > 0.001:
 			rotate(world_up, yaw * rotation_speed * delta * 0.9)
 
-		# 3. ROLL — manual only, no auto-level torque
+		# 3. ROLL — manual; mobile gets a gentle auto-level torque when no
+		# active roll input. Cancels small accumulated tilt so the player
+		# doesn't have to fight the horizon between maneuvers.
 		# Use +Z axis (same as space branch) so L/R buttons have consistent
 		# chirality in and out of atmosphere.  The old -Z was a sign error that
 		# reversed the roll direction whenever the ship entered an atmosphere.
 		if abs(roll_input) > 0.001:
 			rotate(global_transform.basis.z, roll_input * roll_speed * delta)
+		elif _mobile_perf:
+			# tilt = how much the ship's right axis lifts off the horizon.
+			# Apply a corrective torque around forward to level it. Strength
+			# scales with surface_assist so it only kicks in near the ground.
+			var tilt: float = global_transform.basis.x.dot(world_up)
+			if abs(tilt) > 0.02:
+				rotate(global_transform.basis.z, -tilt * 1.8 * surface_assist * delta)
 
 		# Cache forward for any downstream consumers that still read _atmo_heading
 		_atmo_heading = (-global_transform.basis.z).normalized()

@@ -33,6 +33,7 @@ var mobile_throttle_dragging: bool = false
 var _mobile_roll_l: bool = false # ◀ ROLL held (continuous +1 roll while down)
 var _mobile_roll_r: bool = false # ROLL ▶ held (continuous -1 roll while down)
 var mobile_gyro_paused: bool = false # ACE: UI toggle — pauses gyro steering. Default ON — gyro is the primary mobile steering input. The camera is horizon-stabilised separately so tilt no longer spins the view.
+var mobile_gyro_dead: float = 1.4   # Tilt magnitude (degrees) below which gyro does nothing — driven by pause-menu DEAD slider.
 var mobile_sens_mult: float = 1.0    # ACE: UI-driven sensitivity multiplier on top of gyro_sensitivity
 var mobile_ui_ref: Control = null    # ACE: back-reference so Player can push telemetry to the HUD
 var _mobile_look_touch_idx: int = -1
@@ -367,6 +368,7 @@ func _setup_combat_hud() -> void:
 			mc.roll_held.connect(_on_mobile_roll_held)
 			mc.sensitivity_changed.connect(func(v): mobile_sens_mult = v)
 			mc.gyro_paused_changed.connect(func(paused): mobile_gyro_paused = paused)
+			mc.deadzone_changed.connect(func(v): mobile_gyro_dead = v)
 			mc.recalibrate_pressed.connect(func(): _is_calibrated = false)
 			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
@@ -833,12 +835,13 @@ func _process_ace_flight(delta: float) -> void:
 			_gyro_neutral_z = grav.z
 			_is_calibrated = true
 
-		# Deadzone (degrees of tilt that do nothing — now slightly wider)
-		const TILT_DEAD = 1.4
-		const TILT_FULL = 6.0 # Tilt magnitude at which we hit saturation
-		var tx = grav.x if abs(grav.x) > TILT_DEAD else 0.0
+		# Deadzone (degrees of tilt that do nothing). User-tunable from the
+		# pause-menu DEAD slider — wider for shaky hands, narrower for crisp
+		# precise control. Saturation tilt stays fixed.
+		const TILT_FULL = 6.0
+		var tx = grav.x if abs(grav.x) > mobile_gyro_dead else 0.0
 		var tz_raw = grav.z - _gyro_neutral_z
-		var tz = tz_raw if abs(tz_raw) > TILT_DEAD else 0.0
+		var tz = tz_raw if abs(tz_raw) > mobile_gyro_dead else 0.0
 
 		# Map tilt magnitude to [-1, 1] with a power curve for finer control
 		var nx = clamp(tx / TILT_FULL, -1.0, 1.0)

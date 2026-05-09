@@ -19,6 +19,7 @@ signal roll_triggered(direction: float)
 signal roll_held(direction: float, pressed: bool)
 signal sensitivity_changed(value: float)
 signal gyro_paused_changed(paused: bool)
+signal deadzone_changed(value: float)
 signal recalibrate_pressed()
 signal menu_pressed()   # still emitted on PAUSE button press
 
@@ -68,12 +69,16 @@ var rollr_touch: int = -1
 var _resume_touch: int  = -1
 var _pgyro_touch: int   = -1
 var _psens_touch: int   = -1
+var _pdead_touch: int   = -1
 
 # ---- OPTIONS ----
 var gyro_paused: bool = false
 var sens_idx: int = 1
 const SENS_VALUES = [0.6, 1.0, 1.6]
 const SENS_LABELS = ["LOW", "MED", "HIGH"]
+var dead_idx: int = 1
+const DEAD_VALUES = [0.8, 1.4, 2.4]
+const DEAD_LABELS = ["NARROW", "MED", "WIDE"]
 
 # ---- TELEMETRY ----
 var hud_speed: float = 0.0
@@ -97,6 +102,7 @@ var _rect_throttle_hit: Rect2
 var _rect_resume:       Rect2
 var _rect_pgyro:        Rect2
 var _rect_psens:        Rect2
+var _rect_pdead:        Rect2
 var _last_viewport_size: Vector2 = Vector2.ZERO
 
 # =====================================================================
@@ -162,12 +168,13 @@ func _update_layout() -> void:
 	_rect_rollr  = Rect2(roll_pad + roll_w + 12, base_y - roll_h - _safe_bottom, roll_w, roll_h)
 
 	# Pause menu buttons (bottom-right, same position as combat cluster)
-	# RESUME is large (same slot as FIRE+BOOST combined), GYRO and SENS are smaller
+	# Stacked bottom-up: RESUME (large) → GYRO → SENS → DEAD (small).
 	var pm_btn_h := 100.0
-	var pm_sml_h := 58.0
+	var pm_sml_h := 70.0   # bumped from 58 for 44pt+ touch targets
 	_rect_resume = Rect2(col_x - btn_w, base_y - pm_btn_h, btn_w, pm_btn_h)
 	_rect_pgyro  = Rect2(col_x - btn_w, base_y - pm_btn_h - gap - pm_sml_h, btn_w, pm_sml_h)
 	_rect_psens  = Rect2(col_x - btn_w, base_y - pm_btn_h - gap - pm_sml_h - gap - pm_sml_h, btn_w, pm_sml_h)
+	_rect_pdead  = Rect2(col_x - btn_w, base_y - pm_btn_h - gap - pm_sml_h - gap - pm_sml_h - gap - pm_sml_h, btn_w, pm_sml_h)
 
 func set_telemetry(speed: float, alt: float, warping: bool) -> void:
 	hud_speed = speed; hud_alt = alt; hud_warp = warping
@@ -264,7 +271,7 @@ func _draw() -> void:
 		var pm_col_x = sx - pm_pad - _safe_right
 		var pm_base  = sy - pm_pad
 		var pm_w     = 220.0
-		var pm_top   = _rect_psens.position.y - 16.0
+		var pm_top   = _rect_pdead.position.y - 16.0
 		var pm_bot   = pm_base + 16.0
 		var pm_panel = Rect2(pm_col_x - pm_w - 12, pm_top, pm_w + 24, pm_bot - pm_top)
 		_draw_rounded_rect(pm_panel, Color(0.05, 0.07, 0.13, 0.88), 14.0)
@@ -282,6 +289,10 @@ func _draw() -> void:
 		# SENSITIVITY cycle
 		_draw_space_button(_rect_psens, "SENS: %s" % SENS_LABELS[sens_idx],
 			C_BG, C_TEAL, _psens_touch != -1, 16)
+
+		# DEADZONE cycle (gyro tilt that does nothing)
+		_draw_space_button(_rect_pdead, "DEAD: %s" % DEAD_LABELS[dead_idx],
+			C_BG, C_TEAL, _pdead_touch != -1, 16)
 
 		# RESUME button (large green)
 		_draw_space_button(_rect_resume, "▶  RESUME",
@@ -410,6 +421,11 @@ func _on_press(pos: Vector2, index: int) -> void:
 			sens_idx = (sens_idx + 1) % SENS_VALUES.size()
 			sensitivity_changed.emit(SENS_VALUES[sens_idx])
 			queue_redraw(); get_viewport().set_input_as_handled(); return
+		if _rect_pdead.has_point(pos) and _pdead_touch == -1:
+			_pdead_touch = index
+			dead_idx = (dead_idx + 1) % DEAD_VALUES.size()
+			deadzone_changed.emit(DEAD_VALUES[dead_idx])
+			queue_redraw(); get_viewport().set_input_as_handled(); return
 		# Swallow all other touches while paused so nothing fires accidentally
 		get_viewport().set_input_as_handled(); return
 
@@ -464,6 +480,8 @@ func _on_release(index: int) -> void:
 		_pgyro_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
 	if index == _psens_touch:
 		_psens_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
+	if index == _pdead_touch:
+		_pdead_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
 
 	if index == fire_touch:
 		fire_touch = -1; fire_pressed.emit(false)

@@ -1049,16 +1049,24 @@ func _process(_delta: float) -> void:
 			chunk_pool.append(z)
 	
 	# ACE FINALIZATION: Predictable Generation Cycles
-	# STRICT BUDGET: Spaced out to prevent frame spikes on mobile
-	MAX_FINALIZE_PER_FRAME = 1 if (OS.get_name() == "iOS" or OS.get_name() == "Android") else 8
+	# STRICT BUDGET: Spaced out to prevent frame spikes on mobile.
+	# Atmosphere-entry boost: when the player is below 26 km AND the queue
+	# has built up (>5), allow 2× drain rate for that frame only. Drains
+	# the entry backlog twice as fast without raising steady-state cost.
+	var _entry_boost: bool = mobile_perf and player != null and finalize_queue.size() > 5 \
+		and player.get("true_altitude") != null and float(player.get("true_altitude")) < 26000.0
+	if (OS.get_name() == "iOS" or OS.get_name() == "Android"):
+		MAX_FINALIZE_PER_FRAME = 2 if _entry_boost else 1
+	else:
+		MAX_FINALIZE_PER_FRAME = 8
 	for i in range(min(finalize_queue.size(), MAX_FINALIZE_PER_FRAME)):
 		var chunk = finalize_queue.pop_front()
 		if is_instance_valid(chunk):
 			chunk._finalize_generation_on_main()
-			
+
 	# ACE PROP THROTTLE: Spread node instantiation across multiple frames
 	# Tightened for M1 — 2 tasks per frame to ensure buttery flight.
-	var prop_batch = 1 if mobile_perf else 2
+	var prop_batch = (2 if _entry_boost else 1) if mobile_perf else 2
 	for i in range(min(prop_spawn_queue.size(), prop_batch)):
 		var task = prop_spawn_queue.pop_front()
 		var node = task[0]

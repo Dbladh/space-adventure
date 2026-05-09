@@ -41,7 +41,7 @@ var _mobile_look_last_pos: Vector2 = Vector2.ZERO
 
 # GYRO STEERING (Star Fox Style)
 @export var gyro_enabled: bool = true
-@export var gyro_sensitivity: float = 1.9 # ACE: Lowered for absolute gravity stability
+@export var gyro_sensitivity: float = 0.8 # iPhone-15-tuned. Was 1.9 — combined with ±1.5 clamp produced ~330°/s yaw, way too jumpy on a real phone IMU. Pause-menu SENS slider can scale up.
 var _gyro_neutral_x: float = 0.0 # X-axis (side tilt) neutral — captured alongside Z so both axes are zeroed relative to the player's actual hand pose.
 var _gyro_neutral_z: float = 0.0 # ACE Calibration
 var _is_calibrated: bool = false
@@ -566,31 +566,46 @@ func _process_ace_camera(delta: float) -> void:
 		# the SHIP through a stable world rather than spinning the player's
 		# view. world_up is planet-up in atmosphere, world UP in space.
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
-		var use_stable_cam: bool = _mobile_perf and gyro_enabled and not mobile_gyro_paused
+		# Mobile: ALWAYS use a roll-decoupled, ship-following third-person
+		# camera, regardless of gyro toggle state. Camera looks along the
+		# ship's actual forward (so it pitches with the ship — diving the
+		# ship dives the view) but the up vector is forced to world_up,
+		# stripping the ship's roll. This is the closest thing to a normal
+		# arcade flight-sim chase cam — gives the player a stable horizon
+		# without losing "the camera is behind the ship."
+		var use_stable_cam: bool = _mobile_perf
 		var target_q: Quaternion
 		if use_stable_cam:
 			var ship_fwd = -global_transform.basis.z
-			# Project the ship's forward onto the horizon plane defined by world_up.
-			var horiz_fwd = (ship_fwd - world_up * ship_fwd.dot(world_up))
-			if horiz_fwd.length_squared() < 0.01:
-				# Ship pointing straight up/down — fall back to current cam fwd.
-				horiz_fwd = -cam_pivot.global_transform.basis.z
-				horiz_fwd = (horiz_fwd - world_up * horiz_fwd.dot(world_up))
-			# If we're STILL degenerate after the fallback (cam was also vertical),
-			# skip this frame's basis update entirely rather than feed Basis.looking_at
-			# a zero vector — that path produces NaN bases and the camera flip-spins.
-			if horiz_fwd.length_squared() < 0.01:
-				return
-			horiz_fwd = horiz_fwd.normalized()
-			var stable_q = Basis.looking_at(horiz_fwd, world_up).get_rotation_quaternion()
+			# Guard against ship pointing straight up/down — looking_at can't
+			# build a basis when forward and up are co-linear. Use horizon-
+			# projected forward as a fallback in that narrow window.
+			var fwd: Vector3 = ship_fwd
+			if abs(ship_fwd.dot(world_up)) > 0.985:
+				fwd = (ship_fwd - world_up * ship_fwd.dot(world_up))
+				if fwd.length_squared() < 0.01:
+					fwd = -cam_pivot.global_transform.basis.z
+					fwd = (fwd - world_up * fwd.dot(world_up))
+				if fwd.length_squared() < 0.01:
+					return
+			fwd = fwd.normalized()
+			var stable_q = Basis.looking_at(fwd, world_up).get_rotation_quaternion()
 			target_q = (stable_q * orbit_q).normalized()
 		else:
 			var ship_q = global_transform.basis.get_rotation_quaternion()
 			target_q = (ship_q * orbit_q).normalized()
 		var current_q = cam_pivot.global_transform.basis.get_rotation_quaternion()
-		# Slower follow on mobile so quick gyro inputs don't snap the camera.
-		var follow_rate: float = 8.0 if use_stable_cam else 15.0
+		# Mobile follow rate is fast (22) so the camera tracks ship turns
+		# without a visible lag. Desktop stays at 15.
+		var follow_rate: float = 22.0 if use_stable_cam else 15.0
 		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, follow_rate * delta))
+		# Slow auto-recenter on mobile so micro-drags don't accumulate into a
+		# permanent "camera off to the side of the ship" state. Active drags
+		# pump cam_orbit faster than this lerp decays it, so deliberate look-
+		# around still feels immediate; release and the camera self-centers
+		# over ~1.5 seconds.
+		if use_stable_cam:
+			cam_orbit = cam_orbit.lerp(Vector2.ZERO, 1.8 * delta)
 
 	# FOV SYNC
 	var speed_val = velocity.length()
@@ -868,10 +883,12 @@ func _process_ace_flight(delta: float) -> void:
 		yaw -= t_yaw
 		pitch -= t_pitch
 
-		# ACE: Force tilt as primary steering on ALL mobile devices when stick is idle
+		# ACE: Force tilt as primary steering on ALL mobile devices when stick is idle.
+		# Clamp tightened from ±1.5 to ±0.6 — the old value combined with
+		# rotation_speed=2.8 produced 330°/s yaw and felt like a slot-car spin.
 		if abs(yaw_stick) < 0.1 and abs(pitch_stick) < 0.1:
-			yaw = clamp(-t_yaw, -1.5, 1.5)
-			pitch = clamp(-t_pitch, -1.5, 1.5)
+			yaw = clamp(-t_yaw, -0.6, 0.6)
+			pitch = clamp(-t_pitch, -0.6, 0.6)
 
 	if Input.is_key_pressed(KEY_A): yaw = 1.0
 	if Input.is_key_pressed(KEY_D): yaw = -1.0

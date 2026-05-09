@@ -2321,15 +2321,22 @@ func _update_polar_weather(delta: float) -> void:
 	# refreshing a few times per second — not every physics tick. Throttle to
 	# ~5Hz on mobile, ~15Hz on desktop to save the planet scan + group iteration.
 	_weather_tick += 1
-	var _w_target: int = 6 if _mobile_perf else 2
+	# Throttle: ~3Hz mobile, ~15Hz desktop. Was 6 on mobile (5Hz) — halved.
+	var _w_target: int = 12 if _mobile_perf else 2
 	if _weather_tick % _w_target != 0:
 		return
 
-	# Detect if we are at a pole of a snowy-capable planet
+	# Detect if we are at a pole of a snowy-capable planet.
+	# Mobile shortcut: skip the all-planets scan when target_planet is set —
+	# weather only matters for the planet you're actually at.
 	var nearest_p = null; var min_d = 1e16
-	for p in get_tree().get_nodes_in_group("Planet"):
-		var d = p.global_position.distance_to(global_position)
-		if d < min_d: min_d = d; nearest_p = p
+	if _mobile_perf and is_instance_valid(target_planet):
+		nearest_p = target_planet
+		min_d = target_planet.global_position.distance_to(global_position)
+	else:
+		for p in get_tree().get_nodes_in_group("Planet"):
+			var d = p.global_position.distance_to(global_position)
+			if d < min_d: min_d = d; nearest_p = p
 	
 	# Atmospheric Layer: Extend detection	# UNIVERSAL VOID: No atmospheric skyboxes per GEMINI mandates
 	# The background color is handled globally by Main.gd (Stark Charcoal)

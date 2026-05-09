@@ -32,7 +32,7 @@ var mobile_interact: bool = false
 var mobile_throttle_dragging: bool = false
 var _mobile_roll_l: bool = false # ◀ ROLL held (continuous +1 roll while down)
 var _mobile_roll_r: bool = false # ROLL ▶ held (continuous -1 roll while down)
-var mobile_gyro_paused: bool = false # ACE: UI toggle — pauses gyro steering entirely
+var mobile_gyro_paused: bool = true # ACE: UI toggle — pauses gyro steering entirely. Default OFF — tilt-to-steer is opt-in via the GYRO button in the pause menu.
 var mobile_sens_mult: float = 1.0    # ACE: UI-driven sensitivity multiplier on top of gyro_sensitivity
 var mobile_ui_ref: Control = null    # ACE: back-reference so Player can push telemetry to the HUD
 var _mobile_look_touch_idx: int = -1
@@ -130,6 +130,12 @@ var _terrain_floor_tick: int = 0
 var _terrain_floor_cached: float = 0.0
 var _last_flash_ms: int = 0
 
+# Cloud-cockpit particle emitter — small white wisps spawn around the camera
+# when the player is in the cloud altitude band (~1.5-8 km above any planet
+# surface). Drifting past the cockpit during low-altitude flight is what sells
+# "I am inside a cloud volume" rather than "I am looking at a flat shell."
+var _cloud_cockpit_particles: GPUParticles3D = null
+
 
 func _ready() -> void:
 	self.add_to_group("Player")
@@ -177,6 +183,7 @@ func _ready() -> void:
 	
 	# 1. ACE CAMERA PIPELINE
 	_setup_ace_camera()
+	_setup_cloud_cockpit_particles()
 	_setup_polar_weather()
 	
 	# 2. MOUNT STARHAWK
@@ -202,6 +209,70 @@ func _ready() -> void:
 			npc.global_position = global_position - global_transform.basis.z * 1500.0 # Just ahead
 	)
 
+
+func _setup_cloud_cockpit_particles() -> void:
+	# White wispy quads that spawn around the camera and drift backward,
+	# giving the cockpit-feel of flying through a cloud volume. The emitter
+	# is parented to the player so particles stay anchored to the ship; we
+	# toggle its `emitting` flag based on altitude in _process.
+	_cloud_cockpit_particles = GPUParticles3D.new()
+	_cloud_cockpit_particles.name = "CloudCockpitParticles"
+	# Much higher count so the cloud volume reads as full-screen wispy fog
+	# rather than a few isolated streaks. 250 active particles covers a
+	# substantial portion of the screen at any given time given the
+	# 1.8-second lifetime.
+	_cloud_cockpit_particles.amount = 250
+	_cloud_cockpit_particles.lifetime = 1.8
+	_cloud_cockpit_particles.preprocess = 0.8
+	_cloud_cockpit_particles.local_coords = false  # particles linger in world space
+	_cloud_cockpit_particles.emitting = false
+	# AABB matches the emission radius so the particles are never frustum-
+	# culled when the camera is anywhere within that cloud volume.
+	_cloud_cockpit_particles.visibility_aabb = AABB(Vector3(-700, -700, -700), Vector3(1400, 1400, 1400))
+
+	var pmat := ParticleProcessMaterial.new()
+	pmat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	# 4× wider spawn sphere so particles fill the screen volume rather than
+	# just hovering near the cockpit. With 250 particles distributed across
+	# a 350m sphere, the screen fills with wisps no matter where you look.
+	pmat.emission_sphere_radius = 350.0
+	# Direction pushes particles backward relative to the ship — they drift
+	# past the cockpit windows as the ship moves forward.
+	pmat.direction = Vector3(0, 0, 1)  # +Z is back in Godot
+	# Wider spread (was 35°) so particles aren't only behind the ship —
+	# the player sees them on every side as the ship plows through cloud.
+	pmat.spread = 90.0
+	pmat.initial_velocity_min = 5.0
+	pmat.initial_velocity_max = 14.0
+	pmat.gravity = Vector3.ZERO
+	# Larger billboard quads so each individual wisp covers more screen area.
+	pmat.scale_min = 18.0
+	pmat.scale_max = 55.0
+	pmat.color = Color(1.0, 1.0, 1.0, 0.30)
+	# Fade in then out via alpha curve.
+	var grad := Gradient.new()
+	grad.add_point(0.00, Color(1, 1, 1, 0.0))
+	grad.add_point(0.20, Color(1, 1, 1, 0.45))
+	grad.add_point(0.80, Color(1, 1, 1, 0.30))
+	grad.add_point(1.00, Color(1, 1, 1, 0.0))
+	var grad_tex := GradientTexture1D.new()
+	grad_tex.gradient = grad
+	pmat.color_ramp = grad_tex
+	_cloud_cockpit_particles.process_material = pmat
+
+	# Soft white quad that always faces the camera.
+	var qmesh := QuadMesh.new()
+	qmesh.size = Vector2(1, 1)
+	var qmat := StandardMaterial3D.new()
+	qmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	qmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	qmat.albedo_color = Color(1, 1, 1, 1)
+	qmat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	qmat.disable_fog = true
+	qmesh.surface_set_material(0, qmat)
+	_cloud_cockpit_particles.draw_pass_1 = qmesh
+
+	add_child(_cloud_cockpit_particles)
 
 func _setup_ace_camera() -> void:
 	# 360 ORBIT CAMERA STACK
@@ -777,6 +848,24 @@ func _process_ace_flight(delta: float) -> void:
 	var is_in_atmo = target_planet and true_altitude < 26000.0
 	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
 	var surface_assist: float = 0.0
+
+	# Cloud-cockpit particles: emit anywhere in the lower atmosphere of the
+	# active planet (ground level up to ~12 km), with density that increases
+	# as the player approaches the surface. The previous 1.0-9.0 km gate
+	# meant low-altitude flight had no particles at all — now particles are
+	# always visible inside atmosphere, densest near the ground (where
+	# atmospheric haze / dust would naturally be thickest) and thinning out
+	# as altitude increases until they fade to nothing past 12 km.
+	if _cloud_cockpit_particles:
+		var in_atmo_band: bool = target_planet != null and true_altitude < 12000.0 and true_altitude > -200.0
+		if _cloud_cockpit_particles.emitting != in_atmo_band:
+			_cloud_cockpit_particles.emitting = in_atmo_band
+		if in_atmo_band:
+			# amount_ratio: 1.0 at ground level, 0.0 at 12 km. Apply a slight
+			# curve (square) so density ramps up faster as you descend rather
+			# than scaling perfectly linearly.
+			var alt_norm: float = clamp(true_altitude / 12000.0, 0.0, 1.0)
+			_cloud_cockpit_particles.amount_ratio = (1.0 - alt_norm) * (1.0 - alt_norm)
 	if target_planet:
 		surface_assist = clamp(1.0 - (true_altitude / 9000.0), 0.0, 1.0)
 	var is_surface_flight: bool = surface_assist > 0.0

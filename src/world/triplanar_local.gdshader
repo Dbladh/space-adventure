@@ -17,6 +17,16 @@ uniform vec3 col_forest  : source_color = vec3(0.20, 0.55, 0.20);
 uniform vec3 col_rock    : source_color = vec3(0.50, 0.45, 0.40);
 uniform vec3 col_snow    : source_color = vec3(0.92, 0.94, 0.98);
 
+// Cloud noise uniforms — duplicated from the cloud shader so the land
+// shader can sample the same cloud density and project shadows down onto
+// the surface. PlanetGen sets these on every chunk's land_material to
+// match the planet's cloud roll. cloud_strength scales the darkening so
+// it can be turned off (set to 0) for cloud-free worlds.
+uniform float cloud_cell_scale = 0.001;
+uniform float cloud_thresh_lo  = 0.50;
+uniform float cloud_thresh_hi  = 0.70;
+uniform float cloud_strength   = 0.45;
+
 varying vec3 v_local_pos;
 varying vec3 v_local_norm;
 varying float v_height;
@@ -32,6 +42,37 @@ void vertex() {
 float aa_step(float edge, float val) {
 	float delta = fwidth(val) * 1.5;
 	return smoothstep(edge - delta, edge + delta, val);
+}
+
+// 3D noise functions duplicated from the cloud shader so the land surface
+// can sample the same density field and cast cloud shadows on the ground.
+float c_hash3(vec3 p) {
+	return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+float c_vnoise(vec3 p) {
+	vec3 i = floor(p); vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	return mix(mix(mix(c_hash3(i + vec3(0,0,0)), c_hash3(i + vec3(1,0,0)), f.x),
+	               mix(c_hash3(i + vec3(0,1,0)), c_hash3(i + vec3(1,1,0)), f.x), f.y),
+	           mix(mix(c_hash3(i + vec3(0,0,1)), c_hash3(i + vec3(1,0,1)), f.x),
+	               mix(c_hash3(i + vec3(0,1,1)), c_hash3(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+float c_fbm(vec3 p) {
+	float v = 0.0; float a = 0.5;
+	for (int i = 0; i < 4; i++) {
+		v += a * c_vnoise(p);
+		p = p * 2.13 + vec3(13.7, 5.1, 19.3);
+		a *= 0.5;
+	}
+	return v;
+}
+float cloud_density_at(vec3 dir, float t) {
+	vec3 base = dir * planet_radius * cloud_cell_scale;
+	vec3 lp_large = base * 0.35 + vec3(t * 0.6, t * 0.3, -t * 0.2);
+	vec3 lp_med   = base * 1.0  + vec3(t, t * 0.5, -t * 0.3) + vec3(50.0);
+	float d_large = c_fbm(lp_large);
+	float d_med   = c_fbm(lp_med);
+	return d_large * 0.60 + d_med * 0.40;
 }
 
 void fragment() {
@@ -78,6 +119,15 @@ void fragment() {
 	albedo = mix(albedo, cliff_col, cliff_mask * (1.0 - t_snow));
 
 	albedo *= detail_level;
+
+	// CLOUD SHADOWS — DEBUG: temporarily disabled while diagnosing
+	// rectangular missing-chunk artifacts. Re-enable once root cause is
+	// confirmed (suspect this code may have triggered a shader-compile
+	// failure on some chunks, falling back to default white material).
+	// float cloud_t = TIME * 0.015;
+	// float cloud_d = cloud_density_at(v_local_norm, cloud_t);
+	// float cloud_shadow = smoothstep(cloud_thresh_lo, cloud_thresh_hi, cloud_d) * cloud_strength;
+	// albedo *= mix(1.0, 0.55, cloud_shadow);
 
 	ALBEDO = albedo;
 	ROUGHNESS = 0.92;

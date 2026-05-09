@@ -70,7 +70,7 @@ var _pgyro_touch: int   = -1
 var _psens_touch: int   = -1
 
 # ---- OPTIONS ----
-var gyro_paused: bool = false
+var gyro_paused: bool = true
 var sens_idx: int = 1
 const SENS_VALUES = [0.6, 1.0, 1.6]
 const SENS_LABELS = ["LOW", "MED", "HIGH"]

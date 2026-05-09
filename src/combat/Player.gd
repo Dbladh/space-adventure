@@ -51,6 +51,7 @@ var _is_calibrated: bool = false
 var _calib_samples: int = 0
 var _calib_x_sum: float = 0.0
 var _calib_z_sum: float = 0.0
+var _gyro_print_t: float = 0.0  # throttle accumulator for the 1Hz gyro diagnostic print
 
 var in_ship: bool = true
 var parked_ship: Node3D = null
@@ -817,30 +818,17 @@ func _process_on_foot(delta: float) -> void:
 	move_and_slide()
 
 func _process_ace_flight(delta: float) -> void:
-	# ACE DEADZONE HARDENING: Purges phantom rotation drift from stick-wear
 	const FLY_DEAD = 0.15
-	var yaw_stick = -Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
-	var pitch_stick = Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
-	if abs(yaw_stick) < FLY_DEAD: yaw_stick = 0.0
-	if abs(pitch_stick) < FLY_DEAD: pitch_stick = 0.0
-	
-	var yaw = yaw_stick
-	var pitch = pitch_stick
-	
-	# MOTION STEERING (rewritten from scratch). Goals:
-	#  - Mobile-only (desktop ignores Input.get_gravity() entirely).
-	#  - Calibration averages ~0.5s of low-variance readings so a tilted
-	#    startup pose can't lock in a bad neutral. Until calibrated, gyro
-	#    contributes nothing.
-	#  - Linear deadzone → linear scale. No power curves, no "override clamp"
-	#    branch. Phone-flat = zero input, full tilt = scaled input.
-	#  - Final yaw/pitch are simple ADDITIVE contributions. Touch sticks /
-	#    keys still work at the same magnitude they always did.
+
+	# Mobile gyro now produces a VIRTUAL LEFT STICK so the rest of the flight
+	# pipeline is identical to the gamepad path — same yaw_stick / pitch_stick
+	# semantics, same deadzone, same downstream rotate() calls.
+	var yaw_stick: float = 0.0
+	var pitch_stick: float = 0.0
 	if _mobile_perf and gyro_enabled and not mobile_gyro_paused:
 		var grav = Input.get_gravity()
 		if grav.length() > 1.0:
 			if not _is_calibrated:
-				# Accumulate samples; lock neutral once we have ~30 frames.
 				_calib_samples += 1
 				_calib_x_sum += grav.x
 				_calib_z_sum += grav.z
@@ -848,16 +836,36 @@ func _process_ace_flight(delta: float) -> void:
 					_gyro_neutral_x = _calib_x_sum / float(_calib_samples)
 					_gyro_neutral_z = _calib_z_sum / float(_calib_samples)
 					_is_calibrated = true
+					print("[GYRO] calibrated. neutral_x=", _gyro_neutral_x, " neutral_z=", _gyro_neutral_z)
 			else:
-				const TILT_SAT = 5.0   # m/s² of tilt at which input saturates (~30°)
+				const TILT_SAT = 5.0   # ~30° tilt = full virtual-stick deflection
 				var tx = grav.x - _gyro_neutral_x
 				var tz = grav.z - _gyro_neutral_z
 				if abs(tx) < mobile_gyro_dead: tx = 0.0
 				if abs(tz) < mobile_gyro_dead: tz = 0.0
-				var nx = clamp(tx / TILT_SAT, -1.0, 1.0)
-				var nz = clamp(-tz / TILT_SAT, -1.0, 1.0)
-				yaw   -= nx * gyro_sensitivity * mobile_sens_mult
-				pitch -= nz * gyro_sensitivity * mobile_sens_mult
+				# Sign convention matches gamepad: yaw_stick is -joy_axis(LEFT_X), pitch_stick is +joy_axis(LEFT_Y).
+				yaw_stick   = -clamp(tx / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
+				pitch_stick =  clamp(tz / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
+		# 1Hz live diagnostic — read in Xogot's runtime console while tilting
+		# to verify which gravity axis actually corresponds to which physical
+		# motion. We need this to confirm the (x→yaw, z→pitch) mapping is right
+		# for iPhone landscape.
+		_gyro_print_t += delta
+		if _gyro_print_t > 1.0:
+			_gyro_print_t = 0.0
+			print("[GYRO] grav=(", grav.x, ", ", grav.y, ", ", grav.z,
+				") tx=", grav.x - _gyro_neutral_x, " tz=", grav.z - _gyro_neutral_z,
+				" yaw_stick=", yaw_stick, " pitch_stick=", pitch_stick,
+				" calib=", _is_calibrated, "/", _calib_samples)
+	else:
+		yaw_stick = -Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
+		pitch_stick = Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
+
+	if abs(yaw_stick) < FLY_DEAD: yaw_stick = 0.0
+	if abs(pitch_stick) < FLY_DEAD: pitch_stick = 0.0
+
+	var yaw = yaw_stick
+	var pitch = pitch_stick
 
 	if Input.is_key_pressed(KEY_A): yaw = 1.0
 	if Input.is_key_pressed(KEY_D): yaw = -1.0

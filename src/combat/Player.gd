@@ -148,6 +148,13 @@ var _cloud_cockpit_particles: GPUParticles3D = null
 func _ready() -> void:
 	self.add_to_group("Player")
 	_mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
+	# Diagnostic: visible in the runtime console so we can confirm on-device
+	# whether the mobile branches are actually firing.
+	print("[Player] OS.get_name()=", OS.get_name(),
+		"  has_feature(mobile)=", OS.has_feature("mobile"),
+		"  _mobile_perf=", _mobile_perf,
+		"  gyro_enabled=", gyro_enabled,
+		"  mobile_gyro_paused=", mobile_gyro_paused)
 	_ray_q = PhysicsRayQueryParameters3D.new()
 	_ray_q.collision_mask = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) # Layer 1,2,3,4,6
 	_ray_q.exclude = [self]

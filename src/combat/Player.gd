@@ -876,6 +876,12 @@ func _process_ace_flight(delta: float) -> void:
 		var raw_dist = global_position.distance_to(target_planet.global_position)
 		true_altitude = raw_dist - target_planet.get("planet_radius")
 	var is_in_atmo = target_planet and true_altitude < 26000.0
+	# Mobile: re-arm gyro calibration on every atmosphere entry. The next
+	# stable gravity reading becomes the new neutral, so each planet starts
+	# matched to the player's current hand pose — avoids the
+	# "ship banks forever because I tilted slightly when entering" trap.
+	if _mobile_perf and is_in_atmo and not _was_in_atmo:
+		_is_calibrated = false
 	var world_up = (global_position - target_planet.global_position).normalized() if target_planet else Vector3.UP
 	var surface_assist: float = 0.0
 

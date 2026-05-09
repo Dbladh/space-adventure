@@ -102,6 +102,12 @@ func _ready() -> void:
 	self.add_to_group("World")
 	print("--- ARCHITECT: Planet [%s] _ready. Parent: %s, Global Pos: %s ---" % [name, get_parent().name if get_parent() else "NONE", str(global_position)])
 	mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
+	# Mobile QuadTree caps: stop subdividing four levels short of desktop and
+	# pull the subdivide-trigger radius in. Cuts worst-case chunk count
+	# dramatically during atmosphere entry — the dominant freeze on iPhone 15.
+	if mobile_perf:
+		max_lod = 14
+		subdivision_bias = 1.2
 	noise = FastNoiseLite.new()
 	_prewarm_target = 32
 	# Always use the explicit planet_seed for terrain noise.

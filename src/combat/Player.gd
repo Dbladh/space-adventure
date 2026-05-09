@@ -45,6 +45,12 @@ var _mobile_look_last_pos: Vector2 = Vector2.ZERO
 var _gyro_neutral_x: float = 0.0 # X-axis (side tilt) neutral — captured alongside Z so both axes are zeroed relative to the player's actual hand pose.
 var _gyro_neutral_z: float = 0.0 # ACE Calibration
 var _is_calibrated: bool = false
+# Calibration accumulator — averages ~0.5s of stable readings before
+# locking in the neutral, so a tilted-at-startup pose can't poison the
+# neutral and produce a permanent rotation drift.
+var _calib_samples: int = 0
+var _calib_x_sum: float = 0.0
+var _calib_z_sum: float = 0.0
 
 var in_ship: bool = true
 var parked_ship: Node3D = null
@@ -374,6 +380,9 @@ func _setup_combat_hud() -> void:
 				_gyro_neutral_x = 0.0
 				_gyro_neutral_z = 0.0
 				_is_calibrated = false
+				_calib_samples = 0
+				_calib_x_sum = 0.0
+				_calib_z_sum = 0.0
 			)
 			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
@@ -561,51 +570,15 @@ func _process_ace_camera(delta: float) -> void:
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
 		cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
 	else:
-		# Mobile + gyro-active: horizon-stabilised camera. The camera tracks the
-		# ship's heading (yaw) but ignores roll and pitch — phone tilt rotates
-		# the SHIP through a stable world rather than spinning the player's
-		# view. world_up is planet-up in atmosphere, world UP in space.
+		# Plain ship-following third-person camera, identical on desktop and
+		# mobile. Roll-decoupled and horizon-stable variants were tried and
+		# removed — they tangled the spatial mapping between phone tilt and
+		# what the player sees.
+		var ship_q = global_transform.basis.get_rotation_quaternion()
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
-		# Mobile: ALWAYS use a roll-decoupled, ship-following third-person
-		# camera, regardless of gyro toggle state. Camera looks along the
-		# ship's actual forward (so it pitches with the ship — diving the
-		# ship dives the view) but the up vector is forced to world_up,
-		# stripping the ship's roll. This is the closest thing to a normal
-		# arcade flight-sim chase cam — gives the player a stable horizon
-		# without losing "the camera is behind the ship."
-		var use_stable_cam: bool = _mobile_perf
-		var target_q: Quaternion
-		if use_stable_cam:
-			var ship_fwd = -global_transform.basis.z
-			# Guard against ship pointing straight up/down — looking_at can't
-			# build a basis when forward and up are co-linear. Use horizon-
-			# projected forward as a fallback in that narrow window.
-			var fwd: Vector3 = ship_fwd
-			if abs(ship_fwd.dot(world_up)) > 0.985:
-				fwd = (ship_fwd - world_up * ship_fwd.dot(world_up))
-				if fwd.length_squared() < 0.01:
-					fwd = -cam_pivot.global_transform.basis.z
-					fwd = (fwd - world_up * fwd.dot(world_up))
-				if fwd.length_squared() < 0.01:
-					return
-			fwd = fwd.normalized()
-			var stable_q = Basis.looking_at(fwd, world_up).get_rotation_quaternion()
-			target_q = (stable_q * orbit_q).normalized()
-		else:
-			var ship_q = global_transform.basis.get_rotation_quaternion()
-			target_q = (ship_q * orbit_q).normalized()
+		var target_q = (ship_q * orbit_q).normalized()
 		var current_q = cam_pivot.global_transform.basis.get_rotation_quaternion()
-		# Mobile follow rate is fast (22) so the camera tracks ship turns
-		# without a visible lag. Desktop stays at 15.
-		var follow_rate: float = 22.0 if use_stable_cam else 15.0
-		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, follow_rate * delta))
-		# Slow auto-recenter on mobile so micro-drags don't accumulate into a
-		# permanent "camera off to the side of the ship" state. Active drags
-		# pump cam_orbit faster than this lerp decays it, so deliberate look-
-		# around still feels immediate; release and the camera self-centers
-		# over ~1.5 seconds.
-		if use_stable_cam:
-			cam_orbit = cam_orbit.lerp(Vector2.ZERO, 1.8 * delta)
+		cam_pivot.global_transform.basis = Basis(current_q.slerp(target_q, 15.0 * delta))
 
 	# FOV SYNC
 	var speed_val = velocity.length()
@@ -847,48 +820,37 @@ func _process_ace_flight(delta: float) -> void:
 	var yaw = yaw_stick
 	var pitch = pitch_stick
 	
-	# MOTION STEERING: High-Authority Gravity Vector
-	# Gated on _mobile_perf so desktop never reads accelerometer values (some
-	# laptops report a non-zero "gravity" that the gyro path used to interpret
-	# as constant tilt — and pumped the ship into a continuous spin).
-	# Curve: deadzone → normalized → pow(x, 1.6) so small tilts give fine trim
-	# and larger tilts ramp up quickly (No Man's Sky-style joystick response).
+	# MOTION STEERING (rewritten from scratch). Goals:
+	#  - Mobile-only (desktop ignores Input.get_gravity() entirely).
+	#  - Calibration averages ~0.5s of low-variance readings so a tilted
+	#    startup pose can't lock in a bad neutral. Until calibrated, gyro
+	#    contributes nothing.
+	#  - Linear deadzone → linear scale. No power curves, no "override clamp"
+	#    branch. Phone-flat = zero input, full tilt = scaled input.
+	#  - Final yaw/pitch are simple ADDITIVE contributions. Touch sticks /
+	#    keys still work at the same magnitude they always did.
 	if _mobile_perf and gyro_enabled and not mobile_gyro_paused:
 		var grav = Input.get_gravity()
-
-		# ACE AUTO-CALIBRATION: capture the first stable reading on BOTH axes
-		# so the player's actual hand pose becomes "neutral" — including any
-		# habitual side tilt. The previous code only captured Z, which left
-		# X-axis tilt as an absolute offset and produced a constant yaw drift.
-		if not _is_calibrated and grav.length() > 1.0:
-			_gyro_neutral_x = grav.x
-			_gyro_neutral_z = grav.z
-			_is_calibrated = true
-
-		# Deadzone (m/s² of tilt that does nothing) is user-tunable from the
-		# pause-menu DEAD slider — wider for shaky hands, narrower for crisp
-		# precise control. Saturation tilt stays fixed at TILT_FULL.
-		const TILT_FULL = 6.0
-		var tx_raw = grav.x - _gyro_neutral_x
-		var tz_raw = grav.z - _gyro_neutral_z
-		var tx = tx_raw if abs(tx_raw) > mobile_gyro_dead else 0.0
-		var tz = tz_raw if abs(tz_raw) > mobile_gyro_dead else 0.0
-
-		# Map tilt magnitude to [-1, 1] with a power curve for finer control
-		var nx = clamp(tx / TILT_FULL, -1.0, 1.0)
-		var nz = clamp(-tz / TILT_FULL, -1.0, 1.0)
-		var t_yaw = sign(nx) * pow(abs(nx), 1.6) * gyro_sensitivity * mobile_sens_mult
-		var t_pitch = sign(nz) * pow(abs(nz), 1.6) * gyro_sensitivity * mobile_sens_mult
-
-		yaw -= t_yaw
-		pitch -= t_pitch
-
-		# ACE: Force tilt as primary steering on ALL mobile devices when stick is idle.
-		# Clamp tightened from ±1.5 to ±0.6 — the old value combined with
-		# rotation_speed=2.8 produced 330°/s yaw and felt like a slot-car spin.
-		if abs(yaw_stick) < 0.1 and abs(pitch_stick) < 0.1:
-			yaw = clamp(-t_yaw, -0.6, 0.6)
-			pitch = clamp(-t_pitch, -0.6, 0.6)
+		if grav.length() > 1.0:
+			if not _is_calibrated:
+				# Accumulate samples; lock neutral once we have ~30 frames.
+				_calib_samples += 1
+				_calib_x_sum += grav.x
+				_calib_z_sum += grav.z
+				if _calib_samples >= 30:
+					_gyro_neutral_x = _calib_x_sum / float(_calib_samples)
+					_gyro_neutral_z = _calib_z_sum / float(_calib_samples)
+					_is_calibrated = true
+			else:
+				const TILT_SAT = 5.0   # m/s² of tilt at which input saturates (~30°)
+				var tx = grav.x - _gyro_neutral_x
+				var tz = grav.z - _gyro_neutral_z
+				if abs(tx) < mobile_gyro_dead: tx = 0.0
+				if abs(tz) < mobile_gyro_dead: tz = 0.0
+				var nx = clamp(tx / TILT_SAT, -1.0, 1.0)
+				var nz = clamp(-tz / TILT_SAT, -1.0, 1.0)
+				yaw   -= nx * gyro_sensitivity * mobile_sens_mult
+				pitch -= nz * gyro_sensitivity * mobile_sens_mult
 
 	if Input.is_key_pressed(KEY_A): yaw = 1.0
 	if Input.is_key_pressed(KEY_D): yaw = -1.0

@@ -470,7 +470,7 @@ var _acc_pan: float = 0.0
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	add_to_group("MusicDirector")
-	_mobile = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	_mobile = MobilePerf.is_mobile()
 	_sample_rate = 22050.0 if _mobile else 44100.0
 
 	# Sine LUT

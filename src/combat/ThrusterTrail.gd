@@ -16,7 +16,7 @@ var pulse_time: float = 0.0
 var _mobile_perf: bool = false
 
 func _ready() -> void:
-	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	_mobile_perf = MobilePerf.is_mobile()
 	mesh_gen = ImmediateMesh.new()
 	mesh = mesh_gen
 	

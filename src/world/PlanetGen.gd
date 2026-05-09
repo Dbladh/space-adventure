@@ -101,7 +101,7 @@ func _ready() -> void:
 	self.add_to_group("Planet")
 	self.add_to_group("World")
 	print("--- ARCHITECT: Planet [%s] _ready. Parent: %s, Global Pos: %s ---" % [name, get_parent().name if get_parent() else "NONE", str(global_position)])
-	mobile_perf = OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
+	mobile_perf = MobilePerf.is_mobile()
 	# Mobile QuadTree caps: stop subdividing four levels short of desktop and
 	# pull the subdivide-trigger radius in. Cuts worst-case chunk count
 	# dramatically during atmosphere entry — the dominant freeze on iPhone 15.

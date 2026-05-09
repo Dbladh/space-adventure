@@ -2140,6 +2140,9 @@ static func _get_foliage_mat() -> ShaderMaterial:
 		_mat_foliage.shader = _get_res("res://src/shaders/foliage_toon.gdshader")
 		_mat_foliage.set_shader_parameter("shadow_strength", 0.6)
 		_mat_foliage.set_shader_parameter("biolum_intensity", 0.0) # Ensure no glow by default
+		# Mobile: skip halftone/SSS/rim/biolum tiers and pull dither fade in.
+		var _is_mobile_foliage := OS.get_name() == "iOS" or OS.get_name() == "Android" or OS.has_feature("mobile")
+		_mat_foliage.set_shader_parameter("mobile_simple", _is_mobile_foliage)
 	_mat_foliage.set_shader_parameter("wind_speed", 0.7)
 	_mat_foliage.set_shader_parameter("wind_strength", 0.4)
 	_mat_foliage.set_shader_parameter("leaf_texture", _get_tex("res://assets/textures/tree_leaves_texture.png"))

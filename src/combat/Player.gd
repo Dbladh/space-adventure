@@ -103,6 +103,11 @@ var barrel_roll_dir: float = 0.0 # 1.0 = CCW (Left), -1.0 = CW (Right)
 var ship_marker: MeshInstance3D = null
 var hud_reticle: Control = null
 var ship_nose_offset: float = -0.05
+# Local-space offset to the nose tip on the ship_model. Set in _ready alongside
+# ship_nose_offset (matches whichever axis the model points along). Used by
+# _fire_alternating_cannon so bolts spawn at the front of the hull regardless
+# of the model's authored forward axis.
+var ship_nose_local: Vector3 = Vector3(-0.05, 0.0, 0.0)
 var lock_on_target: Node3D = null
 var pinned_target: Node3D = null
 var hud_scan_lock: Control = null
@@ -394,9 +399,11 @@ func _setup_starhawk_hull() -> void:
 			var f_local = (ship_model.transform.basis.inverse() * Vector3(0, 0, -1)).normalized()
 			if abs(f_local.x) > 0.8:
 				ship_nose_offset = model_aabb.position.x if f_local.x < 0 else model_aabb.end.x
+				ship_nose_local = Vector3(ship_nose_offset, 0.0, 0.0)
 			elif abs(f_local.z) > 0.8:
 				ship_nose_offset = model_aabb.position.z if f_local.z < 0 else model_aabb.end.z
-			
+				ship_nose_local = Vector3(0.0, 0.0, ship_nose_offset)
+
 			print("--- PILOT: HULL SCAN COMPLETE (Nose Axis: ", f_local, " Offset: ", ship_nose_offset, ") ---")
 
 
@@ -1244,66 +1251,110 @@ func _fire_alternating_cannon() -> void:
 	if md_nodes.size() > 0 and md_nodes[0].has_method("play_fire"):
 		md_nodes[0].play_fire()
 
-	var wing_up = global_transform.basis.x.normalized()
 	var main_scene = get_parent()
 	if not main_scene: return
-	
-	# STARFOX TWIN-LASER SYNC: Micro-convergence for hitbox-anchored fire
+
 	if not ship_model: return
-	var weapon_offsets = [-0.14, 0.14]
+
+	# Fire along the VISIBLE ship_model's forward, not the player's logical
+	# forward. The ship_model lerps its pitch / roll independently (auto-level
+	# when climbing, banking into turns) so its world-space orientation can
+	# differ from the player's abstract heading by 10–30°. Without this the
+	# bolts visibly leave at an angle to where the ship is pointing.
+	var nose_offset_len: float = ship_nose_local.length()
+	if nose_offset_len < 0.001: return
+
+	var model_world_basis: Basis = global_transform.basis * ship_model.transform.basis
+	var model_fwd_local: Vector3 = ship_nose_local / nose_offset_len  # unit toward nose
+	var ship_fwd: Vector3 = (model_world_basis * model_fwd_local).normalized()
+	if ship_fwd.length_squared() < 0.001: return
+
+	var ship_up: Vector3 = (model_world_basis * Vector3(0, 1, 0)).normalized()
+	var ship_right: Vector3 = ship_fwd.cross(ship_up).normalized()
+	if ship_right.length_squared() < 0.001:
+		ship_right = global_transform.basis.x.normalized()
+
+	# Forward-component-only velocity inheritance, projected onto the visible
+	# ship's nose direction so bolts inherit only the speed component going
+	# the way they're actually pointed.
+	var fwd_speed: float = max(0.0, ship_fwd.dot(velocity))
+	var ship_fwd_v: Vector3 = ship_fwd * fwd_speed
+
+	# Nose tip in world space: player position + (model basis applied to the
+	# model-local nose offset). Bypasses ship_model.global_transform whose
+	# origin was unreliable; basis is correct since it composes player.basis
+	# with the ship_model's local rotation.
+	var nose_world: Vector3 = global_position + (model_world_basis * ship_nose_local)
+	const MUZZLE_SIDE_OFFSET: float = 1.5   # metres from centre to each barrel
+	const MUZZLE_DOWN_OFFSET: float = 0.6   # metres below the nose tip
+	const MUZZLE_FORWARD_CLEAR: float = 3.0 # metres ahead of the nose tip
+
+	var weapon_offsets = [-MUZZLE_SIDE_OFFSET, MUZZLE_SIDE_OFFSET]
 	for off in weapon_offsets:
-		# MUZZLE SYNC: Using dynamic AABB nose detection
-		var turret_pos = ship_model.global_transform * Vector3(ship_nose_offset, -0.18, off)
+		var turret_pos: Vector3 = nose_world + ship_right * off - ship_up * MUZZLE_DOWN_OFFSET
 		recoil_v += (global_transform.basis.z * 0.25)
-		
-		# CONVERGENCE: Point bullets toward the current Pilot HUD reticle
-		var fire_dir = (_cur_aim_point - turret_pos).normalized()
-		
-		# BOLT ORIGIN: Shifted 10m FORWARD to ensure clearance from internal meshes
-		var bolt_origin = turret_pos - (global_transform.basis.z * 10.0)
+
+		var fire_dir = ship_fwd
+
+		# Small forward clearance so the bolt's first frame is unambiguously
+		# in front of the visible nose tip.
+		var bolt_origin = turret_pos + ship_fwd * MUZZLE_FORWARD_CLEAR
 		_spawn_muzzle_flash(turret_pos, fire_dir)
 
+		# Bolt = Node3D logical container. Visual is a child MeshInstance3D
+		# which can be stretched independently to produce the motion trail
+		# without moving the impact-detection point.
+		var bolt = Node3D.new()
 
-
-		
-		# BUILD BOLT: 3.5m Girth, 50m Length (Tighter for relativistic sync)
-		var bolt = MeshInstance3D.new()
+		var visual = MeshInstance3D.new()
 		var capsule = CapsuleMesh.new()
-		capsule.radius = 3.5; capsule.height = 50.0
-		bolt.mesh = capsule
+		# Bigger base so the bolt is readable mid-flight; the per-frame stretch
+		# will turn fast bolts into long streaks anyway, but at rest / low
+		# speed it still reads as a chunky energy slug rather than a pin.
+		capsule.radius = 8.0; capsule.height = 200.0
+		visual.mesh = capsule
 
-		
 		var mat = StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.albedo_color = Color(0.2, 0.9, 1.0); mat.emission_enabled = true; mat.emission = Color(0.2, 0.9, 1.0); mat.emission_energy_multiplier = 18.0; mat.disable_fog = true; bolt.material_override = mat
-		
-		# WORLD-SPACE RELEASE: Firing AFTER movement guarantees muzzle-alignment
+		mat.albedo_color = Color(0.6, 0.95, 1.0)
+		mat.emission_enabled = true
+		mat.emission = Color(0.2, 0.9, 1.0)
+		# Cranked emission keeps the bolt visible against bright planet
+		# horizons and lets the bloom bridge any sub-pixel frame gaps so
+		# consecutive frames read as one continuous streak.
+		mat.emission_energy_multiplier = 40.0
+		mat.disable_fog = true
+		visual.material_override = mat
+
+		# Capsule's long axis is +Y. Rotate so it lies along bolt-Z, then offset
+		# so the forward tip (mesh -Y → bolt -Z) sits exactly at bolt origin —
+		# trail stretches backward without overshooting the impact point.
+		visual.rotation.x = PI * 0.5
+		visual.position.z = capsule.height * 0.5
+		bolt.add_child(visual)
+
 		main_scene.add_child(bolt)
 		bolt.add_to_group("World")
-		
-		# ACE TARGET HAND-OFF: Pass either pinned or auto-lock
+
 		var final_t = pinned_target if is_instance_valid(pinned_target) else lock_on_target
-		
-		# MUZZLE SYNC
+
 		bolt.global_position = bolt_origin
-		if fire_dir.length() > 0.001:
-			bolt.look_at(bolt.global_position + fire_dir)
-			bolt.rotate_object_local(Vector3.RIGHT, PI / 2.0)
-		
-		# ACE RELATIVISTIC MOMENTUM: inherited ship full vector + 9k-35k Acceleration Ramp
+		bolt.look_at(bolt.global_position + fire_dir)
+
 		live_bolts.append({
-			"node": bolt, 
-			"dir": fire_dir, 
-			"life": 0.0, 
-			"ship_v": velocity,
+			"node": bolt,
+			"visual": visual,
+			"dir": fire_dir,
+			"life": 0.0,
+			"ship_v": ship_fwd_v,
 			"target": final_t,
-			"pos": bolt_origin # Physical position
+			"pos": bolt_origin,
+			"origin": bolt_origin,
+			"capsule_height": capsule.height,
 		})
 
-
-		
 	# NEWTONIAN RECOIL: Physical Impulse backwash
-	velocity += global_transform.basis.z * 25.0 # Enhanced recoil weight
+	velocity += global_transform.basis.z * 25.0
 
 func _spawn_muzzle_flash(pos: Vector3, _dir: Vector3) -> void:
 	# POINT LIGHT FLASH: Replaced mesh with high-energy point light for true "light flash" look
@@ -1395,8 +1446,18 @@ func _process(delta: float) -> void:
 	# ACE LOCK-ON ACTIVE (Radar Online)
 	# Factors in BOTH ship forward velocity AND base projectile speed (150km/s avg)
 	if hud_reticle and camera:
-		var p_speed = 22000.0 # Average cinematic ramp-speed for visual tracking
-		var bullet_v = (-global_transform.basis.z * p_speed) + velocity
+		# Reticle aim must match where bolts ACTUALLY go. Bolts fire along the
+		# visible ship_model's forward (which lerps pitch/roll independently
+		# from the player's logical heading), so the reticle uses the same
+		# composed transform here. Falls back to player forward if the model
+		# isn't ready yet.
+		var ship_fwd_world: Vector3 = -global_transform.basis.z
+		if ship_model and ship_nose_local.length() > 0.001:
+			var _model_world_basis: Basis = global_transform.basis * ship_model.transform.basis
+			var _model_fwd_local: Vector3 = ship_nose_local / ship_nose_local.length()
+			var visible_fwd: Vector3 = (_model_world_basis * _model_fwd_local).normalized()
+			if visible_fwd.length_squared() > 0.001:
+				ship_fwd_world = visible_fwd
 		# RADAR THROTTLE: Scans for targets with frame-jitter protection (Throttled to ~6Hz)
 		_radar_tick += 1
 		if _radar_tick >= 10:
@@ -1479,11 +1540,10 @@ func _process(delta: float) -> void:
 			for k in range(arrow_idx, hud_threat_arrows.size()):
 				hud_threat_arrows[k].hide()
 
-		# KINETIC RETICLE SYNC: Determines whether the crosshair tracks the target
-		var default_aim = global_position + (bullet_v * 0.25)
-		var final_target_point = default_aim
-		
-		# RETICLE SNAPPING: Jump visually to the target when within lock-cone
+		# Default: 2 km along the ship's nose. Locked: snap to the target.
+		# No smoothing on either — the lerp was the visible "sluggish" feel.
+		var final_target_point: Vector3 = global_position + ship_fwd_world * 2000.0
+
 		if is_instance_valid(lock_on_target):
 			if lock_on_target.has_method("get_target_center"):
 				final_target_point = lock_on_target.get_target_center()
@@ -1492,14 +1552,9 @@ func _process(delta: float) -> void:
 			hud_reticle.is_locked = true
 		else:
 			hud_reticle.is_locked = false
-		
-		# INITIAL BOOT: Snap first frame to avoid screen-zip
-		if _cur_aim_point.length_squared() < 1.0:
-			_cur_aim_point = final_target_point
-			
-		# ACE TRACKING: Smooth 18.0x lerp for fluid target hand-offs
-		_cur_aim_point = _cur_aim_point.lerp(final_target_point, 18.0 * delta)
-		
+
+		_cur_aim_point = final_target_point
+
 		if camera.is_position_behind(_cur_aim_point):
 			hud_reticle.hide()
 		else:
@@ -1577,19 +1632,13 @@ func _process(delta: float) -> void:
 			i -= 1
 			continue
 
-		# 9,000m/s start ensures the discharge ignites AT THE MUZZLE in frame 1,
-		# then accelerates over 0.6 s to BOLT_SPEED (peak velocity).
-		var accel_t = clamp(b["life"] / 0.6, 0.0, 1.0)
+		# Always full speed — the old 9k→600k ramp over 0.6s let the ship outpace
+		# its own bolts during boost. Per-frame stretch in the visual block makes
+		# the muzzle feel kinetic without needing a slow start.
+		var current_rel_speed = BOLT_SPEED
 
-		# Quadratic ramp for 'muzzle ignite' feel.
-		var ease_t = accel_t * accel_t
-		var current_rel_speed = lerp(9000.0, BOLT_SPEED, ease_t)
-
-		# ACE SMART-LOCK HOMING: Fired bolts track the target mid-flight.
-		# Cone widened (0.98 → 0.80, ~37° window) and turn rate ~5× faster so
-		# bolts reliably curve onto small mineable resources.  Without this,
-		# small targets like flora-mineable crystals frequently slipped past
-		# the bolt even though the player was locked on.
+		# Mid-flight homing onto a locked target. Cone gate (~37°) keeps bolts
+		# from absurd 180° turns; the lerp factor governs turn radius.
 		if is_instance_valid(b["target"]) and b["target"].is_inside_tree():
 			var aim_pos: Vector3
 			if b["target"].has_method("get_target_center"):
@@ -1601,20 +1650,20 @@ func _process(delta: float) -> void:
 			if align > 0.80:
 				b["dir"] = b["dir"].lerp(t_dir, 12.0 * delta).normalized()
 				if b["dir"].length() > 0.01:
-					# Project look-at target 1 km along the direction so float32
-					# precision at large origin offsets can still distinguish it
-					# from the bolt's own position.
+					# Project 1 km along the direction so float32 precision at
+					# large origin offsets can still distinguish it from the
+					# bolt's own position.
 					node.look_at(node.global_position + b["dir"] * 1000.0)
-					node.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 
-
-
-		
 		var old_pos = b["pos"]
-		# NEWTONIAN VECTOR SYNC: Inherit full ship inertia + directional relative speed
+		# Forward-component-only velocity inheritance was already applied at
+		# fire time, so b["ship_v"] is colinear with the original fire dir.
+		# After homing the dir may have rotated; we keep the inherited speed
+		# magnitude but don't re-project, since the inheritance is a one-shot
+		# initial-velocity term and adds the correct kinetic feel either way.
 		var move_dist = (b["dir"] * current_rel_speed + b["ship_v"]) * delta
 		var next_pos = old_pos + move_dist
-		b["pos"] = next_pos # Update internal physical pos
+		b["pos"] = next_pos
 		
 		# SWEPT-FRAME PHYSICS: proxy check first (layer 6, bypasses terrain),
 		# then normal world/enemy check. Two raycasts prevent terrain from
@@ -1672,14 +1721,32 @@ func _process(delta: float) -> void:
 
 
 			node.queue_free(); live_bolts.remove_at(i)
-		elif v_update_30:
+		else:
+			# Update visual every frame — the old 30Hz throttle was the dominant
+			# cause of "bolt spawns behind the ship" / "ship outpaces bolt": ship
+			# was at 60Hz, bolt visuals at 30, so half the frames the bolt looked
+			# stuck while the ship moved. Position + stretch run together.
 			node.global_position = b["pos"]
-			# KINETIC STRETCH: Close the 30Hz gap for visual continuity in Retro Mode
-			# Bridges the 500m-1km gaps between frames with a solid energy streak.
-			var stretch_len = (move_dist.length() * 2.5) / 120.0 
-			for child in node.get_children():
-				if child is MeshInstance3D:
-					child.scale.y = max(1.0, stretch_len)
+			var v = b["visual"]
+			if is_instance_valid(v):
+				# Streak length must cover at least this frame's travel so
+				# consecutive frames overlap visually (1.6× margin). But it
+				# must NOT extend behind the bolt's fire origin — on the very
+				# first frame the bolt has only traveled `move_dist` (~10 km
+				# at 600 km/s), and an unclamped 16 km streak would have its
+				# tail 6 km behind the muzzle, which from the cockpit looks
+				# like the bolt spawned behind the ship. The dist-from-origin
+				# cap ties tail length to actual travelled distance.
+				var capsule_h: float = float(b.get("capsule_height", 200.0))
+				var dist_from_origin: float = b["pos"].distance_to(b["origin"])
+				var streak_len: float = max(capsule_h, move_dist.length() * 1.6)
+				streak_len = min(streak_len, max(capsule_h, dist_from_origin))
+				var stretch: float = streak_len / capsule_h
+				v.scale.y = stretch
+				v.position.z = capsule_h * 0.5 * stretch
+				var width_swell: float = clamp(1.0 + (stretch - 1.0) * 0.04, 1.0, 1.8)
+				v.scale.x = width_swell
+				v.scale.z = width_swell
 		i -= 1
 				
 	# GUNSMITH FINAL SYNC: Fire AFTER bolt pool updates to ensure muzzle-snapping

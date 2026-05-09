@@ -1,59 +1,71 @@
 
 extends Node3D
 
-# AsteroidBelt.gd (LOD Optimization Edition)
-# Managed by THE PROCEDURALIST.
+# AsteroidBelt.gd — True-streaming LOD with hysteresis.
+# Slots are pre-computed deterministically; StaticBody3D nodes stream in/out
+# from a pool as the player approaches/leaves. Visual MMIs follow the same
+# state. Combat (collision + Targets/Destructible/Mineable groups) is coupled
+# so lock-on cannot acquire a target the laser bolt cannot hit.
 
 @export var belt_seed: int = 9999
-@export var mmi_count: int = 14000 
-@export var phys_count: int = 250  
+@export var mmi_count: int = 14000
+@export var phys_count: int = 250
 @export var inner_radius: float = 1400000.0
 @export var outer_radius: float = 2000000.0
-@export var thickness: float = 20000.0 
+@export var thickness: float = 20000.0
 
 var rock_mesh_low: ArrayMesh
 var rock_mesh_med: ArrayMesh
 var rock_mesh_high: ArrayMesh
 
-var asteroids: Array[StaticBody3D] = []
-var coll_nodes: Array[CollisionShape3D] = []
+# Slot table — pre-computed at init, never reallocated
+var belt_slots: Array = []                          # Dictionary per slot
+var slot_active: Array = []                         # null or StaticBody3D
+var slot_lod: PackedByteArray = PackedByteArray()   # 0=streaming-out, 1=low, 2=high
+var asteroid_pool: Array = []                       # recycled StaticBody3D refs
 
-var mmi_back: MultiMeshInstance3D # Distant Background (14k, Low Detail)
-var mmi_phys_med: MultiMeshInstance3D # Intermediate Hazards (1.5k, Med Detail)
-var mmi_phys_high: MultiMeshInstance3D # Near-Field 'Hero' Rocks (1.5k, High Detail)
+var mmi_back: MultiMeshInstance3D
+var mmi_phys_med: MultiMeshInstance3D
+var mmi_phys_high: MultiMeshInstance3D
 var player: Node3D
 var _health_component_script: Script = null
 var _mine_component_script: Script = null
 var _asteroid_script: Script = null
 var _cached_cel_mat: ShaderMaterial = null
 
-# LOD CONSTANTS
-const PHYSICS_LOD_DIST: float = 40000.0 # 40km - Tightened for M1 performance
-const HIDE_LOD_DIST: float = 800000.0  # 800km - individual rocks hide and let MMI take over
-const STELLAR_CUTOFF: float = 4000000.0 # 4,000km - Transition to deep space hibernation
+# LOD thresholds (squared for cheap distance compare)
+const SPAWN_DIST_SQ:        float =  500000.0 *  500000.0   # stream in
+const DESPAWN_DIST_SQ:      float =  800000.0 *  800000.0   # stream out (300km hyst)
+const PHYS_ENABLE_DIST_SQ:  float =   45000.0 *   45000.0   # collision + groups on
+const PHYS_DISABLE_DIST_SQ: float =   65000.0 *   65000.0   # collision + groups off (20km hyst)
+const HIGH_LOD_ENTER_SQ:    float =   10000.0 *   10000.0   # high-detail mesh
+const HIGH_LOD_EXIT_SQ:     float =   15000.0 *   15000.0   # back to low (5km hyst)
+const STELLAR_CUTOFF_SQ:    float = 4000000.0 * 4000000.0
+const ATMOSPHERE_HIDE_DIST: float = 1375000.0
+const SPAWN_BUDGET_PER_FRAME: int = 4
+const DESPAWN_BUDGET_PER_FRAME: int = 6
 
-var _spawn_idx: int = 0
-var _is_spawning_phys: bool = true
 var _rng: RandomNumberGenerator
+var _md_ref = null
+var _pulse_mats: Array = []
 
 func _ready() -> void:
-	rock_mesh_low = _build_faceted_rock_mesh(4) # Pyramid / Minimal
-	rock_mesh_med = _build_faceted_rock_mesh(8) # Standard
-	rock_mesh_high = _build_faceted_rock_mesh(12) # High-Fidelity
+	rock_mesh_low = _build_faceted_rock_mesh(4)
+	rock_mesh_med = _build_faceted_rock_mesh(8)
+	rock_mesh_high = _build_faceted_rock_mesh(12)
 	_health_component_script = load("res://src/combat/HealthComponent.gd")
 	_mine_component_script = load("res://src/world/AsteroidMineComponent.gd")
 	_asteroid_script = load("res://src/world/Asteroid.gd")
 	_spawn_deterministic_belt()
 	set_process(true)
-	
+
 	var players = get_tree().get_nodes_in_group("Player")
 	if players.size() > 0: player = players[0]
 
 func _spawn_deterministic_belt() -> void:
 	_rng = RandomNumberGenerator.new()
 	_rng.seed = belt_seed
-	
-	# SHARED MATERIALS
+
 	if not _cached_cel_mat:
 		_cached_cel_mat = ShaderMaterial.new()
 		_cached_cel_mat.shader = load("res://src/shaders/hatch_toon.gdshader")
@@ -62,15 +74,12 @@ func _spawn_deterministic_belt() -> void:
 		outline.set_shader_parameter("outline_width", 1.2)
 		outline.set_shader_parameter("outline_color", Color.BLACK)
 		_cached_cel_mat.next_pass = outline
-	
+
 	var mmi_mat = _cached_cel_mat.duplicate()
 	var phys_mat = _cached_cel_mat.duplicate()
-	# Stash these refs so the beat-sync code in _process can pulse their
-	# pulse_scale uniform without scaling the parent (which would move
-	# asteroids' positions).
 	_pulse_mats = [mmi_mat, phys_mat]
-	
-	# TIER 1: DISTANT IMPOSTOR RING (Low Poly, 14k)
+
+	# TIER 1: Distant ambient background (untouched, separate seed positions)
 	mmi_back = MultiMeshInstance3D.new()
 	mmi_back.multimesh = MultiMesh.new()
 	mmi_back.multimesh.transform_format = MultiMesh.TRANSFORM_3D
@@ -78,36 +87,37 @@ func _spawn_deterministic_belt() -> void:
 	mmi_back.multimesh.instance_count = mmi_count
 	mmi_back.multimesh.mesh = rock_mesh_low
 	mmi_back.material_override = mmi_mat
-	mmi_back.visibility_range_begin = 400000.0 # Only far
+	mmi_back.visibility_range_begin = 400000.0
 	add_child(mmi_back)
-	
-	# TIER 2 & 3: HAZARD SYSTEM (Med / High LOD)
+
+	# TIER 2 & 3: Streamed-slot MMIs (mesh swap drives low/high detail)
 	mmi_phys_med = MultiMeshInstance3D.new()
-	mmi_phys_med.multimesh = MultiMesh.new(); mmi_phys_med.multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	mmi_phys_med.multimesh.instance_count = phys_count; mmi_phys_med.multimesh.mesh = rock_mesh_med
+	mmi_phys_med.multimesh = MultiMesh.new()
+	mmi_phys_med.multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	mmi_phys_med.multimesh.instance_count = phys_count
+	mmi_phys_med.multimesh.mesh = rock_mesh_med
 	mmi_phys_med.material_override = phys_mat
-	# ACE: We disable engine culling/ranges for the hero pool to allow our manual LOD to take priority
 	mmi_phys_med.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mmi_phys_med)
-	
+
 	mmi_phys_high = MultiMeshInstance3D.new()
-	mmi_phys_high.multimesh = MultiMesh.new(); mmi_phys_high.multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	mmi_phys_high.multimesh.instance_count = phys_count; mmi_phys_high.multimesh.mesh = rock_mesh_high
+	mmi_phys_high.multimesh = MultiMesh.new()
+	mmi_phys_high.multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	mmi_phys_high.multimesh.instance_count = phys_count
+	mmi_phys_high.multimesh.mesh = rock_mesh_high
 	mmi_phys_high.material_override = phys_mat
 	add_child(mmi_phys_high)
 
-	# ACE: Set massive custom AABBs to prevent Godot from culling the MMIs when the 
-	# player is millions of kilometers from the belt origin.
 	var big_aabb = AABB(Vector3(-2e6, -5e4, -2e6), Vector3(4e6, 1e5, 4e6))
 	mmi_back.custom_aabb = big_aabb
 	mmi_phys_med.custom_aabb = big_aabb
 	mmi_phys_high.custom_aabb = big_aabb
 
-	# POPULATE SEEDS (Tier 1: Background Only)
+	# Populate ambient background MMI (unchanged)
 	for i in range(mmi_count):
 		var angle = _rng.randf() * TAU
 		var dist = _rng.randf_range(inner_radius, outer_radius)
-		var h = pow(_rng.randf_range(-1.0, 1.0), 3.0) * thickness 
+		var h = pow(_rng.randf_range(-1.0, 1.0), 3.0) * thickness
 		var xform = Transform3D().rotated(Vector3(_rng.randf(), _rng.randf(), _rng.randf()).normalized(), _rng.randf() * TAU)
 		xform = xform.scaled(Vector3.ONE * (5.0 + pow(_rng.randf(), 2.0) * 120.0))
 		xform.origin = Vector3(cos(angle) * dist, h, sin(angle) * dist)
@@ -115,30 +125,32 @@ func _spawn_deterministic_belt() -> void:
 		var inst_col = Color.from_hsv(0, 0, _rng.randf_range(0.2, 0.4))
 		if _rng.randf() > 0.45: inst_col = Color.from_hsv(_rng.randf_range(0.04, 0.08), 0.4, _rng.randf_range(0.3, 0.5))
 		mmi_back.multimesh.set_instance_color(i, inst_col)
-	
-	# ACE: We defer the Tiers 2 & 3 (1,500 physical rocks) to _process
-	# to prevent the multi-second 'Spawn Freeze' reported by THE ARCHITECT.
-	
 
-var proc_idx: int = 0
-const BATCH_SIZE: int = 32
-var _cleanup_counter: int = 0
-
-func _cleanup_destroyed_asteroids() -> void:
-	_cleanup_counter += 1
-	if _cleanup_counter < 10: return
-	_cleanup_counter = 0
-
-	var i = asteroids.size() - 1
-	while i >= 0:
-		if not is_instance_valid(asteroids[i]):
-			asteroids.remove_at(i)
-			coll_nodes.remove_at(i)
-			if proc_idx > i: proc_idx -= 1
-		i -= 1
-
-var _md_ref = null
-var _pulse_mats: Array = []   # ShaderMaterial refs for asteroid LODs
+	# Build deterministic slot table (no nodes instantiated yet)
+	slot_active.resize(phys_count)
+	slot_lod.resize(phys_count)
+	for i in range(phys_count):
+		var angle2 = _rng.randf() * TAU
+		var dist2 = _rng.randf_range(inner_radius, outer_radius)
+		var h2 = pow(_rng.randf_range(-1.0, 1.0), 2.0) * (thickness * 0.8)
+		var rot_v = Vector3(_rng.randf() * TAU, _rng.randf() * TAU, _rng.randf() * TAU)
+		var s_roll = _rng.randf()
+		var scale_val = 25.0 + pow(s_roll, 4.0) * 1600.0
+		var pos = Vector3(cos(angle2) * dist2, h2, sin(angle2) * dist2)
+		var slot_basis = Basis.from_euler(rot_v).scaled(Vector3.ONE * scale_val)
+		var xform = Transform3D(slot_basis, pos)
+		var slot = {
+			"pos": pos,
+			"rot": rot_v,
+			"scale_val": scale_val,
+			"xform": xform,
+			"alive": true,
+		}
+		belt_slots.append(slot)
+		slot_active[i] = null
+		slot_lod[i] = 0
+		mmi_phys_med.multimesh.set_instance_transform(i, Transform3D().scaled(Vector3.ZERO))
+		mmi_phys_high.multimesh.set_instance_transform(i, Transform3D().scaled(Vector3.ZERO))
 
 func _get_music_director():
 	if _md_ref and is_instance_valid(_md_ref):
@@ -148,20 +160,12 @@ func _get_music_director():
 		_md_ref = nodes[0]
 	return _md_ref
 
-func _process(delta: float) -> void:
-	if _is_spawning_phys:
-		_process_physical_spawning()
-		return
-
+func _process(_delta: float) -> void:
 	if not player:
 		var found = get_tree().get_nodes_in_group("Player")
 		if found.size() > 0: player = found[0]
 		return
 
-	# Beat sync: pulse each asteroid's mesh size in place. Big swing on
-	# kicks (up to +14%) plus a smaller bump on every other step (+4%) so
-	# the belt visibly breathes between kicks too. Driven by a per-material
-	# shader uniform so positions never move.
 	var md = _get_music_director()
 	if md and not _pulse_mats.is_empty():
 		var kick_amt: float = float(md.kick_intensity) * 0.14
@@ -171,99 +175,179 @@ func _process(delta: float) -> void:
 			if mat:
 				mat.set_shader_parameter("pulse_scale", s)
 
-	# Periodically clean up destroyed asteroids
-	_cleanup_destroyed_asteroids()
+	var ship_pos = player.global_position
+	var dist_to_planet = ship_pos.distance_to(global_position)
 
-	var p_pos = player.global_position
-	var dist_to_planet = p_pos.distance_to(global_position)
-
-	# STELLAR HIBERNATION: Beyond 4,000km, we disable the individual rock loop.
-	# Also, HIDE BELT if we are deep in the atmosphere (sub-250km altitude)
-	if dist_to_planet < 1375000.0:
+	if dist_to_planet < ATMOSPHERE_HIDE_DIST:
 		if visible: hide()
 		return
 	elif not visible:
 		show()
 
-	if dist_to_planet > STELLAR_CUTOFF:
+	if dist_to_planet * dist_to_planet > STELLAR_CUTOFF_SQ:
 		return
 
-	# ACE: Pre-calculate local player position to avoid expensive global coordinate lookups in the loop
-	var p_pos_local = to_local(p_pos)
-	
-	# PERFORMANCE: Update a smaller slice each frame so the belt LOD stays smooth
-	# ACE: Tightened batch for M1 — 24 asteroids per frame is sufficient for visual consistency.
-	var final_batch = 24
-	for k in range(final_batch):
-		if asteroids.is_empty(): break
-		proc_idx = (proc_idx + 1) % asteroids.size()
-		var a = asteroids[proc_idx]
-		if not is_instance_valid(a): continue
+	var ship_local = to_local(ship_pos)
+	var spawned: int = 0
+	var despawned: int = 0
+	var slot_count: int = belt_slots.size()
 
-		var dist_sq = a.position.distance_squared_to(p_pos_local)
-		var coll = coll_nodes[proc_idx]
+	for i in range(slot_count):
+		var slot: Dictionary = belt_slots[i]
+		if not slot.alive:
+			continue
+		var d_sq: float = (slot.pos as Vector3).distance_squared_to(ship_local)
+		var active = slot_active[i]
 
-		# MANUAL LOD STATE MACHINE
-		if dist_sq < HIDE_LOD_DIST * HIDE_LOD_DIST:
-			# SHOW LOGIC: Swapping between Med/High based on 12km threshold
-			var use_high = dist_sq < 12000.0 * 12000.0
+		# Stream in / out — full lifecycle gated by hysteresis
+		if active == null:
+			if d_sq < SPAWN_DIST_SQ and spawned < SPAWN_BUDGET_PER_FRAME:
+				active = _stream_in(i, slot)
+				slot_active[i] = active
+				spawned += 1
+			else:
+				continue
+		elif d_sq > DESPAWN_DIST_SQ and despawned < DESPAWN_BUDGET_PER_FRAME:
+			_stream_out(i)
+			despawned += 1
+			continue
 
-			mmi_phys_high.multimesh.set_instance_transform(proc_idx, a.transform if use_high else Transform3D().scaled(Vector3.ZERO))
-			mmi_phys_med.multimesh.set_instance_transform(proc_idx, a.transform if not use_high else Transform3D().scaled(Vector3.ZERO))
+		# Mesh detail swap with hysteresis
+		var lod_state: int = slot_lod[i]
+		if lod_state != 2 and d_sq < HIGH_LOD_ENTER_SQ:
+			_set_detail(i, 2)
+		elif lod_state != 1 and d_sq > HIGH_LOD_EXIT_SQ:
+			_set_detail(i, 1)
 
-			# PHYSICS LOD: Enable collision only within 80km
-			coll.disabled = dist_sq > PHYSICS_LOD_DIST * PHYSICS_LOD_DIST
-		else:
-			# HIDE LOGIC: Too far to matter
-			mmi_phys_med.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
-			mmi_phys_high.multimesh.set_instance_transform(proc_idx, Transform3D().scaled(Vector3.ZERO))
-			coll.disabled = true
+		# Combat (collision + groups) with hysteresis — locks targeting to actual hit range
+		var has_phys: bool = active.get_meta("phys_active", false)
+		if not has_phys and d_sq < PHYS_ENABLE_DIST_SQ:
+			_enable_combat(active)
+		elif has_phys and d_sq > PHYS_DISABLE_DIST_SQ:
+			_disable_combat(active)
 
-func _process_physical_spawning() -> void:
-	# ACE: Spawn 50 rocks per frame to eliminate the startup freeze
-	var batch = 50
-	for i in range(batch):
-		if _spawn_idx >= phys_count:
-			_is_spawning_phys = false
-			return
-		
-		var angle = _rng.randf() * TAU
-		var dist = _rng.randf_range(inner_radius, outer_radius)
-		var h = pow(_rng.randf_range(-1.0, 1.0), 2.0) * (thickness * 0.8)
-		var asteroid = StaticBody3D.new()
-		if _asteroid_script:
-			asteroid.set_script(_asteroid_script)
-		asteroid.position = Vector3(cos(angle) * dist, h, sin(angle) * dist)
-		asteroid.rotation = Vector3(_rng.randf() * TAU, _rng.randf() * TAU, _rng.randf() * TAU)
-		var s_roll = _rng.randf()
-		var scale_val = 25.0 + pow(s_roll, 4.0) * 1600.0
-		asteroid.scale = Vector3(scale_val, scale_val, scale_val)
-		
-		# INITIAL HIDE (Zero scale)
-		mmi_phys_med.multimesh.set_instance_transform(_spawn_idx, Transform3D().scaled(Vector3.ZERO))
-		mmi_phys_high.multimesh.set_instance_transform(_spawn_idx, Transform3D().scaled(Vector3.ZERO))
+func _stream_in(slot_idx: int, slot: Dictionary) -> StaticBody3D:
+	var node: StaticBody3D
+	if asteroid_pool.size() > 0:
+		node = asteroid_pool.pop_back()
+		_reset_pooled(node)
+		if node.get_parent() == null:
+			add_child(node)
+	else:
+		node = _build_asteroid()
+		add_child(node)
 
-		var collision = CollisionShape3D.new()
-		var shape = SphereShape3D.new(); shape.radius = 6.0; collision.shape = shape
-		asteroid.add_child(collision)
-		
-		var hc = null
-		if _health_component_script:
-			hc = Node.new(); hc.set_script(_health_component_script); hc.name = "HealthComponent"; hc.set("max_health", 4.0); asteroid.add_child(hc)
+	node.transform = slot.xform
+	node.set_meta("slot_idx", slot_idx)
+	node.set_meta("phys_active", false)
+	mmi_phys_med.multimesh.set_instance_transform(slot_idx, slot.xform)
+	mmi_phys_high.multimesh.set_instance_transform(slot_idx, Transform3D().scaled(Vector3.ZERO))
+	slot_lod[slot_idx] = 1
+	return node
 
-		var mc = null
-		if _mine_component_script:
-			mc = Node3D.new(); mc.set_script(_mine_component_script); mc.name = "MineComponent"; asteroid.add_child(mc)
+func _stream_out(slot_idx: int) -> void:
+	var node = slot_active[slot_idx]
+	if node == null: return
+	if node.get_meta("phys_active", false):
+		_disable_combat(node)
+	mmi_phys_med.multimesh.set_instance_transform(slot_idx, Transform3D().scaled(Vector3.ZERO))
+	mmi_phys_high.multimesh.set_instance_transform(slot_idx, Transform3D().scaled(Vector3.ZERO))
+	slot_active[slot_idx] = null
+	slot_lod[slot_idx] = 0
+	node.set_meta("slot_idx", -1)
+	node.transform = Transform3D()
+	asteroid_pool.append(node)
 
-		# Connect health depletion to mining destruction
-		if hc and mc:
-			hc.health_depleted.connect(mc._on_health_depleted)
+func _set_detail(slot_idx: int, level: int) -> void:
+	var slot: Dictionary = belt_slots[slot_idx]
+	if level == 2:
+		mmi_phys_high.multimesh.set_instance_transform(slot_idx, slot.xform)
+		mmi_phys_med.multimesh.set_instance_transform(slot_idx, Transform3D().scaled(Vector3.ZERO))
+	else:
+		mmi_phys_med.multimesh.set_instance_transform(slot_idx, slot.xform)
+		mmi_phys_high.multimesh.set_instance_transform(slot_idx, Transform3D().scaled(Vector3.ZERO))
+	slot_lod[slot_idx] = level
 
-		# Health and Mining components are added as children; 
-		# Asteroid.gd forwards take_damage() to HealthComponent automatically.
+func _enable_combat(node: StaticBody3D) -> void:
+	var coll = node.get_node_or_null("CollisionShape3D")
+	if coll: coll.disabled = false
+	if not node.is_in_group("Targets"): node.add_to_group("Targets")
+	if not node.is_in_group("Destructible"): node.add_to_group("Destructible")
+	if not node.is_in_group("Mineable"): node.add_to_group("Mineable")
+	node.set_meta("phys_active", true)
 
-		add_child(asteroid); asteroid.add_to_group("Targets"); asteroid.add_to_group("Destructible"); asteroid.add_to_group("Mineable"); asteroids.append(asteroid); coll_nodes.append(collision)
-		_spawn_idx += 1
+func _disable_combat(node: StaticBody3D) -> void:
+	var coll = node.get_node_or_null("CollisionShape3D")
+	if coll: coll.disabled = true
+	if node.is_in_group("Targets"): node.remove_from_group("Targets")
+	if node.is_in_group("Destructible"): node.remove_from_group("Destructible")
+	if node.is_in_group("Mineable"): node.remove_from_group("Mineable")
+	node.set_meta("phys_active", false)
+
+func _build_asteroid() -> StaticBody3D:
+	var node = StaticBody3D.new()
+	if _asteroid_script:
+		node.set_script(_asteroid_script)
+
+	var coll = CollisionShape3D.new()
+	coll.name = "CollisionShape3D"
+	var shape = SphereShape3D.new()
+	# Local radius; parent scale (25–1625) multiplies → world hitbox tracks visible silhouette
+	shape.radius = 8.0
+	coll.shape = shape
+	coll.disabled = true
+	node.add_child(coll)
+
+	if _health_component_script:
+		var hc = Node.new()
+		hc.set_script(_health_component_script)
+		hc.name = "HealthComponent"
+		hc.set("max_health", 4.0)
+		node.add_child(hc)
+
+	if _mine_component_script:
+		var mc = Node3D.new()
+		mc.set_script(_mine_component_script)
+		mc.name = "MineComponent"
+		node.add_child(mc)
+		var hc_ref = node.get_node_or_null("HealthComponent")
+		if hc_ref and not hc_ref.is_connected("health_depleted", mc._on_health_depleted):
+			hc_ref.health_depleted.connect(mc._on_health_depleted)
+		if mc.has_signal("asteroid_destroyed") and not mc.is_connected("asteroid_destroyed", _on_asteroid_destroyed):
+			mc.asteroid_destroyed.connect(_on_asteroid_destroyed)
+
+	return node
+
+func _reset_pooled(node: StaticBody3D) -> void:
+	var hc = node.get_node_or_null("HealthComponent")
+	if hc:
+		hc.current_health = hc.max_health
+	var mc = node.get_node_or_null("MineComponent")
+	if mc:
+		mc.set("destroyed", false)
+		mc.set("_health", 4)
+	_disable_combat(node)
+	var coll = node.get_node_or_null("CollisionShape3D")
+	if coll and coll.shape is SphereShape3D:
+		(coll.shape as SphereShape3D).radius = 8.0
+	node.set_meta("phys_active", false)
+
+func _on_asteroid_destroyed(asteroid: Node) -> void:
+	if not (asteroid is StaticBody3D): return
+	var sb := asteroid as StaticBody3D
+	var slot_idx: int = int(sb.get_meta("slot_idx", -1))
+	if slot_idx < 0 or slot_idx >= belt_slots.size():
+		return
+	(belt_slots[slot_idx] as Dictionary)["alive"] = false
+	mmi_phys_med.multimesh.set_instance_transform(slot_idx, Transform3D().scaled(Vector3.ZERO))
+	mmi_phys_high.multimesh.set_instance_transform(slot_idx, Transform3D().scaled(Vector3.ZERO))
+	if sb.get_meta("phys_active", false):
+		_disable_combat(sb)
+	slot_active[slot_idx] = null
+	slot_lod[slot_idx] = 0
+	sb.set_meta("slot_idx", -1)
+	sb.transform = Transform3D()
+	asteroid_pool.append(sb)
 
 func _build_faceted_rock_mesh(sides: int) -> ArrayMesh:
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)

@@ -2,69 +2,77 @@ extends StaticBody3D
 
 # SurfacePropProxy.gd
 # Invisible collision body co-located with a MultiMesh surface prop (rock or tree).
-# When shot by a LaserBolt, take_damage() reduces health; at 0 it zeroes the matching
-# MultiMesh instance (making the prop vanish) and spawns LootGems.
-#
-# Lifecycle: added as a child of PlanetChunk. When the chunk sleeps/resets,
-# PlanetGen's death_row system frees the proxy automatically — no manual cleanup needed.
+# Lifecycle is now driven by PlanetChunk's per-instance LOD update — proxies are
+# pulled from a chunk-local pool when a prop becomes visible to the ship and
+# returned to the pool when the prop streams out. set_combat_active(true|false)
+# toggles group membership and collision layer in lockstep so a target can never
+# be locked-on if the laser bolt couldn't actually hit it.
+
+const COMBAT_LAYER: int = 1 << 5  # Layer 6 — bolt + proxy raycasts in Player.gd
 
 const GEM_VALUE: Dictionary = {
 	"Stone": 15,
 	"Wood":  25,
 }
 const GEM_COLOR: Dictionary = {
-	"Stone": Color(0.55, 0.52, 0.48),   # grey
-	"Wood":  Color(0.45, 0.28, 0.12),   # brown
+	"Stone": Color(0.55, 0.52, 0.48),
+	"Wood":  Color(0.45, 0.28, 0.12),
 }
 
-# PERSISTENT DESTRUCTION REGISTRY: Track destroyed surface-prop positions
-# (rocks / trees) so they don't reappear when a chunk reloads. Mirrors the
-# MineableResource pattern.  Keyed by hash(global_position.round()) for
-# O(1) lookup; PlanetChunk._spawn_rock and _spawn_tree_lods filter against
-# this dict before building their MultiMeshes.
+# PERSISTENT DESTRUCTION REGISTRY: position-keyed dict of destroyed proxies so
+# they don't reappear when the chunk reloads.
 static var _destroyed_positions: Dictionary = {}
 
 var resource_type: String = "Copper"
-var _mmis: Array = []          # MultiMeshInstance3D references
+var _mmis: Array = []
 var _instance_idx: int = -1
 var _health: int = 2
-var health: int = 2            # public alias for bolt is_dying check
+var health: int = 2
 
 func _ready() -> void:
-	add_to_group("Mineable")
-	add_to_group("Targets")
-	add_to_group("Destructible")
-	# Layer 6 (bit 32): dedicated proxy layer so bolt raycasts bypass terrain (layer 1).
-	# Terrain and proxies on the same layer caused terrain to intercept first on mobile.
-	collision_layer = 1 << 5 # Layer 6
+	# Default state is INACTIVE: proxies are invisible to combat until the
+	# owning chunk activates them via set_combat_active(true). Without this
+	# default, every freshly-pooled proxy would appear in Targets/Mineable
+	# groups for one frame before the chunk could disable it.
+	collision_layer = 0
 	collision_mask = 0
 
 func setup(mmis: Array, idx: int, res_type: String) -> void:
 	_mmis = mmis
 	_instance_idx = idx
 	resource_type = res_type
+	_health = 2
+	health = 2
+
+func set_combat_active(active: bool) -> void:
+	if active:
+		collision_layer = COMBAT_LAYER
+		if not is_in_group("Mineable"): add_to_group("Mineable")
+		if not is_in_group("Targets"): add_to_group("Targets")
+		if not is_in_group("Destructible"): add_to_group("Destructible")
+	else:
+		collision_layer = 0
+		if is_in_group("Mineable"): remove_from_group("Mineable")
+		if is_in_group("Targets"): remove_from_group("Targets")
+		if is_in_group("Destructible"): remove_from_group("Destructible")
 
 func take_damage(_amount: float) -> void:
-	print("--- PROCEDURALIST: Proxy Hit! health=%d ---" % [_health - 1])
 	_health -= 1
 	health = _health
 	if _health <= 0:
 		_on_destroyed()
 
 func _on_destroyed() -> void:
-	# Register this position so the prop doesn't respawn when the chunk
-	# reloads. Use the same rounded-position hash convention as the
-	# spawner (PlanetChunk._filter_destroyed_props).
+	# Persistent registry: position hash matches the spawner's filter so the
+	# prop stays gone across chunk reloads.
 	_destroyed_positions[hash(global_position.round())] = true
 
-	# Remove the visual prop by zeroing its MultiMesh transform
 	if _instance_idx >= 0:
 		var zero := Transform3D().scaled(Vector3.ZERO)
 		for mmi in _mmis:
 			if is_instance_valid(mmi) and mmi.multimesh != null:
 				mmi.multimesh.set_instance_transform(_instance_idx, zero)
 
-	# Find the nearest planet so gems know which way is "down"
 	var nearest_planet: Node3D = null
 	var min_dist: float = 1e16
 	for p in get_tree().get_nodes_in_group("Planet"):
@@ -73,7 +81,6 @@ func _on_destroyed() -> void:
 			min_dist = d
 			nearest_planet = p
 
-	# Spawn 1–2 loot gems
 	var gem_script = load("res://src/world/LootGem.gd")
 	if gem_script:
 		var rng := RandomNumberGenerator.new()
@@ -92,4 +99,7 @@ func _on_destroyed() -> void:
 			get_tree().root.add_child(gem)
 			gem.global_position = global_position + Vector3(0, 6.0, 0)
 
+	# Disable combat before queue_free so any in-flight bolt's body_entered
+	# doesn't fire a second hit on a destroyed proxy.
+	set_combat_active(false)
 	queue_free()

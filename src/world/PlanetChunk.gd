@@ -77,10 +77,45 @@ var _m_pts: Array = [] # Pairs: [Transform3D, String (Type)]
 signal generation_completed()
 var _task_id: int = -1
 
-# STELLAR VISIBILITY POLICY: Unified across all planetary props
-const PROP_LOD_HIGH_END: float = 1200.0  # Tightened High-Detail radius
-const PROP_LOD_PROXY_END: float = 6500.0  # Aggressive absolute cutoff for retro performance
-const PROP_LOD_FADE: float = 300.0       
+# Legacy fade margins (still used by grass and leaf emitters via direct
+# visibility_range assignment). Rocks and trees are now driven by the
+# per-instance ship-based LOD framework below; visibility_range on those
+# MMIs is left at engine defaults (no auto-cull).
+const PROP_LOD_HIGH_END: float = 1200.0
+const PROP_LOD_PROXY_END: float = 6500.0
+const PROP_LOD_FADE: float = 600.0
+
+# PER-INSTANCE SURFACE-PROP LOD (rocks, trees) — ship-based with hysteresis.
+# Each prop instance is independently advanced through the state machine:
+#   0 = hidden (MMI transform = zero scale, no proxy)
+#   1 = low   (low_mmi visible, paired_with_low visible, proxy active)
+#   2 = high  (high_mmi visible, paired_with_high visible, proxy active)
+# Hysteresis: thresholds for entering and leaving each state are different so a
+# prop near a boundary doesn't flicker. Distances are measured to the player
+# ship's global position (not camera) so SpringArm swings cannot cause pop-in.
+const SURF_LOD_SPAWN_DIST:        float = 4000.0   # 0 → 1: stream in at low
+const SURF_LOD_DESPAWN_DIST:      float = 6000.0   # 1/2 → 0: stream out (2km hyst)
+const SURF_LOD_HIGH_ENTER_DIST:   float =  800.0   # 1 → 2: upgrade to high mesh
+const SURF_LOD_HIGH_EXIT_DIST:    float = 1300.0   # 2 → 1: downgrade (500m hyst)
+const SURF_LOD_SPAWN_DIST_SQ:        float = SURF_LOD_SPAWN_DIST * SURF_LOD_SPAWN_DIST
+const SURF_LOD_DESPAWN_DIST_SQ:      float = SURF_LOD_DESPAWN_DIST * SURF_LOD_DESPAWN_DIST
+const SURF_LOD_HIGH_ENTER_DIST_SQ:   float = SURF_LOD_HIGH_ENTER_DIST * SURF_LOD_HIGH_ENTER_DIST
+const SURF_LOD_HIGH_EXIT_DIST_SQ:    float = SURF_LOD_HIGH_EXIT_DIST * SURF_LOD_HIGH_EXIT_DIST
+
+# Each entry: Dictionary with keys
+#   high: MultiMeshInstance3D | null  — high-detail mesh
+#   low:  MultiMeshInstance3D         — low-detail mesh (always present)
+#   paired_with_high: Array[MMI]      — extra MMIs that show alongside high (e.g. trunks)
+#   paired_with_low:  Array[MMI]      — extra MMIs that show alongside low (e.g. low-tier trunks)
+#   points:  Array[Transform3D]       — original instance transforms
+#   states:  Array[int]               — per-instance state (0/1/2)
+#   proxies: Array[StaticBody3D|null] — combat proxy per instance, on-demand
+#   pool:    Array[StaticBody3D]      — recycled proxies ready for reuse
+#   proxy_script: Script              — SurfacePropProxy script
+#   res_type:     String              — "Stone" or "Wood"
+#   sphere_r:     float               — collision sphere radius (world units)
+var _prop_groups: Array = []
+var _player_ref: Node3D = null
 
 func start_generation() -> void:
 	self.visible = false
@@ -107,15 +142,21 @@ func sleep_and_reset() -> void:
 	_is_generating = false
 	visible = false
 	mesh = null
-	
+
 	# Full data wipe to prevent Memory Leaks when retained in pool
 	_mesh_data_land.clear()
 	_mesh_data_water.clear()
 	_t_pts.clear(); _r_pts.clear(); _g_pts.clear(); _c_pts.clear()
 	_is_generating = false # FORCE RESET
-	
+
+	# Drop per-instance LOD bookkeeping — the MMIs and proxies it references
+	# are about to be sent to death_row. Holding stale handles would crash the
+	# next _process tick after the chunk is recycled.
+	_prop_groups.clear()
+	set_process(false)
+
 	# Purge all botanical MultiMesh instances and collisions ASYNCHRONOUSLY
-	# Moving them to death_row prevents the main thread from locking up 
+	# Moving them to death_row prevents the main thread from locking up
 	# when thousands of nodes are freed at once during a transit exit.
 	for n in get_children():
 		remove_child(n)
@@ -596,59 +637,212 @@ func _spawn_rock(points: Array[Transform3D]) -> void:
 	# trait roll and tinting rocks cyan on bioluminescent worlds — rocks should
 	# stay neutral regardless of biome.
 	var mat = _get_rock_mat()
-	
-	_apply_planetary_lod_policy(mmi_h, true)
-	mmi_h.multimesh = mm_h; mmi_h.material_override = mat; add_child(mmi_h)
-	
-	_apply_planetary_lod_policy(mmi_l, false)
-	mmi_l.multimesh = mm_l; mmi_l.material_override = mat; add_child(mmi_l)
 
-	# Generous collision sphere (25m radius) so the player's swept-ray bolts
-	# reliably hit rocks even with imprecise aim.  Cap raised so denser rock
-	# fields are fully shootable.
-	_spawn_prop_proxies(points, [mmi_h, mmi_l], "Stone", 200, 25.0)
+	mmi_h.multimesh = mm_h
+	mmi_h.material_override = mat
+	mmi_h.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	mmi_h.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mmi_h)
 
-func _spawn_prop_proxies(points: Array[Transform3D], mmis: Array, res_type: String, max_count: int, sphere_r: float) -> void:
-	var proxy_script = load("res://src/world/SurfacePropProxy.gd")
-	if not proxy_script: return
+	mmi_l.multimesh = mm_l
+	mmi_l.material_override = mat
+	mmi_l.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+	mmi_l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mmi_l)
 
-	# Old code clamped to 40 proxies per chunk — but that left most visible
-	# rocks/trees lockable yet unhittable.  Raised to 200 so the cap rarely
-	# bites in practice.
-	var effective_max = min(max_count, 200)
-	var sphere := SphereShape3D.new()
-	sphere.radius = sphere_r
+	# 25m collision sphere matches the high-detail rock silhouette; proxies are
+	# created on-demand per visible instance, so the old 200-cap is gone.
+	_register_prop_group(mmi_h, mmi_l, [], [], points, "Stone", 25.0)
 
-	var spawned := 0
-	for i in range(points.size()):
-		if spawned >= effective_max: break
-		var col := CollisionShape3D.new()
-		col.shape = sphere
-		var proxy := StaticBody3D.new()
-		proxy.set_script(proxy_script)
-		proxy.add_child(col)
-		# Lift center above terrain so the sphere top clears coarse mobile mesh triangles.
-		# Sphere still overlaps the visual prop position (lift < radius), so manual aim works.
-		var surface_normal: Vector3 = points[i].origin.normalized()
-		proxy.position = points[i].origin + surface_normal * (sphere_r * 0.65)
-		add_child(proxy)
-		proxy.call("setup", mmis, i, res_type)
-		spawned += 1
+func _spawn_prop_proxies(_points: Array[Transform3D], _mmis: Array, _res_type: String, _max_count: int, _sphere_r: float) -> void:
+	# Deprecated. Proxy lifecycle is now driven per-instance by the ship-based
+	# LOD update loop (see _ensure_proxy / _release_proxy). Callers should use
+	# _register_prop_group() instead — this stub stays as a no-op safety net.
+	pass
 
-func _apply_planetary_lod_policy(mmi: MultiMeshInstance3D, is_high_detail: bool) -> void:
+func _apply_planetary_lod_policy(mmi: MultiMeshInstance3D, _is_high_detail: bool) -> void:
+	# Visibility is driven manually by _process_prop_lod() now; we keep this
+	# helper for the few non-prop callers that still want sensible defaults
+	# (no GI, no shadows). visibility_range_* is intentionally NOT set here.
 	mmi.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
-	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-	
-	if is_high_detail:
-		mmi.visibility_range_end = PROP_LOD_HIGH_END
-		mmi.visibility_range_end_margin = PROP_LOD_FADE
-		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF # OPTIMIZATION: Foliage shadows are too expensive
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+# ─── PER-INSTANCE SURFACE-PROP LOD ─────────────────────────────────────────────
+
+func _register_prop_group(high: MultiMeshInstance3D, low: MultiMeshInstance3D, paired_with_high: Array, paired_with_low: Array, points: Array, res_type: String, sphere_r: float) -> void:
+	if low == null or points.is_empty():
+		return
+	var n: int = points.size()
+	var states: Array = []
+	states.resize(n); states.fill(0)
+	var proxies: Array = []
+	proxies.resize(n); proxies.fill(null)
+	var hidden: Transform3D = Transform3D().scaled(Vector3.ZERO)
+	for i in range(n):
+		if high: high.multimesh.set_instance_transform(i, hidden)
+		low.multimesh.set_instance_transform(i, hidden)
+		for p in paired_with_high:
+			p.multimesh.set_instance_transform(i, hidden)
+		for p in paired_with_low:
+			p.multimesh.set_instance_transform(i, hidden)
+
+	# Stable AABB so frustum culling doesn't drop the MMI when most instances
+	# are zero-scale. Without this, fresh-registered chunks (e.g. just after a
+	# subdivision) flicker invisible until enough instances become visible to
+	# stretch the auto-AABB. Pad ±50m on each axis to comfortably contain any
+	# instance scale.
+	var prop_aabb: AABB = _calc_points_aabb(points)
+	if high: high.custom_aabb = prop_aabb
+	low.custom_aabb = prop_aabb
+	for p in paired_with_high: p.custom_aabb = prop_aabb
+	for p in paired_with_low: p.custom_aabb = prop_aabb
+
+	var entry: Dictionary = {
+		"high": high,
+		"low": low,
+		"paired_with_high": paired_with_high,
+		"paired_with_low": paired_with_low,
+		"points": points,
+		"states": states,
+		"proxies": proxies,
+		"pool": [],
+		"proxy_script": load("res://src/world/SurfacePropProxy.gd"),
+		"res_type": res_type,
+		"sphere_r": sphere_r,
+	}
+	_prop_groups.append(entry)
+	set_process(true)
+
+	# Run one update immediately so a chunk that registers mid-frame (e.g.
+	# right after subdivision while the player is already inside it) shows the
+	# correct LOD on its first rendered frame instead of one frame of hidden.
+	if _player_ref == null or not is_instance_valid(_player_ref):
+		var found: Array = get_tree().get_nodes_in_group("Player")
+		if not found.is_empty(): _player_ref = found[0]
+	if _player_ref != null and is_inside_tree():
+		_update_prop_group(entry, global_transform, _player_ref.global_position)
+
+func _calc_points_aabb(points: Array) -> AABB:
+	if points.is_empty(): return AABB()
+	var min_v: Vector3 = (points[0] as Transform3D).origin
+	var max_v: Vector3 = min_v
+	for p in points:
+		var o: Vector3 = (p as Transform3D).origin
+		min_v = min_v.min(o); max_v = max_v.max(o)
+	var pad: Vector3 = Vector3(50, 50, 50)
+	return AABB(min_v - pad, (max_v - min_v) + pad * 2.0)
+
+func _process(_delta: float) -> void:
+	if _prop_groups.is_empty():
+		return
+	# Intentionally NOT gating on is_visible_in_tree(): the chunk can briefly
+	# go invisible during planet-side transitions (face hibernation, etc.) and
+	# we still want LOD state to track the player so when it becomes visible
+	# again, instances are already at the correct state — no re-pop frame.
+	if _player_ref == null or not is_instance_valid(_player_ref):
+		var found: Array = get_tree().get_nodes_in_group("Player")
+		if found.is_empty(): return
+		_player_ref = found[0]
+	var ship_pos: Vector3 = _player_ref.global_position
+	var chunk_xform: Transform3D = global_transform
+	for g in _prop_groups:
+		_update_prop_group(g, chunk_xform, ship_pos)
+
+func _update_prop_group(g: Dictionary, chunk_xform: Transform3D, ship_pos: Vector3) -> void:
+	var points: Array = g.points
+	var states: Array = g.states
+	var has_high: bool = g.high != null
+	var n: int = points.size()
+	for i in range(n):
+		var pt: Transform3D = points[i]
+		var inst_world: Vector3 = chunk_xform * pt.origin
+		var d_sq: float = inst_world.distance_squared_to(ship_pos)
+		var prev: int = states[i]
+		var nxt: int = prev
+		if prev == 0:
+			if d_sq < SURF_LOD_SPAWN_DIST_SQ:
+				nxt = 2 if (has_high and d_sq < SURF_LOD_HIGH_ENTER_DIST_SQ) else 1
+		elif prev == 1:
+			if d_sq > SURF_LOD_DESPAWN_DIST_SQ:
+				nxt = 0
+			elif has_high and d_sq < SURF_LOD_HIGH_ENTER_DIST_SQ:
+				nxt = 2
+		else: # prev == 2
+			if d_sq > SURF_LOD_DESPAWN_DIST_SQ:
+				nxt = 0
+			elif d_sq > SURF_LOD_HIGH_EXIT_DIST_SQ:
+				nxt = 1
+		if nxt == prev: continue
+		_set_instance_state(g, i, nxt)
+		states[i] = nxt
+
+func _set_instance_state(g: Dictionary, idx: int, state: int) -> void:
+	var pt: Transform3D = g.points[idx]
+	var hidden: Transform3D = Transform3D().scaled(Vector3.ZERO)
+	if state == 2: # HIGH
+		if g.high: g.high.multimesh.set_instance_transform(idx, pt)
+		g.low.multimesh.set_instance_transform(idx, hidden)
+		for p in g.paired_with_high:
+			p.multimesh.set_instance_transform(idx, pt)
+		for p in g.paired_with_low:
+			p.multimesh.set_instance_transform(idx, hidden)
+		_ensure_proxy(g, idx)
+	elif state == 1: # LOW
+		if g.high: g.high.multimesh.set_instance_transform(idx, hidden)
+		g.low.multimesh.set_instance_transform(idx, pt)
+		for p in g.paired_with_high:
+			p.multimesh.set_instance_transform(idx, hidden)
+		for p in g.paired_with_low:
+			p.multimesh.set_instance_transform(idx, pt)
+		_ensure_proxy(g, idx)
+	else: # HIDDEN
+		if g.high: g.high.multimesh.set_instance_transform(idx, hidden)
+		g.low.multimesh.set_instance_transform(idx, hidden)
+		for p in g.paired_with_high:
+			p.multimesh.set_instance_transform(idx, hidden)
+		for p in g.paired_with_low:
+			p.multimesh.set_instance_transform(idx, hidden)
+		_release_proxy(g, idx)
+
+func _ensure_proxy(g: Dictionary, idx: int) -> void:
+	if g.proxies[idx] != null:
+		return
+	if g.proxy_script == null:
+		return
+	var sphere_r: float = g.sphere_r
+	var pt: Transform3D = g.points[idx]
+	var proxy: StaticBody3D
+	if not g.pool.is_empty():
+		proxy = g.pool.pop_back()
 	else:
-		mmi.visibility_range_begin = PROP_LOD_HIGH_END
-		mmi.visibility_range_begin_margin = PROP_LOD_FADE
-		mmi.visibility_range_end = PROP_LOD_PROXY_END
-		mmi.visibility_range_end_margin = PROP_LOD_FADE * 2.5
-		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		proxy = StaticBody3D.new()
+		proxy.set_script(g.proxy_script)
+		var col := CollisionShape3D.new()
+		var sphere := SphereShape3D.new()
+		sphere.radius = sphere_r
+		col.shape = sphere
+		proxy.add_child(col)
+		add_child(proxy)
+	var surface_normal: Vector3 = pt.origin.normalized()
+	proxy.position = pt.origin + surface_normal * (sphere_r * 0.65)
+	# Build the MMI list the proxy uses to zero its visual on destroy
+	var mmis_for_setup: Array = []
+	if g.high: mmis_for_setup.append(g.high)
+	mmis_for_setup.append(g.low)
+	for p in g.paired_with_high: mmis_for_setup.append(p)
+	for p in g.paired_with_low: mmis_for_setup.append(p)
+	proxy.call("setup", mmis_for_setup, idx, g.res_type)
+	proxy.call("set_combat_active", true)
+	g.proxies[idx] = proxy
+
+func _release_proxy(g: Dictionary, idx: int) -> void:
+	var proxy = g.proxies[idx]
+	if proxy == null:
+		return
+	if is_instance_valid(proxy):
+		proxy.call("set_combat_active", false)
+		g.pool.append(proxy)
+	g.proxies[idx] = null
 
 func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 	points = _filter_destroyed_props(points)
@@ -703,16 +897,16 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 			if not _mobile_perf and i % 30 == 0:
 				_spawn_leaf_emitter(points[i].origin, t_col)
 		
-		var mti_h = MultiMeshInstance3D.new(); mti_h.multimesh = mm_h; mti_h.material_override = foliage_mat; add_child(mti_h)
-		var mti_m = MultiMeshInstance3D.new(); mti_m.multimesh = mm_m; mti_m.material_override = foliage_mat; add_child(mti_m)
-		var mti_t = MultiMeshInstance3D.new(); mti_t.multimesh = mt_th; mti_t.material_override = trunk_mat; add_child(mti_t)
-		
-		# Unified LOD Policy Stacks
-		_apply_planetary_lod_policy(mti_h, true)
-		_apply_planetary_lod_policy(mti_m, false)
-		_apply_planetary_lod_policy(mti_t, true) # Trunks only visible in High-Detail zone
+		var mti_h = MultiMeshInstance3D.new(); mti_h.multimesh = mm_h; mti_h.material_override = foliage_mat
+		mti_h.gi_mode = GeometryInstance3D.GI_MODE_DISABLED; mti_h.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF; add_child(mti_h)
+		var mti_m = MultiMeshInstance3D.new(); mti_m.multimesh = mm_m; mti_m.material_override = foliage_mat
+		mti_m.gi_mode = GeometryInstance3D.GI_MODE_DISABLED; mti_m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF; add_child(mti_m)
+		var mti_t = MultiMeshInstance3D.new(); mti_t.multimesh = mt_th; mti_t.material_override = trunk_mat
+		mti_t.gi_mode = GeometryInstance3D.GI_MODE_DISABLED; mti_t.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF; add_child(mti_t)
 
-		_spawn_prop_proxies(points, [mti_h, mti_m, mti_t], "Wood", 200, 40.0)
+		# High-detail-tier tree: low foliage shows mid-range, high foliage + trunk
+		# show on close approach. 40m proxy sphere matches the 6m trunk + 10m crown.
+		_register_prop_group(mti_h, mti_m, [mti_t], [], points, "Wood", 40.0)
 	else:
 		# Mid/Far Chunk: Single simplified MultiMesh, per-archetype mesh.
 		if not _c_fol_l_by_arch.has(archetype):
@@ -732,12 +926,14 @@ func _spawn_tree_lods(points: Array[Transform3D]) -> void:
 			mm.set_instance_transform(i, points[i]); mm.set_instance_color(i, t_col)
 			mm_t.set_instance_transform(i, points[i])
 		
-		var mti = MultiMeshInstance3D.new(); mti.multimesh = mm; mti.material_override = foliage_mat; add_child(mti)
-		var mti_tr = MultiMeshInstance3D.new(); mti_tr.multimesh = mm_t; mti_tr.material_override = trunk_mat; add_child(mti_tr)
-		
-		# Far-Distance LOD Policy
-		_apply_planetary_lod_policy(mti, false)
-		_apply_planetary_lod_policy(mti_tr, false)
+		var mti = MultiMeshInstance3D.new(); mti.multimesh = mm; mti.material_override = foliage_mat
+		mti.gi_mode = GeometryInstance3D.GI_MODE_DISABLED; mti.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF; add_child(mti)
+		var mti_tr = MultiMeshInstance3D.new(); mti_tr.multimesh = mm_t; mti_tr.material_override = trunk_mat
+		mti_tr.gi_mode = GeometryInstance3D.GI_MODE_DISABLED; mti_tr.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF; add_child(mti_tr)
+
+		# Mid/far-tier tree: only the low-detail mesh exists. high=null means the
+		# group never upgrades to high state. Trunk pairs with low.
+		_register_prop_group(null, mti, [], [mti_tr], points, "Wood", 40.0)
 
 func _calculate_forest_aabb(points: Array[Transform3D]) -> AABB:
 	if points.is_empty(): return AABB()
@@ -889,7 +1085,8 @@ func _spawn_leaf_emitter(center: Vector3, col: Color) -> void:
 	p.visibility_aabb = AABB(Vector3(-50,-150,-50), Vector3(100,300,100))
 	# Visibility range bumped from 250 → 600 so leaves are visible at normal
 	# flight distances rather than only when the camera is right next to a tree.
-	p.visibility_range_end = 600.0; p.visibility_range_end_margin = 120.0
+	# Margin widened so camera swings don't pop emitters at the boundary.
+	p.visibility_range_end = 600.0; p.visibility_range_end_margin = 350.0
 	p.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 
 	add_child(p)
@@ -994,7 +1191,7 @@ func _spawn_grass(points: Array[Transform3D]) -> void:
 	if is_instance_valid(planet) and not planet.get("grass_material"): mat.shader = _get_grass_shader()
 	mmi_h.material_override = mat
 	
-	mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 200.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 500.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(mmi_h); _flora_nodes.append(mmi_h)
 	
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:

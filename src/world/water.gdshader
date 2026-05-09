@@ -70,7 +70,14 @@ void fragment() {
 	float wt = TIME;
 	float shore = v_shore;
 
-	float SCALE = 0.0018;
+	// Scale must be inversely proportional to planet radius so the cells-per-
+	// planet ratio stays constant regardless of how big or small the planet
+	// is. SCALE * radius = 1800 was the original tuning on a 1 M-radius
+	// planet. Smaller planets resampled with a fixed SCALE made each noise
+	// cell occupy a much larger fraction of the planet's surface, which made
+	// the wave_cel level-sets read as huge tiled circles with diamond-shaped
+	// negative space between them ("the diamonds" the player sees).
+	float SCALE = 1800.0 / max(radius, 1.0);
 	vec2 ocean_uv = v_local_pos.xz * SCALE;
 
 	float wave_cel = 0.0;
@@ -111,7 +118,10 @@ void fragment() {
 
 	// Shimmer — also softened.  step() was creating sharp-edged glitter
 	// patches that read as small diamond highlights against the ocean.
-	float shimmer_n = fbm(v_local_pos.xz * 0.009 + vec2(wt * 0.4, -wt * 0.35));
+	// Same planet-radius scaling as the main wave noise — original constant
+	// 0.009 corresponds to 0.009 * 1M = 9000 on a 1 M-radius planet.
+	float shimmer_scale = 9000.0 / max(radius, 2.0);
+	float shimmer_n = fbm(v_local_pos.xz * shimmer_scale + vec2(wt * 0.4, -wt * 0.35));
 	float shimmer = smoothstep(0.74, 0.88, shimmer_n)
 				  * smoothstep(0.35, 0.55, dot(v_world_normal, vec3(0.0, 1.0, 0.0)));
 	shimmer *= smoothstep(0.45, 0.0, shore);
@@ -131,10 +141,20 @@ void fragment() {
 	ROUGHNESS = 0.08;
 }
 
+// Screen-space anti-aliased step — matches the land shader (triplanar_local).
+// Plain step() at fixed dot-product thresholds produces visible bands across
+// the lit hemisphere of a sphere because the threshold becomes a sharp
+// latitude line. fwidth-based smoothstep softens that single-pixel jump
+// without losing the toon-shaded look.
+float aa_step(float edge, float val) {
+	float delta = fwidth(val) * 1.5;
+	return smoothstep(edge - delta, edge + delta, val);
+}
+
 void light() {
 	float l_level = dot(NORMAL, LIGHT);
-	float t_shadow = step(0.15, l_level);
-	float t_bright = step(0.65, l_level);
+	float t_shadow = aa_step(0.15, l_level);
+	float t_bright = aa_step(0.65, l_level);
 	vec3 shadow_col = ALBEDO * 0.60;
 	vec3 lit_col    = ALBEDO * 0.90;
 	vec3 bright_col = ALBEDO * 1.05;
@@ -145,8 +165,8 @@ void light() {
 	// Tight believable sun glint, not a screen-wide hot spot.
 	vec3 H = normalize(LIGHT + VIEW);
 	float NdotH = max(dot(NORMAL, H), 0.0);
-	float spec_mid  = step(0.985, NdotH);
-	float spec_core = step(0.996, NdotH);
+	float spec_mid  = aa_step(0.985, NdotH);
+	float spec_core = aa_step(0.996, NdotH);
 	vec3 sun_halo = LIGHT_COLOR * vec3(1.0, 0.92, 0.70) * 0.7;
 	vec3 sun_core = vec3(1.0, 0.98, 0.90) * 1.3;
 	float lit_mask = t_shadow * ATTENUATION;

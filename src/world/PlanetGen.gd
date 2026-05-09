@@ -357,12 +357,6 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
 
-	void vertex() {
-		v_local_pos = VERTEX;
-		v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-		v_normal = normalize(VERTEX);
-	}
-
 	// Hash-based value noise. Old form was `fract(p.x*p.y*p.z*(p.x+p.y+p.z))`
 	// — symmetric in (x,y,z) and near-zero along the x+y+z=0 plane, so cloud
 	// cells aligned to octahedral diagonals and read as rhombuses on the
@@ -388,45 +382,95 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		return v; // 0..~1
 	}
 
+	// Multi-scale density combiner — produces small + medium + large puffs
+	// in the same field. WEIGHTED SUM rather than MAX so peaks aren't
+	// sharpened (MAX produces triangular spike-like silhouettes; weighted
+	// sum stays soft and cotton-like).
+	float cloud_density(vec3 dir, float t, float c_scale) {
+		vec3 lp_large = dir * planet_r * c_scale * 0.35 + vec3(t * 0.6, t * 0.3, -t * 0.2);
+		vec3 lp_med   = dir * planet_r * c_scale * 1.0  + vec3(t, t * 0.5, -t * 0.3) + vec3(50.0);
+		vec3 lp_small = dir * planet_r * c_scale * 2.8  + vec3(-t * 0.4, t * 0.6, t * 0.2) + vec3(100.0);
+		float d_large = fbm(lp_large);
+		float d_med   = fbm(lp_med);
+		float d_small = fbm(lp_small);
+		// Weighted blend keeps the density field smooth — large mass dominates
+		// the silhouette, medium adds shape, small breaks up the edges.
+		return d_large * 0.50 + d_med * 0.35 + d_small * 0.15;
+	}
+
+	void vertex() {
+		v_local_pos = VERTEX;
+		v_normal = normalize(VERTEX);
+		// VERTEX DISPLACEMENT: subtle bumps for parallax depth, NOT towers.
+		// The previous bump_height (planet_r * cell_scale * 1200) worked out
+		// to ~120km of displacement on small planets — that's why clouds
+		// looked like triangular mountains. Cap at a fixed fraction (~12%)
+		// of one cell's lateral surface size so bumps stay rounded and
+		// proportional rather than dwarfing the puff.
+		float vt = TIME * 0.015;
+		float v_dens = cloud_density(v_normal, vt, cell_scale);
+		float v_bump = smoothstep(thresh_lo - 0.05, thresh_hi + 0.05, v_dens);
+		float lateral_cell_metres = 1.0 / max(cell_scale, 0.00001);
+		float bump_height = lateral_cell_metres * 0.12;
+		VERTEX += v_normal * v_bump * bump_height;
+		v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	}
+
 	void fragment() {
-		// Smooth continuous drift — old shader quantized TIME to 1/8 s steps
-		// then multiplied by 1500, causing visible cloud teleportation
-		// 8× per second (the 'flashing diamonds' bug).
 		float t = TIME * 0.015;
-
-		// Noise frequency must be high enough that many cells fit inside one
-		// face of the cloud sphere (radial_segments = 64, ring_segments = 32).
-		// Otherwise each face becomes uniformly cloudy or clear and reads as a
-		// solid quad in the sky. Sample on the unit-direction × planet_r so the
-		// cell size is in metres regardless of planet scale.
 		vec3 dir = normalize(v_local_pos);
-		vec3 lp = dir * planet_r * cell_scale + vec3(t, t * 0.5, -t * 0.3);
-		float macro = fbm(lp);
-		float puff  = fbm(lp * 3.7 + vec3(100.0));
-		float density = macro * 0.7 + puff * 0.3;          // ~0..1 typical 0.3..0.7
 
-		// Coverage band — per-planet thresholds let some worlds be sparse
-		// (top 15-20% of density values pass) and others be near-overcast
-		// (top 50%+ pass).
-		float coverage = smoothstep(thresh_lo, thresh_hi, density);
+		// Multi-scale density: small + medium + large puffs in the same field.
+		float density = cloud_density(dir, t, cell_scale);
+		// Edge fluff via micro-detail noise — pure variation (mean-centred)
+		// so it doesn't shift the average density up.
+		vec3 lp_micro = dir * planet_r * cell_scale * 8.0 + vec3(t * 0.8, -t * 0.5, t * 0.3);
+		density += fbm(lp_micro) * 0.08 - 0.04;
+
+		// Coverage smoothstep — slight lower-edge softening for wispy edges
+		// without flooding the whole sphere with low-density haze. The
+		// previous 0.50 lower-edge expansion was letting nearly every
+		// fragment pass with some coverage, which is what painted the
+		// planet white-on-everything.
+		float thresh_feather = max(thresh_hi - thresh_lo, 0.001);
+		float coverage = smoothstep(thresh_lo - thresh_feather * 0.15, thresh_hi, density);
 
 		float cam_dist = length(CAMERA_POSITION_WORLD - v_world_pos);
-		// From far away, lift the floor so only the very densest cores are
-		// visible (keeps the planet silhouette clean from orbit).
 		float proximity = smoothstep(50.0, 30000.0, cam_dist);
 		coverage *= mix(1.0, 0.6, proximity);
 
-		if (coverage < 0.02) discard;
+		if (coverage < 0.01) discard;
+
+		// SOFT self-shadow — much weaker than before. Heavy self-shadow
+		// produces hard interior lines that look like geometric facets,
+		// not cotton. We keep just enough to prevent total flatness.
+		vec3 lp_shadow = dir * planet_r * cell_scale + sun_dir * (cell_scale * planet_r * 0.04);
+		float shadow_density = fbm(lp_shadow + vec3(t, t * 0.5, -t * 0.3));
+		float self_shadow = smoothstep(0.40, 0.80, shadow_density);
 
 		float dot_nl = dot(v_normal, sun_dir);
 		float terminator = smoothstep(-0.2, 0.25, dot_nl);
 
-		// Light tint of the horizon palette for atmospheric variety. Capped at
-		// 15% so pink/magenta sky planets don't show solid pink overcast.
-		vec3 cloud_base = mix(vec3(1.0), horizon_color, 0.15);
+		// Gentle density-driven brightness — kept close to white throughout
+		// so opaque clouds read as bright cumulus, not muddy/brown blobs.
+		// Horizon tint capped at 8% even on shadow_color to prevent strongly
+		// coloured atmospheres from turning the clouds orange/brown.
+		float core = smoothstep(thresh_lo, thresh_hi + 0.20, density);
+		vec3 lit_color    = mix(vec3(1.00), horizon_color, 0.05);
+		vec3 edge_color   = mix(vec3(0.94, 0.95, 0.97), horizon_color, 0.10);
+		vec3 shadow_color = mix(vec3(0.78, 0.80, 0.85), horizon_color, 0.08);
+		vec3 cloud_color = mix(edge_color, lit_color, core);
+		cloud_color = mix(cloud_color, shadow_color, self_shadow * 0.40);
+		// Night-side darkening — only halve, not 70%, so the "shadow side"
+		// reads as dim grey rather than near-black brown.
+		cloud_color = mix(cloud_color * 0.50, cloud_color, terminator);
 
-		ALBEDO = cloud_base;
-		ALPHA = coverage * alpha_max * mix(0.25, 1.0, terminator);
+		ALBEDO = cloud_color;
+		// Edge alpha pulled close to 1.0 so silhouettes are nearly as opaque
+		// as the cloud cores — wispy silhouette comes from the noise field
+		// itself, not from per-fragment alpha falloff.
+		float edge_alpha = mix(0.85, 1.0, core);
+		ALPHA = coverage * alpha_max * edge_alpha * mix(0.55, 1.0, terminator);
 
 		// CELESTIAL HIBERNATION: Fully transparent if extremely distant
 		if (cam_dist > 4000000.0) ALPHA = 0.0;
@@ -440,23 +484,59 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 
 	# ── Per-planet cloud profile ─────────────────────────────────────
 	# Pick blob size and coverage independently from the planet's RNG so
-	# every world feels distinct.  Cell scale spans ~6× (small puffs to
-	# big anvil masses); threshold spans 0.40-0.72 (overcast to wispy).
-	# alpha_max scales mildly with coverage so dense worlds feel thick
-	# and sparse worlds feel hazy rather than just sparser.
-	var cell_scale: float = rng.randf_range(0.0025, 0.014)
-	var thresh_lo: float  = rng.randf_range(0.40, 0.72)
+	# every world feels distinct. Cell scale tuned for ~3–5× larger puffs
+	# than the original range. Lower values mean fewer/larger puffs (since
+	# lp = dir * planet_r * cell_scale samples a smaller noise range across
+	# the sphere). The previous 0.00020 floor produced so few cells per
+	# planet that fbm output stayed near 0.5 and rarely crossed thresh_lo,
+	# so worlds appeared cloudless. 0.0004 keeps ~40 cells per planet —
+	# enough variation to consistently produce visible cloud masses.
+	# Threshold ceiling lowered so even the sparsest worlds show some clouds.
+	var cell_scale: float = rng.randf_range(0.00040, 0.00150)
+	var thresh_lo: float  = rng.randf_range(0.42, 0.62)
 	var thresh_hi: float  = thresh_lo + 0.20
-	# Lower threshold (more coverage) → thinner per-fragment alpha so the
-	# layer doesn't blanket-paint the planet white.  Higher threshold
-	# (sparser blobs) → thicker alpha so the few clouds read as dense.
-	var alpha_max: float  = lerpf(0.85, 0.55, smoothstep(0.40, 0.72, thresh_lo))
+	# Alpha range tuned for "almost no transparency" — clouds read clearly as
+	# their own layer over the planet surface. Sparse worlds get the higher
+	# end (0.95, near-solid puffs); overcast worlds get the lower end (0.85)
+	# so the layer doesn't completely paint over the silhouette when many
+	# puffs overlap. Edge translucency in the shader handles the wispy
+	# silhouette feel — these uniforms control the core opacity.
+	var alpha_max: float  = lerpf(0.95, 0.85, smoothstep(0.42, 0.62, thresh_lo))
 	c_inst.material_override.set_shader_parameter("cell_scale", cell_scale)
 	c_inst.material_override.set_shader_parameter("thresh_lo", thresh_lo)
 	c_inst.material_override.set_shader_parameter("thresh_hi", thresh_hi)
 	c_inst.material_override.set_shader_parameter("alpha_max", alpha_max)
 	c_inst.visibility_range_end = PROXIMITY_CUTOFF; c_inst.visibility_range_end_margin = 100000.0; c_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(c_inst)
+
+	# 1b. UPPER WISP LAYER — second cloud sphere at higher altitude with
+	# smaller, sparser puffs. As the player flies past, the upper layer
+	# parallaxes against the lower layer, giving real depth perception.
+	var c_mesh_hi = SphereMesh.new()
+	c_mesh_hi.radius = planet_radius + 6500.0
+	c_mesh_hi.height = c_mesh_hi.radius * 2.0
+	c_mesh_hi.radial_segments = 64; c_mesh_hi.rings = 32
+	var c_inst_hi = MeshInstance3D.new()
+	c_inst_hi.mesh = c_mesh_hi
+	c_inst_hi.material_override = ShaderMaterial.new()
+	c_inst_hi.material_override.shader = c_shader
+	# Render the upper layer AFTER the lower so it composites on top.
+	c_inst_hi.material_override.render_priority = 6
+	c_inst_hi.material_override.set_shader_parameter("sun_dir", sun_dir)
+	c_inst_hi.material_override.set_shader_parameter("horizon_color", Vector3(sky_horizon_color.r, sky_horizon_color.g, sky_horizon_color.b))
+	c_inst_hi.material_override.set_shader_parameter("planet_r", planet_radius)
+	# Upper layer: smaller cells, slightly higher threshold (sparser), and
+	# proportional alpha so it reads as wisps without disappearing entirely.
+	# Previous +0.10 threshold offset made the upper layer often invisible
+	# because fbm rarely peaked above the offset value — keep at +0.04 max.
+	c_inst_hi.material_override.set_shader_parameter("cell_scale", cell_scale * 2.5)
+	c_inst_hi.material_override.set_shader_parameter("thresh_lo", min(thresh_lo + 0.04, 0.65))
+	c_inst_hi.material_override.set_shader_parameter("thresh_hi", min(thresh_hi + 0.04, 0.85))
+	c_inst_hi.material_override.set_shader_parameter("alpha_max", alpha_max * 0.85)
+	c_inst_hi.visibility_range_end = PROXIMITY_CUTOFF
+	c_inst_hi.visibility_range_end_margin = 100000.0
+	c_inst_hi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	add_child(c_inst_hi)
 	
 	# 2. PLANETARY RINGS (50% chance per planet)
 	var ring_chance: float = 0.5
@@ -844,14 +924,15 @@ func _process(_delta: float) -> void:
 	var dist_to_player = player.global_position.distance_to(global_position)
 	
 	# FRUSTUM HIBERNATION: Disabled if inside the planetary sphere of influence
-	var cam = get_viewport().get_camera_3d()
+	# Reference: ship position/forward (not camera) so SpringArm jitter and
+	# rapid camera swings don't flip planet faces in/out of view.
 	var should_hibernate = false
 	var safety_dist = planet_radius * 12.0 # ACE: Drastically increased to prevent 'White Sphere' syndrome
-	if cam and dist_to_player > safety_dist: 
-		var to_planet = (global_position - cam.global_position).normalized()
-		var cam_fwd = -cam.global_transform.basis.z
-		var dot = cam_fwd.dot(to_planet)
-		
+	if dist_to_player > safety_dist:
+		var to_planet = (global_position - player.global_position).normalized()
+		var ship_fwd = -player.global_transform.basis.z
+		var dot = ship_fwd.dot(to_planet)
+
 		# ACE HYSTERESIS: Wider margins to ensure horizons don't pop
 		if faces_hidden: should_hibernate = dot < -0.3 # Show earlier
 		else: should_hibernate = dot < -0.8 # Hide later
@@ -999,6 +1080,15 @@ func get_terrain_elevation(sn: Vector3) -> float:
 	return elev
 
 func _ensure_impostor_active(active: bool) -> void:
+	# DEBUG: impostor permanently hidden — testing whether the visible repeating
+	# circle/diamond pattern across planet surfaces is the impostor's noise()
+	# level-set rendering (which uses unit-direction-space frequencies and
+	# would produce distinct cell patterns regardless of planet size). The
+	# impostor is normally only meant to render at very far distances, but
+	# at small planet radii the QuadTree may rarely subdivide chunks and the
+	# impostor could be the dominant visible layer. Restore by removing the
+	# `active = false` line below once confirmed.
+	active = false
 	if active:
 		if not impostor:
 			var script = load("res://src/world/PlanetImpostor.gd")
@@ -1054,8 +1144,13 @@ class QuadTreeNode:
 		var center_norm: Vector3 = face_pos.normalized()
 		var center_pos: Vector3 = face.planet.global_position + center_norm * face.planet.planet_radius
 		var dist: float = player_pos.distance_to(center_pos)
-		
+
 		# AGGRESSIVE HORIZON: Subdivide at 3.5x the scale distance
+		# (Per-prop spawn hysteresis is handled in PlanetChunk.gd; the QuadTree
+		# itself stays on the original threshold since subdividing has paired
+		# split/merge handshakes that already prevent visible gaps when timing
+		# is correct — adding chunk-level hysteresis introduced rectangular
+		# holes at LOD transitions and is not needed for prop stability.)
 		var threshold: float = face.planet.planet_radius * (scale * 3.5) * face.planet.subdivision_bias
 		if dist < threshold and lod < face.planet.max_lod:
 			if children.is_empty():

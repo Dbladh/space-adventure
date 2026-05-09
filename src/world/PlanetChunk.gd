@@ -1206,7 +1206,12 @@ func _spawn_grass(points: Array[Transform3D]) -> void:
 	if is_instance_valid(planet) and not planet.get("grass_material"): mat.shader = _get_grass_shader()
 	mmi_h.material_override = mat
 	
-	mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 500.0; mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	# Shorter view range on mobile — half the fragments shaded per planet.
+	if _mobile_perf:
+		mmi_h.visibility_range_end = 400.0; mmi_h.visibility_range_end_margin = 200.0
+	else:
+		mmi_h.visibility_range_end = 800.0; mmi_h.visibility_range_end_margin = 500.0
+	mmi_h.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 	add_child(mmi_h); _flora_nodes.append(mmi_h)
 	
 func _spawn_city_buildings(points: Array[Transform3D]) -> void:

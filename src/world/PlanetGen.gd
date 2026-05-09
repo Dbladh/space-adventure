@@ -1352,6 +1352,10 @@ func _init_shared_materials() -> void:
 	if w_shader:
 		water_material.shader = w_shader
 		water_material.set_shader_parameter("radius", planet_radius)
+		# Mobile: skip the high-frequency detail FBM in waves and the
+		# shimmer FBM (single value_noise instead). ~6 hash() ops saved
+		# per ocean fragment.
+		water_material.set_shader_parameter("mobile_simple", mobile_perf)
 	
 	# FOLIAGE MATERIALS
 	foliage_material = ShaderMaterial.new()
@@ -1362,6 +1366,8 @@ func _init_shared_materials() -> void:
 	foliage_material.set_shader_parameter("leaf_texture", load("res://assets/textures/tree_leaves_texture.png"))
 	foliage_material.set_shader_parameter("normal_map", load("res://assets/textures/tree_leaves_texture_normal.png"))
 	foliage_material.set_shader_parameter("biolum_intensity", 1.0 if has_bioluminescence else 0.0)
+	# Mobile cheap path: simpler light(), shorter dither fade range.
+	foliage_material.set_shader_parameter("mobile_simple", mobile_perf)
 	
 	trunk_material = ShaderMaterial.new()
 	trunk_material.shader = load("res://src/shaders/trunk_toon.gdshader")

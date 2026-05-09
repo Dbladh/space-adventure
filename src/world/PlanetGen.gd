@@ -1290,9 +1290,11 @@ class QuadTreeNode:
 		else:              chunk.resolution = 32
 		var planet_mobile_perf: bool = bool(face.planet.get("mobile_perf")) if face.planet else false
 		if planet_mobile_perf:
-			if scale > 0.05:   chunk.resolution = 12
-			elif scale > 0.01: chunk.resolution = 18
-			else:              chunk.resolution = 24
+			# Halved from 12/18/24. ~55% fewer verts per chunk; collision
+			# baking shrinks the same fraction so the queue drains faster.
+			if scale > 0.05:   chunk.resolution = 8
+			elif scale > 0.01: chunk.resolution = 12
+			else:              chunk.resolution = 16
 		chunk.planet_seed = face.planet.planet_seed
 		chunk.archetype = face.planet.archetype
 		

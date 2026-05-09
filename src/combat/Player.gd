@@ -221,14 +221,20 @@ func _setup_cloud_cockpit_particles() -> void:
 	# rather than a few isolated streaks. 250 active particles covers a
 	# substantial portion of the screen at any given time given the
 	# 1.8-second lifetime.
-	_cloud_cockpit_particles.amount = 250
+	# Mobile: ~third the particle count, smaller AABB. Density still ramps
+	# quadratically toward the surface via amount_ratio so the volume still
+	# feels denser when low.
+	_cloud_cockpit_particles.amount = 80 if _mobile_perf else 250
 	_cloud_cockpit_particles.lifetime = 1.8
 	_cloud_cockpit_particles.preprocess = 0.8
 	_cloud_cockpit_particles.local_coords = false  # particles linger in world space
 	_cloud_cockpit_particles.emitting = false
 	# AABB matches the emission radius so the particles are never frustum-
 	# culled when the camera is anywhere within that cloud volume.
-	_cloud_cockpit_particles.visibility_aabb = AABB(Vector3(-700, -700, -700), Vector3(1400, 1400, 1400))
+	if _mobile_perf:
+		_cloud_cockpit_particles.visibility_aabb = AABB(Vector3(-400, -400, -400), Vector3(800, 800, 800))
+	else:
+		_cloud_cockpit_particles.visibility_aabb = AABB(Vector3(-700, -700, -700), Vector3(1400, 1400, 1400))
 
 	var pmat := ParticleProcessMaterial.new()
 	pmat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
@@ -857,14 +863,17 @@ func _process_ace_flight(delta: float) -> void:
 	# atmospheric haze / dust would naturally be thickest) and thinning out
 	# as altitude increases until they fade to nothing past 12 km.
 	if _cloud_cockpit_particles:
-		var in_atmo_band: bool = target_planet != null and true_altitude < 12000.0 and true_altitude > -200.0
+		# Mobile: halve the active altitude band so the emitter is off in the
+		# upper atmosphere where the density ramp is barely visible anyway.
+		var atmo_top: float = 6000.0 if _mobile_perf else 12000.0
+		var in_atmo_band: bool = target_planet != null and true_altitude < atmo_top and true_altitude > -200.0
 		if _cloud_cockpit_particles.emitting != in_atmo_band:
 			_cloud_cockpit_particles.emitting = in_atmo_band
 		if in_atmo_band:
-			# amount_ratio: 1.0 at ground level, 0.0 at 12 km. Apply a slight
-			# curve (square) so density ramps up faster as you descend rather
-			# than scaling perfectly linearly.
-			var alt_norm: float = clamp(true_altitude / 12000.0, 0.0, 1.0)
+			# amount_ratio: 1.0 at ground level, 0.0 at the band top. Apply a
+			# slight curve (square) so density ramps up faster as you descend
+			# rather than scaling perfectly linearly.
+			var alt_norm: float = clamp(true_altitude / atmo_top, 0.0, 1.0)
 			_cloud_cockpit_particles.amount_ratio = (1.0 - alt_norm) * (1.0 - alt_norm)
 	if target_planet:
 		surface_assist = clamp(1.0 - (true_altitude / 9000.0), 0.0, 1.0)

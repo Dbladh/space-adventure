@@ -79,7 +79,9 @@ var shake_v: Vector3 = Vector3.ZERO
 var shake_intensity: float = 0.0
 var last_alt: float = 100000.0     # Atmospheric barrier detection
 var reentry_timer: float = 0.0     # Sustained transition shake timer
-var reentry_intensity: float = 0.0 
+var reentry_intensity: float = 0.0
+var _atmo_enter_sfx: AudioStreamPlayer = null  # plays on each cloud-band crossing
+var _in_atmo_band: bool = false                # hysteresis state: true while inside the cloud band
 var _last_trail_pos: Vector3 = Vector3.ZERO
 var heat_glow_mat: StandardMaterial3D = null
 var reentry_vignette: ColorRect = null
@@ -176,6 +178,13 @@ func _ready() -> void:
 	# Load once at startup, not every fire event
 	bolt_script = load("res://src/combat/LaserBolt.gd")
 	if bolt_script: print("--- GUNSMITH: LaserBolt loaded OK ---")
+
+	# Atmosphere-entry one-shot. Loaded once and reused — playback is gated
+	# in the BARRIER_ALT crossing block so it only fires on inward descent.
+	_atmo_enter_sfx = AudioStreamPlayer.new()
+	_atmo_enter_sfx.stream = load("res://assets/resources/audio/ship_enter_atmosphere.mp3")
+	_atmo_enter_sfx.bus = "Master"
+	add_child(_atmo_enter_sfx)
 	# ACE TITAN SYNC: Block player until Universe is Ready
 	set_physics_process(false)
 	set_process(false)
@@ -1012,11 +1021,28 @@ func _process_ace_flight(delta: float) -> void:
 		thrust_mapped = 1.0
 		reverse_mapped = 0.0
 	
-	# ATMOSPHERIC BARRIER CROSSING: Sync with 26km Exosphere Boundary
-	const BARRIER_ALT: float = 26000.0
-	if (last_alt > BARRIER_ALT and true_altitude <= BARRIER_ALT) or (last_alt < BARRIER_ALT and true_altitude >= BARRIER_ALT):
-		reentry_timer = 3.0 # Duration
+	# ATMOSPHERIC BARRIER CROSSING: Tied to the cloud-layer top (matches the
+	# outermost shell altitude in PlanetGen._spawn_majestic_clouds_and_rings).
+	# Hysteresis (2 km gap between enter/exit thresholds) prevents flapping
+	# triggers when the ship hovers or oscillates near the boundary.
+	# Same audio fires on both entry and exit; the heat-shake FX matches.
+	# (The 26 km warp/physics threshold elsewhere in this file is unchanged —
+	# that one governs control regimes, not the entry moment.)
+	const ATMO_ENTER_ALT: float = 7500.0
+	const ATMO_EXIT_ALT:  float = 9500.0
+	var was_in_band: bool = _in_atmo_band
+	if _in_atmo_band:
+		if true_altitude > ATMO_EXIT_ALT:
+			_in_atmo_band = false
+	else:
+		if true_altitude < ATMO_ENTER_ALT and target_planet != null:
+			_in_atmo_band = true
+	if was_in_band != _in_atmo_band:
+		reentry_timer = 3.0 # Duration — also gates how long the SFX plays
 		reentry_intensity = 4.5
+		if _atmo_enter_sfx:
+			_atmo_enter_sfx.stop()  # restart cleanly even if a prior crossing's SFX is still tail-decaying
+			_atmo_enter_sfx.play()
 	last_alt = true_altitude
 	
 	# FLIGHT PHYSICS RATIO: Optimized for reentry braking (Exosphere Transition)
@@ -1727,6 +1753,10 @@ func _process(delta: float) -> void:
 		reentry_timer -= delta
 		var intensity = (reentry_timer / 3.0) * reentry_intensity
 		reentry_v = Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * intensity
+		# Cut the entry/exit SFX the instant the shake animation ends so audio
+		# and visual end together, even if the audio clip is longer than 3 s.
+		if reentry_timer <= 0.0 and _atmo_enter_sfx and _atmo_enter_sfx.playing:
+			_atmo_enter_sfx.stop()
 		
 	# VISUAL HEAT GLOW: Animate hull emission based on shake/speed
 	# ACE HEAT HYGIENE: Ensure this resets to zero even when the timer is inactive

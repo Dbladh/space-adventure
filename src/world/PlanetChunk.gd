@@ -395,8 +395,13 @@ func _finalize_generation_on_main() -> void:
 	# ACE: Prop Spawning Throttle
 	# Instead of synchronous instantiation (which freezes the main thread),
 	# we push spawn tasks to the PlanetGen queue.
+	#
+	# LOD-REWRITE PHASE 3: When the planet's PlanetSurfaceStreamer is enabled
+	# it owns all scatter (trees/rocks/grass/minerals) atomically — chunks
+	# only render terrain.  Skipping prop dispatch avoids double-spawning.
 	var planet = get_parent().get_parent()
-	if is_instance_valid(planet) and "prop_spawn_queue" in planet:
+	var streamer_owns_props: bool = is_instance_valid(planet) and "streamer_enabled" in planet and planet.get("streamer_enabled")
+	if not streamer_owns_props and is_instance_valid(planet) and "prop_spawn_queue" in planet:
 		if not _t_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_tree_lods", _t_pts.duplicate()])
 		if not _r_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_rock", _r_pts.duplicate()])
 		if not _g_pts.is_empty(): planet.prop_spawn_queue.append([self, "_spawn_grass", _g_pts.duplicate()])
@@ -462,6 +467,11 @@ func _finalize_dual_materials(a_mesh: ArrayMesh, has_water: bool) -> void:
 				planet.water_material.set_shader_parameter("is_lava", true)
 				planet.water_material.set_shader_parameter("pal_water_base", Color(0.8, 0.2, 0.0))
 				planet.water_material.set_shader_parameter("pal_water_light", Color(1.0, 0.6, 0.1))
+			elif archetype == "OBSIDIAN":
+				# Black-glass world: crimson lava cuts through dark terrain.
+				planet.water_material.set_shader_parameter("is_lava", true)
+				planet.water_material.set_shader_parameter("pal_water_base", Color(0.65, 0.08, 0.02))
+				planet.water_material.set_shader_parameter("pal_water_light", Color(1.0, 0.45, 0.12))
 	
 	self.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		
@@ -558,9 +568,23 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 					m_pts.append([xf, type])
 			else:
 				# 2. NATURE FALLBACK: Standard Biome Scattering
-				if cluster_n > 0.35: # ACE: Raised cluster threshold (narrower groves)
+				# Per-archetype tree-density multiplier — drab F/D worlds have
+				# no trees so they read as dead rock; JUNGLE doubles density;
+				# CRYSTAL grows only crystal spires (no botw foliage), kept
+				# normal so the rare gem clusters still appear.
+				var _nat_scale: float = 1.0
+				match archetype:
+					"BARREN", "ASH", "MUDFLAT", "DESERT", "RUST":
+						_nat_scale = 0.0
+					"JUNGLE":
+						_nat_scale = 2.0
+					"SAVANNA":
+						_nat_scale = 0.4
+					"OBSIDIAN":
+						_nat_scale = 0.2
+				if cluster_n > 0.35 and _nat_scale > 0.0: # ACE: Raised cluster threshold (narrower groves)
 					var grove_strength = clamp((cluster_n - 0.35) * 8.0, 0.0, 1.0)
-					if (h_v % 1000) < int(125 * grove_strength * DebugSettings.tree_mult * _tier_resource_mult):
+					if (h_v % 1000) < int(125 * grove_strength * DebugSettings.tree_mult * _tier_resource_mult * _nat_scale):
 						var h_t = get_terrain_elevation(cp)
 						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
 							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
@@ -1497,10 +1521,18 @@ func _add_lush_blob(st: SurfaceTool, center: Vector3, size: float, is_high: bool
 
 func _build_varied_foliage(is_high: bool, complexity: int) -> ArrayMesh:
 	match archetype:
-		"DESERT": return _build_cactus_mesh(is_high)
-		"VOLCANIC", "ABYSS": return _build_crystal_spire(is_high)
-		"FROZEN": return _build_ice_fan(is_high)
-		"TOXIC", "CANDY", "RADIATED", "LUSH", _: 
+		"DESERT", "RUST", "SAVANNA": return _build_cactus_mesh(is_high)
+		"VOLCANIC", "ABYSS", "OBSIDIAN": return _build_crystal_spire(is_high)
+		"FROZEN", "ALPINE", "AURORA": return _build_ice_fan(is_high)
+		"CRYSTAL": return _build_crystal_spire(is_high)
+		"BARREN", "ASH", "MUDFLAT":
+			# Drab worlds: skip flora entirely. Foliage queue still runs but the
+			# returned mesh is a tiny no-op so MultiMesh draw calls stay cheap.
+			return _build_ice_fan(is_high)
+		_:
+			# LUSH, JUNGLE, CANDY, CORAL, SULFUR, AMETHYST, TOXIC, RADIATED,
+			# SKY_ISLES, IRIDESCENT all use the BOTW-style foliage with
+			# archetype palette colours doing the visual differentiation.
 			return _build_botw_foliage(is_high, complexity)
 
 func _build_cactus_mesh(is_high: bool) -> ArrayMesh:

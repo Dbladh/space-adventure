@@ -50,10 +50,25 @@ func _ready() -> void:
 	monitoring = true
 	monitorable = false  # Bolts don't need to be detectable by others
 	collision_layer = 0  # The bolt itself occupies no layer
-	collision_mask = 1   # Watch layer 1: StaticBody3D asteroids/rocks/trees
+	# Layer 1 = WORLD/asteroids, Layer 6 = SurfacePropProxy combat bodies (legacy),
+	# Layer 3 = MineableResource. Without these bits the bolt's body_entered path
+	# is dead for scatter; only Player.gd's auxiliary raycast registered hits.
+	collision_mask = (1 << 0) | (1 << 2) | (1 << 5)
 	
-	# SIGNAL: Fire when we overlap a physics body
+	# SIGNAL: Fire when we overlap a physics body.
+	# body_shape_entered carries the body_shape_index, which the new
+	# PlanetSurfaceStreamer cell bodies use to route damage to the right
+	# prop slot (one CollisionShape3D per scatter prop).  body_entered is
+	# still connected for legacy mineable nodes (asteroids, MineableResource)
+	# that own a single shape and a take_damage method — body_shape_entered
+	# would fire for those too, but body_entered keeps the existing path
+	# unchanged during the migration.
+	body_shape_entered.connect(_on_body_shape_entered)
 	body_entered.connect(_on_body_entered)
+	# Track bodies whose damage we already routed via body_shape_entered so
+	# the body_entered path doesn't double-hit them (body_shape_entered
+	# always fires before body_entered for the same overlap).
+	set_meta("_handled_bodies", {})
 	set_process(true)
 
 func _process(_delta: float) -> void:
@@ -66,7 +81,34 @@ func _process(_delta: float) -> void:
 	# Movement is now managed by the ship's projectile pool to support 
 	# relativistic physics and homing logic without competing vectors.
 
+func _on_body_shape_entered(_body_rid: RID, body: Node, body_shape_index: int, _local_shape_index: int) -> void:
+	# Streamer-owned cell bodies route damage per-shape so a single big body
+	# can hold many destructible props.  apply_damage_to_shape returns 0=miss
+	# (bolt passes through), 1=wounded, 2=killed.  Either non-zero result
+	# explodes + despawns the bolt and marks this body as handled to
+	# suppress the body_entered signal that always fires alongside.
+	if body == null or not is_instance_valid(body):
+		return
+	if not body.has_method("apply_damage_to_shape"):
+		return
+	if body.is_in_group("Player"):
+		return
+	var result: int = int(body.call("apply_damage_to_shape", body_shape_index, 1.0))
+	if result == 0:
+		return
+	var handled: Dictionary = get_meta("_handled_bodies", {})
+	handled[body.get_instance_id()] = true
+	set_meta("_handled_bodies", handled)
+	_trigger_explosion(body)
+	queue_free()
+
 func _on_body_entered(body: Node) -> void:
+	if body == null or not is_instance_valid(body):
+		return
+	# If body_shape_entered already routed this hit, don't double-fire.
+	var handled: Dictionary = get_meta("_handled_bodies", {})
+	if handled.has(body.get_instance_id()):
+		return
 	# Try to find a destroyable target. Allow asteroids and any tagged Destructible
 	var destructible = false
 	if body is StaticBody3D: destructible = true

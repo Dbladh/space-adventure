@@ -632,6 +632,22 @@ func _refresh_planets_ui() -> void:
 		var seed_val: int = PlanetSeedKitchen.make_seed(entry.r1, entry.r2, entry.r3)
 		var rank: Dictionary = PlanetSeedKitchen.rank_planet(entry.r1, entry.r2, entry.r3, seed_val)
 
+		# ── Planet thumbnail (32x32 procedural icon) ────────────────────
+		var thumb := TextureRect.new()
+		thumb.texture = _planet_thumbnail_for(entry)
+		thumb.custom_minimum_size = Vector2(40, 40)
+		thumb.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		thumb.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # crisp pixel-art look
+		row.add_child(thumb)
+
+		# ── Planet name ────────────────────────────────────────────────
+		var name_lbl := Label.new()
+		name_lbl.text = _display_planet_name(entry)
+		name_lbl.add_theme_font_size_override("font_size", 18)
+		name_lbl.add_theme_color_override("font_color", Color(0.9, 0.92, 1.0))
+		name_lbl.custom_minimum_size.x = 180
+		row.add_child(name_lbl)
+
 		# ── Rank Badge ──────────────────────────────────────────────────
 		var badge_panel := PanelContainer.new()
 		var badge_sb := StyleBoxFlat.new()
@@ -650,7 +666,7 @@ func _refresh_planets_ui() -> void:
 		badge_panel.add_child(badge_lbl)
 		row.add_child(badge_panel)
 
-		# ── Planet name + combo ─────────────────────────────────────────
+		# ── Combo (resource recipe) ────────────────────────────────────
 		var lbl := Label.new()
 		lbl.text = combo
 		lbl.add_theme_font_size_override("font_size", 18)
@@ -1036,13 +1052,14 @@ func _on_forge_planet() -> void:
 			inv.consume(res, cost[res])
 
 		# 2. Spawn planet immediately (it will start generating in background)
+		# Rank + resources are computed FIRST and passed into _spawn_planet_node
+		# so they're set on the node before add_child triggers _ready() — otherwise
+		# PlanetGen would always fall through to the C-tier archetype pool fallback.
 		var pos_salt: int = hash(pos.round()) & 0x7FFFFFFF
 		var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3) + (_active_planets.size() * 777) + pos_salt
-		var planet_node := _spawn_planet_node(seed_val, pos, p_name)
-		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
-		planet_node.set("planet_resources", planet_res)
 		var rank: Dictionary = PlanetSeedKitchen.rank_planet(r1, r2, r3, seed_val)
-		planet_node.set("planet_rank", String(rank.get("label", "")))
+		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
+		var planet_node := _spawn_planet_node(seed_val, pos, p_name, String(rank.get("label", "")), planet_res)
 		# (Impostor activation is deferred to the cinematic — the planet stays
 		# hidden until the flash peaks and is revealed there.)
 
@@ -1109,7 +1126,136 @@ func _format_cost(cost: Dictionary) -> String:
 		parts.append(str(cost[r]) + "× " + ResourceRegistry.get_abbrev(r))
 	return ",  ".join(parts)
 
-func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String) -> Node3D:
+# Strip the engine "Planet_" prefix so the UI shows just the human-friendly
+# bit ("Cydon", "Aldebaran") instead of "Planet_Cydon".  Falls back to the
+# combo abbreviation if the planet was freed or never got named.
+func _display_planet_name(entry: Dictionary) -> String:
+	var node = entry.get("node", null)
+	if node != null and is_instance_valid(node):
+		var raw: String = String(node.name)
+		if raw.begins_with("Planet_"):
+			raw = raw.substr(7)
+		return raw.replace("_", " ")
+	return ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2)
+
+# Procedural 32×32 thumbnail derived from the planet's palette.  Generated
+# on first call and cached on the entry so repeated UI refreshes don't
+# regenerate the image.  Doesn't render the actual planet — that would need
+# a SubViewport + camera per slot — instead we paint a stylized icon using
+# the planet's own grass/water/sky colors, which reads as a recognizable
+# "summary card" of what the world looks like up close.
+func _planet_thumbnail_for(entry: Dictionary) -> ImageTexture:
+	if entry.has("thumbnail") and entry.thumbnail != null:
+		return entry.thumbnail
+
+	var node = entry.get("node", null)
+	var grass_col: Color = Color(0.30, 0.65, 0.30)
+	var mount_col: Color = Color(0.55, 0.50, 0.45)
+	var water_col: Color = Color(0.10, 0.40, 0.80)
+	var sky_col: Color   = Color(0.05, 0.05, 0.08)
+	var planet_seed: int = 0
+	var has_basin: bool = true  # most planets have water; archetype-aware fallback below
+	if node != null and is_instance_valid(node):
+		if "pal_grass_col" in node: grass_col = node.get("pal_grass_col")
+		if "pal_mount_col" in node: mount_col = node.get("pal_mount_col")
+		if "pal_water_base" in node: water_col = node.get("pal_water_base")
+		if "sky_horizon_color" in node: sky_col = node.get("sky_horizon_color")
+		if "planet_seed" in node: planet_seed = int(node.get("planet_seed"))
+		# Dry-world archetypes don't have surface water.
+		if "archetype" in node:
+			var arche: String = String(node.get("archetype"))
+			if arche in ["DESERT", "RUST", "BARREN", "ASH", "MUDFLAT", "VOLCANIC", "OBSIDIAN"]:
+				has_basin = false
+
+	var size: int = 32
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+
+	# Deterministic seed → same planet always renders the same icon.
+	var seed_int: int = planet_seed if planet_seed != 0 else hash(str(entry.r1) + str(entry.r2) + str(entry.r3))
+
+	# Two FBM noise layers drive an irregular continent mask — coarse for the
+	# overall landmass shape, fine for the jagged coastlines.  Using noise
+	# instead of overlapping circles is what turns a "round blob" into
+	# something that reads as a continent.
+	var noise_continent := FastNoiseLite.new()
+	noise_continent.seed = seed_int
+	noise_continent.noise_type = FastNoiseLite.TYPE_PERLIN
+	noise_continent.frequency = 0.12
+	noise_continent.fractal_type = FastNoiseLite.FRACTAL_FBM
+	noise_continent.fractal_octaves = 4
+	noise_continent.fractal_lacunarity = 2.1
+	noise_continent.fractal_gain = 0.55
+
+	var noise_detail := FastNoiseLite.new()
+	noise_detail.seed = seed_int + 7919
+	noise_detail.noise_type = FastNoiseLite.TYPE_PERLIN
+	noise_detail.frequency = 0.32
+	noise_detail.fractal_type = FastNoiseLite.FRACTAL_FBM
+	noise_detail.fractal_octaves = 3
+	noise_detail.fractal_lacunarity = 2.0
+	noise_detail.fractal_gain = 0.5
+
+	var cx: float = float(size) * 0.5
+	var cy: float = float(size) * 0.5
+	var r: float = float(size) * 0.46
+
+	# Thresholds — dry worlds get more land coverage so the icon doesn't
+	# look mostly water on a planet that has none.
+	var land_threshold: float = 0.0 if has_basin else -0.18
+	var mountain_threshold: float = 0.20  # above this on top of land = mountain colour
+
+	for y in range(size):
+		for x in range(size):
+			var dx: float = float(x) + 0.5 - cx
+			var dy: float = float(y) + 0.5 - cy
+			var d: float = sqrt(dx * dx + dy * dy)
+			if d > r:
+				continue
+
+			# Combine coarse continent shape with finer coastline jitter.
+			var n: float = noise_continent.get_noise_2d(float(x), float(y)) \
+				+ noise_detail.get_noise_2d(float(x), float(y)) * 0.35
+			# Fall-off near the disc edge so continents don't run off the
+			# visible globe — produces oceans at the limb regardless of noise.
+			var rim_t: float = clampf(d / r, 0.0, 1.0)
+			n -= pow(rim_t, 3.0) * 0.45
+
+			var base: Color
+			if has_basin and n < land_threshold:
+				base = water_col
+			elif n > mountain_threshold:
+				base = mount_col
+			else:
+				base = grass_col
+
+			# West-darker / east-lighter shading sells the lit-globe look.
+			var shade: float = 0.82 + (dx / r) * 0.20
+			# Slight darkening near the rim (atmosphere occlusion) so the
+			# planet doesn't blend into the halo.
+			shade *= 1.0 - rim_t * 0.10
+
+			base.r = clampf(base.r * shade, 0.0, 1.0)
+			base.g = clampf(base.g * shade, 0.0, 1.0)
+			base.b = clampf(base.b * shade, 0.0, 1.0)
+			base.a = 1.0
+			img.set_pixel(x, y, base)
+
+	# Atmosphere halo — one-pixel ring tinted with the planet's sky colour.
+	var halo: Color = sky_col.lerp(Color.WHITE, 0.35)
+	halo.a = 0.55
+	for ang_i in range(64):
+		var ang: float = float(ang_i) / 64.0 * TAU
+		var hx: int = int(round(cx + cos(ang) * (r + 0.6)))
+		var hy: int = int(round(cy + sin(ang) * (r + 0.6)))
+		if hx >= 0 and hx < size and hy >= 0 and hy < size:
+			img.set_pixel(hx, hy, halo)
+
+	var tex := ImageTexture.create_from_image(img)
+	entry["thumbnail"] = tex
+	return tex
+
+func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String, rank_label: String = "", planet_res: Array = []) -> Node3D:
 	print("--- FORGE: Spawning Planet Node at %s ---" % str(custom_pos))
 	var pg_script = load("res://src/world/PlanetGen.gd")
 	if not pg_script:
@@ -1124,6 +1270,11 @@ func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String)
 	planet.name = "Planet_" + custom_name.replace(" ", "_")
 	planet.set("planet_seed", seed_val)
 	planet.set("planet_radius", base_radius)
+	# Rank and resources MUST be set before add_child — _ready() reads them to
+	# pick the archetype pool and seed the resource list.
+	planet.set("planet_rank", rank_label)
+	if not planet_res.is_empty():
+		planet.set("planet_resources", planet_res)
 	planet.add_to_group("Planet")
 	planet.add_to_group("ForgedPlanet")
 

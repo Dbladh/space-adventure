@@ -486,6 +486,21 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	# Nature remains restricted to approach zones (<= 20km).
 	if scale_factor > 2.0: return
 	var radius_ratio: float = clamp(radius / 1000000.0, 0.3, 1.5)
+
+	# Tier-based density gradient: lower-tier planets feel genuinely sparse,
+	# higher-tier planets visibly richer. Especially minerals.
+	var _tier_resource_mult: float = 1.0
+	if is_instance_valid(planet) and "planet_rank" in planet:
+		match String(planet.get("planet_rank")):
+			"F": _tier_resource_mult = 0.5
+			"D": _tier_resource_mult = 0.7
+			"C": _tier_resource_mult = 1.0
+			"B": _tier_resource_mult = 1.5
+			"A": _tier_resource_mult = 2.0
+			"S": _tier_resource_mult = 2.5
+			"SS": _tier_resource_mult = 3.0
+			"★ LEGENDARY": _tier_resource_mult = 4.0
+
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []; var g_pts: Array[Transform3D] = []; var c_pts: Array[Transform3D] = []
 	var m_pts: Array = []
 
@@ -531,8 +546,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
 			# WILDERNESS ZONE: Minerals & Nature
 			# -----------------------------------
-			# 1. MINERAL PRIORITY: Extreme Rarity (ACE: Drastic reduction to 1 in 300,000)
-			if (h_v % 300000) < 1:
+			# 1. MINERAL PRIORITY: Extreme Rarity (1 in 300,000 baseline, scaled by planet tier)
+			if (h_v % int(300000.0 / _tier_resource_mult)) < 1:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
 					# Pick deterministically from this planet's resource pool
@@ -543,10 +558,9 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 					m_pts.append([xf, type])
 			else:
 				# 2. NATURE FALLBACK: Standard Biome Scattering
-				var _nat_scale: float = 1.0
 				if cluster_n > 0.35: # ACE: Raised cluster threshold (narrower groves)
 					var grove_strength = clamp((cluster_n - 0.35) * 8.0, 0.0, 1.0)
-					if (h_v % 1000) < int(125 * grove_strength * DebugSettings.tree_mult * _nat_scale):
+					if (h_v % 1000) < int(125 * grove_strength * DebugSettings.tree_mult * _tier_resource_mult):
 						var h_t = get_terrain_elevation(cp)
 						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
 							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
@@ -565,7 +579,7 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 							else:
 								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
 				elif cluster_n < -0.30: # ACE: Widened rock threshold
-					if (h_v % 1000) < int(30 * DebugSettings.rock_mult * _nat_scale):
+					if (h_v % 1000) < int(30 * DebugSettings.rock_mult * _tier_resource_mult):
 						var h_r = get_terrain_elevation(cp)
 						if h_r > -150.0:
 							var r_pos = cp * (radius + max(h_r, SEA_LEVEL - 50.0))

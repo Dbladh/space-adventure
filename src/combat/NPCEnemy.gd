@@ -30,6 +30,7 @@ var current_yaw: float = 0.0
 var current_pitch: float = 0.0
 var current_thrust: float = 0.0
 var _v_tick: int = 0
+var _hibernating: bool = false
 var _ray_q: PhysicsRayQueryParameters3D = null
 
 # LOOT TABLE: weighted drop pool. Higher weight = more common.
@@ -105,9 +106,19 @@ func _physics_process(delta):
 	var dist = rel_to_player.length()
 	var dir = rel_to_player.normalized()
 	
-	# ACE PERFORMANCE: Celestial Hibernation
-	var _hib = 150000.0
-	if dist > _hib: return
+	# ACE PERFORMANCE: Celestial Hibernation with hysteresis — wake at 130km,
+	# sleep at 170km. Without the gap an NPC sitting near 150km would flap
+	# in/out of the active set as the player drifts back and forth across
+	# the boundary, causing visible pop-in.
+	if _hibernating:
+		if dist < 130000.0:
+			_hibernating = false
+		else:
+			return
+	else:
+		if dist > 170000.0:
+			_hibernating = true
+			return
 	
 	# ACE STEERING: Converge on target
 	var fwd = -global_transform.basis.z

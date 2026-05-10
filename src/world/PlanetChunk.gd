@@ -94,13 +94,22 @@ const PROP_LOD_FADE: float = 600.0
 # prop near a boundary doesn't flicker. Distances are measured to the player
 # ship's global position (not camera) so SpringArm swings cannot cause pop-in.
 const SURF_LOD_SPAWN_DIST:        float = 4000.0   # 0 → 1: stream in at low
-const SURF_LOD_DESPAWN_DIST:      float = 6000.0   # 1/2 → 0: stream out (2km hyst)
+const SURF_LOD_DESPAWN_DIST:      float = 14000.0  # 1/2 → 0: stream out (10km hyst)
+# 10 km gap between spawn-in (4 km) and despawn-out (14 km): once a prop is on
+# screen it stays on screen until the ship is comfortably far away, so casual
+# manoeuvring or backtracking won't thrash it in/out. Peak load is unchanged
+# (spawn radius is the same); only the held-loaded radius grew.
 const SURF_LOD_HIGH_ENTER_DIST:   float =  800.0   # 1 → 2: upgrade to high mesh
 const SURF_LOD_HIGH_EXIT_DIST:    float = 1300.0   # 2 → 1: downgrade (500m hyst)
 const SURF_LOD_SPAWN_DIST_SQ:        float = SURF_LOD_SPAWN_DIST * SURF_LOD_SPAWN_DIST
 const SURF_LOD_DESPAWN_DIST_SQ:      float = SURF_LOD_DESPAWN_DIST * SURF_LOD_DESPAWN_DIST
 const SURF_LOD_HIGH_ENTER_DIST_SQ:   float = SURF_LOD_HIGH_ENTER_DIST * SURF_LOD_HIGH_ENTER_DIST
 const SURF_LOD_HIGH_EXIT_DIST_SQ:    float = SURF_LOD_HIGH_EXIT_DIST * SURF_LOD_HIGH_EXIT_DIST
+# Near-block radius: a prop that would otherwise transition from hidden to
+# visible while inside this radius is held hidden until the ship moves past.
+# Prevents on-ship pop-in when a chunk first registers underneath the player.
+const SURF_LOD_NEAR_BLOCK_DIST:      float =  250.0
+const SURF_LOD_NEAR_BLOCK_DIST_SQ:   float = SURF_LOD_NEAR_BLOCK_DIST * SURF_LOD_NEAR_BLOCK_DIST
 
 # Each entry: Dictionary with keys
 #   high: MultiMeshInstance3D | null  — high-detail mesh
@@ -541,6 +550,15 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 						var h_t = get_terrain_elevation(cp)
 						if h_t > -150.0 and (h_t + sin(cp.x * 12000.0)*300.0) < 1450.0:
 							var xform = _get_object_xform(cp * (radius + max(h_t, SEA_LEVEL - 50.0)), cp, detail_n, 12.0)
+							# Small grass patches clustered around the tree base (1 mobile, 3 desktop)
+							var tg_count = 1 if _mobile_perf else 3
+							var tg_h = max(h_t, SEA_LEVEL - 50.0)
+							for tg_k in range(tg_count):
+								var tg_ang = (TAU / float(tg_count)) * float(tg_k) + float((h_v >> (tg_k * 3 + 5)) % 100) / 100.0 * 0.8
+								var tg_ring = 5.0 + float((h_v >> (tg_k * 4 + 11)) % 40) / 10.0  # 5-9m
+								var tg_off = (x_axis * cos(tg_ang) + y_axis * sin(tg_ang)) * (tg_ring / radius)
+								var tg_cp = (cp + tg_off).normalized()
+								g_pts.append(_get_object_xform(tg_cp * (radius + tg_h), tg_cp, 0.0, 2.0))
 							# ACE: Very rare interactive/mineable tree (1 in 500)
 							if h_v % 500 < 1:
 								m_pts.append([xform, "Wood"])
@@ -575,7 +593,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			for y_idx in range(gs_y, ge_y):
 				for x_idx in range(gs_x, ge_x):
 					var h_v = hash(Vector3(float(x_idx), float(y_idx), float(planet_seed) + face_normal.x*7.0 + face_normal.z*3.0))
-					if h_v % 100 < 12: # ACE: Drastic grass reduction (25 -> 12)
+					var grass_gate = 12 if _mobile_perf else 16 # mobile keeps 12; desktop bumped to 16
+					if h_v % 100 < grass_gate:
 						# ACE ORGANIC GRASS: Aggressive jitter (1.8) actively breaks the rigid grid system
 						# Grass clusters now unpredictably drift and clump, forming natural rolling fields
 						var j_x = (float(h_v % 50)/50.0 - 0.5) * 1.8
@@ -775,7 +794,7 @@ func _update_prop_group(g: Dictionary, chunk_xform: Transform3D, ship_pos: Vecto
 		var prev: int = states[i]
 		var nxt: int = prev
 		if prev == 0:
-			if d_sq < SURF_LOD_SPAWN_DIST_SQ:
+			if d_sq < SURF_LOD_SPAWN_DIST_SQ and d_sq > SURF_LOD_NEAR_BLOCK_DIST_SQ:
 				nxt = 2 if (has_high and d_sq < SURF_LOD_HIGH_ENTER_DIST_SQ) else 1
 		elif prev == 1:
 			if d_sq > SURF_LOD_DESPAWN_DIST_SQ:
@@ -1544,7 +1563,7 @@ func _build_grass_mesh() -> ArrayMesh:
 	var st = SurfaceTool.new(); st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	# ACE BOTW/NMS GRASS: Dense, tall, swooping grassy thickets scattered lushly
 	var rng = RandomNumberGenerator.new(); rng.seed = 1337
-	var blades = 12
+	var blades = 16
 	for i in range(blades):
 		var ang = rng.randf() * TAU; var dist = rng.randf() * 1.0
 		# Mid-range thick toon foliage
@@ -2084,20 +2103,49 @@ func _spawn_minerals(data: Array) -> void:
 	var planet_can_glow: bool = rank_label in ["A", "S", "SS", "★ LEGENDARY"]
 	var flora_types := ["Wood", "Stone", "Carbon Fiber"]
 
-	for item in data:
+	# Pending queue + cycle counter so a parked ship doesn't busy-loop: once
+	# every remaining item has been deferred once without progress, sleep
+	# briefly before the next sweep.
+	var pending: Array = data.duplicate()
+	var cycle_no_progress: int = 0
+	while not pending.is_empty():
 		# Bail if chunk was freed OR recycled to a different position.
 		if not is_inside_tree() or offset != initial_offset: return
 
+		var item: Array = pending[0]
 		var xf: Transform3D = item[0]
 		var type: String = item[1]
 
 		# DESTRUCTION PERSISTENCE: Skip any mineral that's been destroyed
 		# previously (even if the chunk is being reloaded). The destroyed
 		# minerals registry uses position hash for O(1) lookup.
-		var global_xf = self.global_transform * xf
-		var pos_hash = hash(global_xf.origin.round())
+		var global_xf: Transform3D = self.global_transform * xf
+		var pos_hash: int = hash(global_xf.origin.round())
 		if m_script.get("_destroyed_positions").has(pos_hash):
+			pending.pop_front()
+			cycle_no_progress = 0
 			continue
+
+		# NEAR-PLAYER GUARD: don't materialize a mineral inside the ship's
+		# near-block radius. Rotate it to the back; the next sweep will retry
+		# once the player has moved on.
+		if _player_ref == null or not is_instance_valid(_player_ref):
+			var found: Array = get_tree().get_nodes_in_group("Player")
+			if not found.is_empty(): _player_ref = found[0]
+		if _player_ref != null and is_instance_valid(_player_ref):
+			var d_sq: float = global_xf.origin.distance_squared_to(_player_ref.global_position)
+			if d_sq < SURF_LOD_NEAR_BLOCK_DIST_SQ:
+				pending.append(pending.pop_front())
+				cycle_no_progress += 1
+				if cycle_no_progress >= pending.size():
+					# Whole queue is in the near-block radius. Wait for the ship.
+					cycle_no_progress = 0
+					await get_tree().create_timer(0.5).timeout
+					if not is_inside_tree() or offset != initial_offset: return
+				continue
+
+		pending.pop_front()
+		cycle_no_progress = 0
 
 		var res = StaticBody3D.new()
 		res.set_script(m_script)

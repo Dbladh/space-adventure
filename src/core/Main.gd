@@ -128,7 +128,10 @@ func _setup_stellar_horizon() -> void:
 	sky_env.background_mode = Environment.BG_SKY
 	var master_sky = Sky.new()
 	var sky_mat = ShaderMaterial.new()
-	sky_mat.shader = load("res://src/world/cel_sky.gdshader")
+	# Mobile uses the simplified sky variant (same uniform interface).
+	# Sky covers the full screen on every frame — even a small per-fragment
+	# saving compounds across the entire viewport.
+	sky_mat.shader = load("res://src/world/cel_sky_mobile.gdshader" if MobilePerf.is_mobile() else "res://src/world/cel_sky.gdshader")
 	
 	var fn_s = FastNoiseLite.new(); fn_s.noise_type = FastNoiseLite.TYPE_CELLULAR; fn_s.frequency = 0.05
 	var nt_s = NoiseTexture2D.new(); nt_s.width = 512; nt_s.height = 512; nt_s.noise = fn_s

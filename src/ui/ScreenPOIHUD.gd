@@ -63,9 +63,13 @@ func _refresh_pois() -> void:
 			})
 	for p in get_tree().get_nodes_in_group("Planet"):
 		if is_instance_valid(p):
+			var pname := p.name.replace("Planet_", "")
+			var rank := String(p.get("planet_rank")) if p.get("planet_rank") != null else ""
+			if rank != "":
+				pname += " (" + rank + ")"
 			_pois.append({
 				node = p,
-				label = p.name.replace("Planet_", ""),
+				label = pname,
 				color = Color(0.55, 0.88, 0.55),
 				type = "planet"
 			})

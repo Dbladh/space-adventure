@@ -23,7 +23,7 @@ const PLANET_NAMES: Array[String] = [
 	"Quasar Beacon", "Pulsar Edge", "Nebula Pass", "Vortex Reach", "Stellar Forge",
 	"Cinder Reach", "Frost Crown", "Ember Halo", "Mistral Wake", "Verdant Pyre",
 	"Twilight Vale", "Glacial Hymn", "Arc Cardinal", "Singularity Point",
-	"Vermfd  ilion Spire", "Tantalus Hollow", "Cradle Nine", "Iron Reverie",
+	"Vermilion Spire", "Tantalus Hollow", "Cradle Nine", "Iron Reverie",
 	"Echo Prime", "Wraith Ascendant",
 	# Made-up alien
 	"Kelvar", "Xerath", "Vyndor", "Zeyra", "Kaelis", "Threnos", "Vexen", "Sythari",
@@ -43,6 +43,10 @@ var map_display: Control
 var _name_rng: RandomNumberGenerator = RandomNumberGenerator.new()
 
 func _pick_random_planet_name() -> String:
+	# Avoid picking the currently-shown name so consecutive presses always
+	# advance the displayed text. Falls through after a small bounded retry
+	# so we never spin if the pool happens to roll the same index twice in
+	# a row when only one name is in the list.
 	if PLANET_NAMES.is_empty():
 		return "Nova Prime"
 	var current: String = name_input.text if name_input != null else ""
@@ -104,7 +108,8 @@ func _ready() -> void:
 	lbl.offset_top = 60
 	add_child(lbl)
 	
-	# Name input row — LineEdit + randomize button paired in an HBox.
+	# Name input row — LineEdit on the left, randomize button on the right.
+	# Wrapped in an HBoxContainer so they stay paired regardless of layout.
 	_name_rng.randomize()
 	var name_row := HBoxContainer.new()
 	name_row.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
@@ -122,6 +127,8 @@ func _ready() -> void:
 	name_input.add_theme_font_size_override("font_size", 24)
 	name_input.custom_minimum_size = Vector2(420, 60)
 	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Initial name is also rolled from the pool so every Forge session starts
+	# with a fresh suggestion rather than always defaulting to "Nova Prime".
 	name_input.text = PLANET_NAMES[_name_rng.randi_range(0, PLANET_NAMES.size() - 1)]
 	name_row.add_child(name_input)
 
@@ -130,7 +137,7 @@ func _ready() -> void:
 	randomize_btn.tooltip_text = "Pick a random sci-fi name"
 	randomize_btn.add_theme_font_size_override("font_size", 28)
 	randomize_btn.custom_minimum_size = Vector2(72, 60)
-	randomize_btn.focus_mode = Control.FOCUS_NONE
+	randomize_btn.focus_mode = Control.FOCUS_NONE  # keep gamepad focus on Forge/Cancel
 	randomize_btn.pressed.connect(func(): name_input.text = _pick_random_planet_name())
 	name_row.add_child(randomize_btn)
 	

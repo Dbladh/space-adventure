@@ -56,7 +56,7 @@ func _ready() -> void:
 	add_to_group("Mineable") # ACE: Absolute identification for projectiles
 	collision_layer = 1 << 2 # Layer 3
 	collision_mask = 0        # Minerals don't need to detect anything themselves
-	_mobile_perf = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	_mobile_perf = MobilePerf.is_mobile()
 	# Health scales with resource tier — rarer deposits take more shots
 	var tier := ResourceRegistry.get_tier(resource_type)
 	match tier:

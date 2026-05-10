@@ -78,10 +78,10 @@ void sky() {
 	vec3 final_col = mix(horizon_color, zenith_color, sky_grad);
 	
 	// Skybox clouds removed — they read as distracting streaks across the
-	// atmosphere and over space. Planet cloud shells
-	// (PlanetGen._spawn_majestic_clouds_and_rings) handle real cloud cover
-	// near a body. cloud_noise uniform left declared so existing material
-	// binding in Main.gd continues to bind without warnings.
+	// atmosphere. Planet cloud shells (PlanetGen._spawn_majestic_clouds_and_rings)
+	// provide the actual cloud layer when the player is near a body.
+	// The cloud_noise uniform is left declared so existing material setup
+	// in Main.gd continues to bind it without warnings.
 
 	// 4. ICONIC TOON SUN (The central Great Sea star)
 	float sun_dot = max(0.0, dot(EYEDIR, LIGHT0_DIRECTION));

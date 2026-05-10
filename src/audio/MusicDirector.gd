@@ -169,6 +169,20 @@ const _BASS_GROWL_LFO_HZ := 0.04   # ~25s period
 var _arp_pan_lfo_phase: float = 0.0
 const _ARP_PAN_LFO_HZ := 0.058   # ~17s period
 
+# Slow "breath" LFO on the lead arp (arp1) — modulates volume, note density,
+# and vibrato depth together so the arp swells in and out of the mix instead
+# of sitting on top as a constant lead. Rate is intentionally offset from
+# arp2's vol LFO (0.03 Hz) so the two voices drift instead of pulsing together.
+var _arp_breath_lfo_phase: float = 0.0
+const _ARP_BREATH_LFO_HZ := 0.024   # ~42s period
+var _arp_breath: float = 1.0        # 0..1 — current breath level (computed each frame)
+
+# Per-buffer vibrato on arp1; depth is scaled by _arp_breath so wobble fades
+# with the swell rather than being constant.
+var _arp_vibrato_phase: float = 0.0
+const _ARP_VIBRATO_HZ := 4.5
+const _ARP_VIBRATO_MAX_CENTS := 6.0   # ±6 cents at peak breath
+
 # =====================================================================
 #  DYNAMIC FX PARAMETERS
 # =====================================================================
@@ -470,7 +484,7 @@ var _acc_pan: float = 0.0
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	add_to_group("MusicDirector")
-	_mobile = OS.get_name() == "iOS" or OS.has_feature("mobile")
+	_mobile = MobilePerf.is_mobile()
 	_sample_rate = 22050.0 if _mobile else 44100.0
 
 	# Sine LUT
@@ -882,6 +896,12 @@ func _process(delta: float) -> void:
 	# Slow arp stereo pan LFO — drives the L↔R sweep on arp1 and arp2.
 	_arp_pan_lfo_phase = fmod(_arp_pan_lfo_phase + _ARP_PAN_LFO_HZ * delta, 1.0)
 
+	# Slow arp breath LFO — squared sine biases time toward the quiet half so
+	# the swells feel like rare openings rather than 50/50 on-off.
+	_arp_breath_lfo_phase = fmod(_arp_breath_lfo_phase + _ARP_BREATH_LFO_HZ * delta, 1.0)
+	var breath_raw := sin(_arp_breath_lfo_phase * TAU) * 0.5 + 0.5
+	_arp_breath = breath_raw * breath_raw
+
 	# ── Chord progression clock ──────────────────────────────────────
 	_chord_timer += delta
 	_swell_phase = clampf(_chord_timer / _chord_duration, 0.0, 1.0)
@@ -1082,7 +1102,7 @@ func _update_music_targets() -> void:
 	match current_state:
 		MusicState.DEEP_SPACE:
 			_target_bass_volume     = 0.13      # quieter — no need to dominate while idle
-			_target_arp_volume      = 0.004     # drastically lower
+			_target_arp_volume      = 0.0026    # drastically lower; breath LFO dips further still
 			_target_perc_volume     = 0.02      # drastically lower
 			_target_filter_cutoff   = 250.0     # extreme muffled
 			_target_reverb_mix      = 0.95      # massive reverb
@@ -1107,7 +1127,7 @@ func _update_music_targets() -> void:
 		MusicState.CRUISING:
 			var spd_t := clampf(_ship_speed / 5000.0, 0.0, 1.0)
 			_target_bass_volume     = 0.23
-			_target_arp_volume      = 0.04
+			_target_arp_volume      = 0.026     # ~35% lower; breath LFO further dips it
 			_target_perc_volume     = lerpf(0.30, 0.42, spd_t)
 			_target_filter_cutoff   = lerpf(1200.0, 3000.0, spd_t)
 			_target_reverb_mix      = 0.62      # was 0.50 — more wet
@@ -1131,7 +1151,7 @@ func _update_music_targets() -> void:
 
 		MusicState.ATMOSPHERE:
 			_target_bass_volume     = 0.20
-			_target_arp_volume      = 0.040
+			_target_arp_volume      = 0.026     # ~35% lower; breath LFO further dips it
 			_target_perc_volume     = 0.30      # soft offbeat hats — ethereal but audible
 			_target_filter_cutoff   = 1500.0
 			_target_reverb_mix      = 0.70
@@ -1155,7 +1175,7 @@ func _update_music_targets() -> void:
 
 		MusicState.SURFACE:
 			_target_bass_volume     = 0.26
-			_target_arp_volume      = 0.075
+			_target_arp_volume      = 0.049     # ~35% lower; breath LFO further dips it
 			_target_perc_volume     = 0.55      # was 0.65 — slightly less prominent
 			_target_filter_cutoff   = 3000.0
 			_target_reverb_mix      = 0.66      # was 0.55 — more wet
@@ -1179,7 +1199,7 @@ func _update_music_targets() -> void:
 
 		MusicState.COMBAT:
 			_target_bass_volume     = 0.30
-			_target_arp_volume      = 0.075
+			_target_arp_volume      = 0.049     # ~35% lower; breath LFO further dips it
 			_target_perc_volume     = lerpf(0.55, 0.70, _combat_tension)
 			_target_filter_cutoff   = lerpf(2200.0, 4500.0, _combat_tension)
 			_target_reverb_mix      = 0.35
@@ -1506,6 +1526,15 @@ func _advance_arp_step() -> void:
 		_arp_envelope = 0.0
 		return
 
+	# Breath-driven rest gate: at breath=0 we drop ~100% of notes; at
+	# breath ≥ 0.55 we never drop. Squared falloff so swell edges feel
+	# musical instead of binary.
+	var rest_chance: float = clampf(1.0 - _arp_breath / 0.55, 0.0, 1.0)
+	if rest_chance > 0.0 and randf() < rest_chance * rest_chance:
+		_arp_rest = true
+		_arp_envelope = 0.0
+		return
+
 	_arp_rest = false
 	var ratio: float = float(step["ratio"])
 	var octave: int = int(step["octave"])
@@ -1540,9 +1569,19 @@ func _fill_arp_buffer(frames_hint: int = 0) -> void:
 	var slow_pan: float = sin(_arp_pan_lfo_phase * TAU) * 0.55
 	var arp1_pan: float = clampf(slow_pan + _arp_pan * 0.4, -0.7, 0.7)
 
-	_arp_voice_ctx["freq"] = _arp_current_freq
+	# Breath multiplier — never fully zero; rest gate handles real silence.
+	var breath_vol: float = lerp(0.30, 1.00, _arp_breath)
+
+	# Advance vibrato by this buffer's duration; depth scales with breath
+	# so wobble fades along with the swell.
+	var buf_secs: float = float(frames) / _sample_rate
+	_arp_vibrato_phase = fmod(_arp_vibrato_phase + _ARP_VIBRATO_HZ * buf_secs, 1.0)
+	var vibrato_cents: float = sin(_arp_vibrato_phase * TAU) * _ARP_VIBRATO_MAX_CENTS * _arp_breath
+	var vibrato_mult: float = pow(2.0, vibrato_cents / 1200.0)
+
+	_arp_voice_ctx["freq"] = _arp_current_freq * vibrato_mult
 	_arp_voice_ctx["env"]  = _arp_envelope
-	_arp_voice_ctx["vol"]  = _arp_volume * _arp_accent * arp_duck
+	_arp_voice_ctx["vol"]  = _arp_volume * _arp_accent * arp_duck * breath_vol
 	_arp_voice_ctx["pan_l"] = clampf(1.0 - arp1_pan, 0.0, 1.6)
 	_arp_voice_ctx["pan_r"] = clampf(1.0 + arp1_pan, 0.0, 1.6)
 	_arp_voice_ctx["filt"]  = clampf(_filter_cutoff / 3000.0, 0.15, 1.0)

@@ -49,14 +49,9 @@ void sky() {
 	float sky_grad = smoothstep(-0.35, 0.7, local_e.y);
 	vec3 final_col = mix(horizon_color, zenith_color, sky_grad);
 
-	// Clouds: ONE layer, ONE texture lookup (was 5 across detail/shadow/horizon layers).
-	// In deep space the contribution is masked to zero anyway.
-	vec3 cl_pos = local_e * vec3(0.35, 1.2, 0.35);
-	vec2 cl_uv = floor((cl_pos.xz + cl_pos.y * 0.15) * 100.0) / 100.0;
-	float puff = texture(cloud_noise, cl_uv).r;
-	float cloud_mask = step(0.86, puff);
-	cloud_mask *= smoothstep(0.04, 0.28, local_e.y);
-	final_col = mix(final_col, vec3(1.0), cloud_mask * (1.0 - space_blend));
+	// Skybox clouds removed — planet cloud shells handle real cloud cover
+	// when near a body. cloud_noise uniform left declared so existing
+	// material binding code in Main.gd doesn't warn.
 
 	// Sun: disc + bloom only (starburst dropped — barely readable at 240x135).
 	float sun_dot = max(0.0, dot(EYEDIR, LIGHT0_DIRECTION));

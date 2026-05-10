@@ -363,6 +363,20 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	// same noise pattern. Without this, every shell renders identical clouds
 	// and the stack reads as one slab instead of multiple altitudes.
 	uniform vec3  layer_offset = vec3(0.0);
+	// Per-layer wind: drift velocity of the noise sample position. Each
+	// shell gets its own value so high cirrus and low cumulus move in
+	// different directions and at different speeds — parallax through the
+	// stack reads as real cloud motion. Default matches the legacy
+	// hard-coded direction so the single-shell variant looks unchanged.
+	uniform vec3  wind_velocity = vec3(0.6, 0.3, -0.2);
+	// Domain warping: a slow low-freq fbm distorts the sample position so
+	// the noise field itself deforms over time — clouds curl, tendrils
+	// evolve, edges drift independently of the bulk wind translation.
+	// Cost = 2 extra fbm() calls per density sample. Set to 0.0 to skip
+	// (mobile path) — the GPU branches on a uniform, so it's effectively
+	// a compile-time toggle.
+	uniform float warp_amount    = 0.0;
+	uniform float warp_time_rate = 0.04;
 	varying vec3 v_local_pos;
 	varying vec3 v_world_pos;
 	varying vec3 v_normal;
@@ -399,9 +413,26 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	// noise position per stacked shell so the layers aren't identical.
 	float cloud_density(vec3 dir, float t, float c_scale) {
 		vec3 base = dir * planet_r * c_scale + layer_offset;
-		vec3 lp_large = base * 0.35 + vec3(t * 0.6, t * 0.3, -t * 0.2);
-		vec3 lp_med   = base * 1.0  + vec3(t, t * 0.5, -t * 0.3) + vec3(50.0);
-		vec3 lp_small = base * 2.8  + vec3(-t * 0.4, t * 0.6, t * 0.2) + vec3(100.0);
+		// Domain warping — a slow-moving low-freq fbm displaces the sample
+		// position so the noise field itself evolves over time. The two fbm
+		// taps form an x/y warp vector; the third component reuses their
+		// difference so we don't pay for a third tap. Centred on 0.5 so the
+		// warp is signed (push and pull) rather than always-positive drift.
+		if (warp_amount > 0.0) {
+			vec3 wq = base * 0.5 + vec3(t * warp_time_rate, t * warp_time_rate * 0.7, -t * warp_time_rate * 0.9);
+			float wa = fbm(wq);
+			float wb = fbm(wq + vec3(5.2, 1.3, 8.1));
+			base += vec3(wa - 0.5, wb - 0.5, (wa - wb) * 0.5) * warp_amount;
+		}
+		// Per-octave wind variation via swizzle: each octave drifts in a
+		// rotated direction so cross-currents read as natural turbulence
+		// instead of a single rigid translation. Higher octaves move faster.
+		vec3 wind_l = wind_velocity            * 0.6;
+		vec3 wind_m = wind_velocity.yzx        * 1.0;
+		vec3 wind_s = wind_velocity.zxy        * 1.4;
+		vec3 lp_large = base * 0.35 + wind_l * t;
+		vec3 lp_med   = base * 1.0  + wind_m * t + vec3(50.0);
+		vec3 lp_small = base * 2.8  + wind_s * t + vec3(100.0);
 		float d_large = fbm(lp_large);
 		float d_med   = fbm(lp_med);
 		float d_small = fbm(lp_small);
@@ -562,11 +593,21 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	# altitude as well.
 	var layer_scale_mul: Array = [1.10, 1.00, 0.95, 1.30, 2.20]
 	var layer_alpha_mul: Array = [0.55, 0.85, 1.00, 0.75, 0.45]
-	# DEBUG: cloud shell stack disabled while diagnosing rectangular missing-
-	# chunk artifacts. The 5 cull_disabled blend_mix spheres at varying
-	# altitudes may be interfering with chunk depth/alpha rendering — testing
-	# without them isolates whether the cloud stack is responsible.
-	for layer_idx in range(0):
+	# Per-layer wind: each shell drifts in its own direction at its own speed.
+	# Low layers (cumulus) move slowly with surface trade winds; high layers
+	# (cirrus) zoom in opposite directions. Magnitudes are in noise-sample
+	# units per second; ~0.6 matches the legacy single-direction default.
+	var layer_winds: Array = [
+		Vector3( 0.55,  0.20,  0.30),  # 1.5 km — low, slow, easterly drift
+		Vector3( 0.45, -0.15, -0.40),  # 2.8 km
+		Vector3(-0.35,  0.30, -0.55),  # 4.2 km — mid layer, sharper turn
+		Vector3(-0.70,  0.10,  0.50),  # 5.8 km
+		Vector3( 0.20, -0.50,  0.95),  # 7.5 km — high cirrus, fast, opposite
+	]
+	# Domain warping is the heaviest knob — costs +2 fbm per density sample.
+	# Mobile keeps the simple translation; desktop gets evolving shapes.
+	var warp_for_layer: float = 0.0 if mobile_perf else 0.55
+	for layer_idx in range(layer_altitudes.size()):
 		var alt: float = layer_altitudes[layer_idx]
 		var scale_mul: float = layer_scale_mul[layer_idx]
 		var alpha_mul: float = layer_alpha_mul[layer_idx]
@@ -596,6 +637,8 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 			float(layer_idx) * 73.91 - 5.0
 		)
 		li.material_override.set_shader_parameter("layer_offset", layer_seed_offset)
+		li.material_override.set_shader_parameter("wind_velocity", layer_winds[layer_idx])
+		li.material_override.set_shader_parameter("warp_amount", warp_for_layer)
 		li.visibility_range_end = PROXIMITY_CUTOFF
 		li.visibility_range_end_margin = 100000.0
 		li.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF

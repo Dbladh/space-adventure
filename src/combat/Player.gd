@@ -861,7 +861,7 @@ func _process_ace_flight(delta: float) -> void:
 				# Sign convention matches gamepad: yaw_stick is -joy_axis(LEFT_X), pitch_stick is +joy_axis(LEFT_Y).
 				yaw_stick   = -clamp(tx / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
 				pitch_stick =  clamp(tz / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
-		# 1Hz live diagnostic — read in Xogot's runtime console while tilting
+		# 1Hz live diagnostic — read in Godot's runtime console while tilting
 		# to verify which gravity axis actually corresponds to which physical
 		# motion. We need this to confirm the (x→yaw, z→pitch) mapping is right
 		# for iPhone landscape.

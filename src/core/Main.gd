@@ -4,6 +4,9 @@ class_name Main
 # Main.gd (Performance Telemetry Edition)
 # Managed by THE ARCHITECT.
 
+const HUDStyle = preload("res://src/ui/HUDStyle.gd")
+const ResourceChipScene = preload("res://src/ui/ResourceChip.gd")
+
 var diag_label: Label
 var retro_node: CanvasLayer = null
 var hud_visible: bool = true
@@ -389,40 +392,68 @@ func _setup_hardened_diag_hud() -> void:
 	hud_layer.add_child(diag_label)
 	diag_label.visible = diag_visible
 	
-	# ACE ECONOMY: Real-time Credit Display
+	# ACE ECONOMY: Real-time Credit Display — moved to top-right corner,
+	# right-justified, sized down from 72pt to HUDStyle.HUD_FONT_LRG (22pt)
+	# so it stops dominating the centre of the screen.
 	var creds = Label.new(); creds.name = "CreditLabel"
 	creds.text = "$0"
-	creds.add_theme_font_size_override("font_size", 72) # ACE: 2x Scale Upgrade
+	creds.add_theme_font_size_override("font_size", HUDStyle.HUD_FONT_LRG)
 	creds.add_theme_color_override("font_color", Color.GOLD)
+	creds.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
+	creds.add_theme_constant_override("outline_size", 4)
+	creds.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hud_layer.add_child(creds)
-	# Position directly below the Health Bar (Top Center)
-	creds.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 0)
-	creds.position.y = 120.0 # Lowered to avoid Dynamic Island
-	creds.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	
+	creds.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_KEEP_SIZE, 0)
+	creds.offset_left = -200
+	creds.offset_right = HUDStyle.CREDITS_OFFSET.x
+	creds.offset_top = HUDStyle.CREDITS_OFFSET.y
+	creds.offset_bottom = HUDStyle.CREDITS_OFFSET.y + 32
+
 	if Engine.has_meta("EconomyManager"):
 		var econ = Engine.get_meta("EconomyManager")
 		econ.currency_changed.connect(func(n): creds.text = "$" + str(n))
 
-	# INVENTORY ROW: Shows resource stacks below the credit counter
-	var inv_label = Label.new(); inv_label.name = "InventoryLabel"
-	inv_label.text = ""
-	inv_label.add_theme_font_size_override("font_size", 28)
-	inv_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
-	hud_layer.add_child(inv_label)
-	inv_label.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 0)
-	inv_label.position.y = 200.0
-	inv_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	# INVENTORY ROW: top-left chip strip.  Each resource becomes a
+	# colour-tinted chip with a tier-coloured top stripe.  Chips are pooled
+	# (created on first appearance, freed when the count returns to 0) and
+	# play a scale-pulse + "+N" floater on every additive change.  Order:
+	# rarest-first (tier desc, abbrev asc) so the bankable items lead.
+	var inv_box = FlowContainer.new()
+	inv_box.name = "InventoryRow"
+	inv_box.add_theme_constant_override("h_separation", HUDStyle.CHIP_GAP)
+	inv_box.add_theme_constant_override("v_separation", HUDStyle.CHIP_GAP)
+	inv_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud_layer.add_child(inv_box)
+	inv_box.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT, Control.PRESET_MODE_KEEP_SIZE, 0)
+	inv_box.offset_left = HUDStyle.INVENTORY_OFFSET.x
+	inv_box.offset_right = HUDStyle.INVENTORY_OFFSET.x + 720
+	inv_box.offset_top = HUDStyle.INVENTORY_OFFSET.y
+	inv_box.offset_bottom = HUDStyle.INVENTORY_OFFSET.y + 240
+
+	var chips_by_name: Dictionary = {}
 
 	if Engine.has_meta("InventoryManager"):
 		var inv = Engine.get_meta("InventoryManager")
-		var _refresh_inv = func(_type: String, _amt: int) -> void:
-			var all = inv.get_all()
-			var parts: Array[String] = []
-			for r in ResourceRegistry.all_names():
-				if all.get(r, 0) > 0:
-					parts.append(ResourceRegistry.get_abbrev(r) + ":" + str(all[r]))
-			inv_label.text = "  ".join(parts)
+		var _refresh_inv = func(res_type: String, amt: int) -> void:
+			# Existing chip: update count.  Drops to zero → free and remove.
+			if chips_by_name.has(res_type):
+				var existing = chips_by_name[res_type]
+				if amt <= 0:
+					existing.queue_free()
+					chips_by_name.erase(res_type)
+				else:
+					existing.set_count(amt)
+				_resort_inventory_row(inv_box, chips_by_name)
+				return
+			# New chip on first appearance.
+			if amt <= 0:
+				return
+			var chip = ResourceChipScene.new()
+			chip.setup(res_type)
+			inv_box.add_child(chip)
+			chips_by_name[res_type] = chip
+			chip.set_count(amt)
+			_resort_inventory_row(inv_box, chips_by_name)
 		inv.inventory_changed.connect(_refresh_inv)
 
 	# Station-guide NavBeacon widget removed — the screen-space POI HUD
@@ -776,6 +807,27 @@ func _toggle_map_fullscreen_to(active: bool) -> void:
 func _toggle_hud() -> void:
 	hud_visible = !hud_visible
 	hud_layer.visible = hud_visible
+
+# Re-order inventory chips so rarest tier appears first.  Called after every
+# add/remove.  Cheap — there are at most ~16 resource types in the registry.
+func _resort_inventory_row(container: Node, chips_by_name: Dictionary) -> void:
+	var entries: Array = []
+	for res_name in chips_by_name.keys():
+		var data: Dictionary = ResourceRegistry.get_data(res_name)
+		entries.append({
+			"chip": chips_by_name[res_name],
+			"tier": int(data.get("tier", 1)),
+			"abbrev": String(data.get("abbrev", res_name)),
+		})
+	entries.sort_custom(func(a, b):
+		if a.tier != b.tier:
+			return a.tier > b.tier  # higher tier first
+		return a.abbrev < b.abbrev
+	)
+	for i in range(entries.size()):
+		var chip = entries[i].chip
+		if chip.get_parent() == container:
+			container.move_child(chip, i)
 
 func _toggle_diag() -> void:
 	diag_visible = !diag_visible

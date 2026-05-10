@@ -39,7 +39,7 @@ var _mobile_look_touch_idx: int = -1
 var _mobile_look_last_pos: Vector2 = Vector2.ZERO
 
 # GYRO STEERING (Star Fox Style)
-@export var gyro_enabled: bool = true
+@export var gyro_enabled: bool = false
 @export var gyro_sensitivity: float = 1.9 # ACE: Lowered for absolute gravity stability
 var _gyro_neutral_z: float = 0.0 # ACE Calibration
 var _is_calibrated: bool = false
@@ -70,7 +70,9 @@ var shake_v: Vector3 = Vector3.ZERO
 var shake_intensity: float = 0.0
 var last_alt: float = 100000.0     # Atmospheric barrier detection
 var reentry_timer: float = 0.0     # Sustained transition shake timer
-var reentry_intensity: float = 0.0 
+var reentry_intensity: float = 0.0
+var _atmo_enter_sfx: AudioStreamPlayer = null  # plays on each cloud-band crossing
+var _in_atmo_band: bool = false                # hysteresis state: true while inside the cloud band
 var _last_trail_pos: Vector3 = Vector3.ZERO
 var heat_glow_mat: StandardMaterial3D = null
 var reentry_vignette: ColorRect = null
@@ -154,6 +156,13 @@ func _ready() -> void:
 	# Load once at startup, not every fire event
 	bolt_script = load("res://src/combat/LaserBolt.gd")
 	if bolt_script: print("--- GUNSMITH: LaserBolt loaded OK ---")
+
+	# Atmosphere-entry one-shot. Loaded once and reused — playback is gated
+	# in the cloud-band crossing block so it fires on both descent and ascent.
+	_atmo_enter_sfx = AudioStreamPlayer.new()
+	_atmo_enter_sfx.stream = load("res://assets/resources/audio/ship_enter_atmosphere.mp3")
+	_atmo_enter_sfx.bus = "Master"
+	add_child(_atmo_enter_sfx)
 	# ACE TITAN SYNC: Block player until Universe is Ready
 	set_physics_process(false)
 	set_process(false)
@@ -516,16 +525,19 @@ func take_damage(amount: float) -> void:
 
 func _setup_player_hud() -> void:
 	var hud = CanvasLayer.new(); hud.layer = 125; add_child(hud)
-	
-	# ACE: Master Vitality Bar (Top Center)
-	var bar_w = 400.0; var bar_h = 24.0
+
+	# ACE: Master Vitality Bar — pulled tight against the top edge (was y=96)
+	# so the bar stays present without crowding the centre of the cockpit.
+	# Centered horizontally, 24px from the top.
+	var bar_w = 400.0; var bar_h = 18.0
 	health_bar_bg = ColorRect.new()
-	health_bar_bg.color = Color(0.1, 0.1, 0.1, 0.8)
+	health_bar_bg.color = Color(0.08, 0.08, 0.10, 0.85)
 	health_bar_bg.custom_minimum_size = Vector2(bar_w, bar_h)
 	health_bar_bg.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
-	health_bar_bg.position.y = 96.0; health_bar_bg.position.x -= bar_w/2.0
+	health_bar_bg.position.y = 24.0
+	health_bar_bg.position.x -= bar_w / 2.0
 	hud.add_child(health_bar_bg)
-	
+
 	health_bar_fill = ColorRect.new()
 	health_bar_fill.color = Color.SPRING_GREEN
 	health_bar_fill.custom_minimum_size = Vector2(bar_w - 4.0, bar_h - 4.0)
@@ -864,11 +876,28 @@ func _process_ace_flight(delta: float) -> void:
 		thrust_mapped = 1.0
 		reverse_mapped = 0.0
 	
-	# ATMOSPHERIC BARRIER CROSSING: Sync with 26km Exosphere Boundary
-	const BARRIER_ALT: float = 26000.0
-	if (last_alt > BARRIER_ALT and true_altitude <= BARRIER_ALT) or (last_alt < BARRIER_ALT and true_altitude >= BARRIER_ALT):
-		reentry_timer = 3.0 # Duration
+	# ATMOSPHERIC BARRIER CROSSING: Tied to the cloud-layer top (matches the
+	# outermost shell altitude in PlanetGen._spawn_majestic_clouds_and_rings).
+	# Hysteresis (2 km gap between enter/exit thresholds) prevents flapping
+	# triggers when the ship hovers or oscillates near the boundary.
+	# Same audio fires on both entry and exit; the heat-shake FX matches.
+	# (The 26 km warp/physics threshold elsewhere in this file is unchanged —
+	# that one governs control regimes, not the entry moment.)
+	const ATMO_ENTER_ALT: float = 7500.0
+	const ATMO_EXIT_ALT:  float = 9500.0
+	var was_in_band: bool = _in_atmo_band
+	if _in_atmo_band:
+		if true_altitude > ATMO_EXIT_ALT:
+			_in_atmo_band = false
+	else:
+		if true_altitude < ATMO_ENTER_ALT and target_planet != null:
+			_in_atmo_band = true
+	if was_in_band != _in_atmo_band:
+		reentry_timer = 3.0 # Duration — also gates how long the SFX plays
 		reentry_intensity = 4.5
+		if _atmo_enter_sfx:
+			_atmo_enter_sfx.stop()  # restart cleanly even if a prior crossing's SFX is still tail-decaying
+			_atmo_enter_sfx.play()
 	last_alt = true_altitude
 	
 	# FLIGHT PHYSICS RATIO: Optimized for reentry braking (Exosphere Transition)
@@ -1572,7 +1601,11 @@ func _process(delta: float) -> void:
 		reentry_timer -= delta
 		var intensity = (reentry_timer / 3.0) * reentry_intensity
 		reentry_v = Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * intensity
-		
+		# Cut the entry/exit SFX the instant the shake animation ends so audio
+		# and visual end together, even if the audio clip is longer than 3 s.
+		if reentry_timer <= 0.0 and _atmo_enter_sfx and _atmo_enter_sfx.playing:
+			_atmo_enter_sfx.stop()
+
 	# VISUAL HEAT GLOW: Animate hull emission based on shake/speed
 	# ACE HEAT HYGIENE: Ensure this resets to zero even when the timer is inactive
 	var reentry_heat = (reentry_timer / 3.0) if reentry_timer > 0.0 else 0.0
@@ -1704,6 +1737,16 @@ func _process(delta: float) -> void:
 				var cur_hp: float = float(hp_var) if hp_var != null else 1.0
 				is_dying = cur_hp <= 1.0
 				mineable.take_damage(1.0)
+			elif mineable and mineable.has_method("apply_damage_to_shape"):
+				# PlanetSurfaceStreamer cell aggregate body: one StaticBody3D
+				# holds many CollisionShape3D children, one per scatter prop.
+				# The raycast result tells us which shape index was hit; we
+				# route damage to that exact slot.  Without this branch the
+				# bolt would explode visually but never deal damage to trees.
+				# apply_damage_to_shape returns 0=miss, 1=wounded, 2=killed.
+				var shape_idx: int = int(result.get("shape", 0))
+				var hit_code: int = int(mineable.call("apply_damage_to_shape", shape_idx, 1.0))
+				is_dying = (hit_code == 2)
 			elif hp:
 				is_dying = (hp.current_health <= 25.0)
 				hp.take_damage(25.0)

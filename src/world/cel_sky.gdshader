@@ -77,44 +77,12 @@ void sky() {
 	float sky_grad = smoothstep(-0.35, 0.7, local_e.y);
 	vec3 final_col = mix(horizon_color, zenith_color, sky_grad);
 	
-	// 3. ICONIC WINDWAKER CLOUDS (Deep-Space Throttle)
-	// ACE: We dramatically reduce coordinate precision and movement when in orbit
-	float cloud_throttle = 1.0 - space_blend;
-	vec3 cl_pos1 = local_e * vec3(0.35, 1.2, 0.35); 
-	
-	// If in deep space, we freeze the UVs to a stable state to prevent shimmer
-	vec2 cl_uv1 = cl_pos1.xz + cl_pos1.y * 0.15;
-	if (cloud_throttle < 0.05) {
-		cl_uv1 = floor(cl_uv1 * 100.0) / 100.0;
-	}
-	
-	float base_n = texture(cloud_noise, cl_uv1).r;
-	float bumpy_n = texture(cloud_noise, cl_uv1 * 3.5).r;
-	float final_n = base_n + bumpy_n * 0.2; 
-	float puff_mask1 = step(0.86, final_n);
-	
-	// ICONIC SHADOW SYNC
-	vec2 shad_uv = cl_uv1 - vec2(0.02, 0.02);
-	float n_shad = texture(cloud_noise, shad_uv).r + texture(cloud_noise, shad_uv * 3.5).r * 0.2;
-	float is_shadow = puff_mask1 * (1.0 - step(0.86, n_shad));
-	
-	// Layer B: Distant horizon puffs
-	vec2 cl_uv2 = (local_e * vec3(1.1, 2.5, 1.1)).xz;
-	float n2 = texture(cloud_noise, cl_uv2).r;
-	float puff_mask2 = step(0.92, n2);
-	
-	float cloud_mask = clamp(puff_mask1 + puff_mask2, 0.0, 1.0);
-	
-	// FADE AT HORIZON
-	float atmospheric_wrap = smoothstep(0.04, 0.28, local_e.y);
-	cloud_mask *= atmospheric_wrap;
-	is_shadow *= atmospheric_wrap;
-	
-	final_col = mix(final_col, vec3(1.0), cloud_mask * (1.0 - space_blend));
-	// LUMINOUS CLOUD HARDENING: Light airy feel
-	vec3 light_shadow = mix(vec3(1.0), zenith_color, 0.15);
-	final_col = mix(final_col, light_shadow, is_shadow * (1.0 - space_blend));
-	
+	// Skybox clouds removed — they read as distracting streaks across the
+	// atmosphere and over space. Planet cloud shells
+	// (PlanetGen._spawn_majestic_clouds_and_rings) handle real cloud cover
+	// near a body. cloud_noise uniform left declared so existing material
+	// binding in Main.gd continues to bind without warnings.
+
 	// 4. ICONIC TOON SUN (The central Great Sea star)
 	float sun_dot = max(0.0, dot(EYEDIR, LIGHT0_DIRECTION));
 	float sun_disc = smoothstep(0.9992, 0.9996, sun_dot); // Sharp, iconic disc

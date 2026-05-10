@@ -3,11 +3,55 @@ extends Control
 signal placement_confirmed(world_pos: Vector3, planet_name: String)
 signal placement_canceled()
 
+# Sci-fi planet name pool — classical, compound, catalog-style, and pure made-
+# up entries so each cycle through feels distinct. The randomize button picks
+# from this list on every press; the initial name is also rolled from here.
+const PLANET_NAMES: Array[String] = [
+	# Classical / mythological
+	"Acheron", "Aether", "Aldebaran", "Altair", "Andromeda", "Antares", "Apollo",
+	"Ares", "Arcturus", "Atlas", "Bellatrix", "Betelgeuse", "Calypso", "Cassiopeia",
+	"Centauri", "Cerberus", "Cygnus", "Daedalus", "Deneb", "Eos", "Erebus", "Europa",
+	"Fomalhaut", "Gaia", "Hadar", "Helios", "Hyperion", "Icarus", "Io", "Janus",
+	"Kronos", "Lyra", "Megrez", "Mimas", "Nemesis", "Nyx", "Oberon", "Orion",
+	"Osiris", "Pallas", "Pandora", "Phobos", "Polaris", "Proxima", "Pyxis",
+	"Regulus", "Rigel", "Sirius", "Solaris", "Tartarus", "Tethys", "Thalassa",
+	"Titan", "Triton", "Vega", "Vulcan", "Yggdrasil", "Zephyr", "Zenith",
+	"Asgard", "Avalon", "Elysium", "Olympus", "Valhalla", "Hyperborea", "Hades",
+	# Compound sci-fi
+	"Nova Prime", "Aurora Reach", "Crimson Echo", "Silent Drift", "Vermillion Tide",
+	"Onyx Veil", "Cobalt Halo", "Azure Crest", "Obsidian Sky", "Helix Major",
+	"Quasar Beacon", "Pulsar Edge", "Nebula Pass", "Vortex Reach", "Stellar Forge",
+	"Cinder Reach", "Frost Crown", "Ember Halo", "Mistral Wake", "Verdant Pyre",
+	"Twilight Vale", "Glacial Hymn", "Arc Cardinal", "Singularity Point",
+	"Vermfd  ilion Spire", "Tantalus Hollow", "Cradle Nine", "Iron Reverie",
+	"Echo Prime", "Wraith Ascendant",
+	# Made-up alien
+	"Kelvar", "Xerath", "Vyndor", "Zeyra", "Kaelis", "Threnos", "Vexen", "Sythari",
+	"Ozymar", "Quintar", "Velthros", "Synthia", "Nyxon", "Orethel", "Drazhar",
+	"Ixion", "Maeloth", "Crelix", "Zarathos", "Voltari", "Aeryn", "Kestral",
+	"Talvex", "Brynhal", "Volaria", "Cydon", "Tessari", "Phobaris",
+	# Catalog-style designations
+	"Kepler-186", "Trappist-1", "HD 209458", "Gliese 581", "Wolf 359", "Tau Ceti",
+	"TYC-9999", "PSR-1257", "K2-141", "GJ-1214", "WASP-12", "55 Cancri",
+]
+
 var max_range: float = 6250000.0
 var placement_target: Vector2 = Vector2.ZERO
 var is_valid_placement: bool = false
 var name_input: LineEdit
 var map_display: Control
+var _name_rng: RandomNumberGenerator = RandomNumberGenerator.new()
+
+func _pick_random_planet_name() -> String:
+	if PLANET_NAMES.is_empty():
+		return "Nova Prime"
+	var current: String = name_input.text if name_input != null else ""
+	var pick: String = current
+	for _i in range(8):
+		pick = PLANET_NAMES[_name_rng.randi_range(0, PLANET_NAMES.size() - 1)]
+		if pick != current:
+			break
+	return pick
 
 # Minimum-distance tuning for the placement validator.  Old constants
 # (1500 km between planets, 500 km from stations, 2000 km from player)
@@ -60,19 +104,35 @@ func _ready() -> void:
 	lbl.offset_top = 60
 	add_child(lbl)
 	
-	# Name Input
+	# Name input row — LineEdit + randomize button paired in an HBox.
+	_name_rng.randomize()
+	var name_row := HBoxContainer.new()
+	name_row.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
+	name_row.custom_minimum_size = Vector2(540, 60)
+	name_row.offset_left = -270
+	name_row.offset_top = -180
+	name_row.offset_right = 270
+	name_row.offset_bottom = -120
+	name_row.add_theme_constant_override("separation", 12)
+	add_child(name_row)
+
 	name_input = LineEdit.new()
 	name_input.placeholder_text = "Enter Planet Name..."
 	name_input.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	name_input.add_theme_font_size_override("font_size", 24)
-	name_input.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
-	name_input.custom_minimum_size = Vector2(400, 60)
-	name_input.offset_left = -200
-	name_input.offset_top = -180
-	name_input.offset_right = 200
-	name_input.offset_bottom = -120
-	name_input.text = "Nova Prime"
-	add_child(name_input)
+	name_input.custom_minimum_size = Vector2(420, 60)
+	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_input.text = PLANET_NAMES[_name_rng.randi_range(0, PLANET_NAMES.size() - 1)]
+	name_row.add_child(name_input)
+
+	var randomize_btn := Button.new()
+	randomize_btn.text = "  🎲  "
+	randomize_btn.tooltip_text = "Pick a random sci-fi name"
+	randomize_btn.add_theme_font_size_override("font_size", 28)
+	randomize_btn.custom_minimum_size = Vector2(72, 60)
+	randomize_btn.focus_mode = Control.FOCUS_NONE
+	randomize_btn.pressed.connect(func(): name_input.text = _pick_random_planet_name())
+	name_row.add_child(randomize_btn)
 	
 	# Buttons HBox
 	var hbox = HBoxContainer.new()
@@ -160,7 +220,7 @@ func _on_confirm() -> void:
 	if placement_target == Vector2.ZERO: return
 	if not is_valid_placement: return
 	var p_name = name_input.text.strip_edges()
-	if p_name == "": p_name = "Nova Prime"
+	if p_name == "": p_name = _pick_random_planet_name()
 	
 	placement_confirmed.emit(_map_to_world(placement_target), p_name)
 	queue_free()

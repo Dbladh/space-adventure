@@ -22,6 +22,9 @@ const RESOURCES: Array[Dictionary] = [
 	{name="Gold",            tier=3, rtype="Metallic",  value=250,  abbrev="Au", color=Color(1.00, 0.70, 0.00)},
 	{name="Platinum",        tier=3, rtype="Metallic",  value=500,  abbrev="Pt", color=Color(0.82, 0.88, 0.95)},
 	{name="Primal Fruit",    tier=3, rtype="Organic",   value=450,  abbrev="PF", color=Color(1.00, 0.20, 0.40)},
+	# Sky-isle exclusive — only spawns on floating islands of SKY_ISLES
+	# archetypes. Excluded from the natural surface pool below.
+	{name="Aether Crystal",  tier=3, rtype="Mineral",   value=700,  abbrev="Ae", color=Color(0.45, 0.85, 1.00), sky_only=true},
 	# Tier 4 — Exotic / Crafted Only (never found naturally)
 	{name="Prismatic Alloy", tier=4, rtype="Synthetic", value=1200, abbrev="PA", color=Color(0.80, 0.40, 1.00)},
 	{name="Nebula Core",     tier=4, rtype="Synthetic", value=2500, abbrev="NC", color=Color(0.25, 0.80, 1.00)},
@@ -63,6 +66,9 @@ static func natural_pool(max_tier: int) -> Array[String]:
 	var result: Array[String] = []
 	for r in RESOURCES:
 		if r.name == "Stone" or r.name == "Wood": continue
+		# Biome-exclusive resources (e.g. Aether Crystal on sky-isles) are
+		# spawned by their owning system, never by the planet-surface pool.
+		if r.get("sky_only", false): continue
 		if r.tier <= min(max_tier, 3):
 			result.append(r.name)
 	return result

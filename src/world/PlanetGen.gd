@@ -5,12 +5,18 @@ extends Node3D
 
 var PlanetChunkScript = load("res://src/world/PlanetChunk.gd")
 
-@export var planet_radius: float = 100000.0 
-@export var terrain_strength: float = 5000.0 
-@export var max_lod: int = 18 
+@export var planet_radius: float = 100000.0
+@export var terrain_strength: float = 5000.0
+@export var max_lod: int = 18
 @export var subdivision_bias: float = 1.8
 # Each planet must get a unique seed so terrain is distinct per celestial body!
 @export var planet_seed: int = 1234
+# Phase 3 of LOD rewrite: when true, the new PlanetSurfaceStreamer owns all
+# scatter (trees, rocks, grass, minerals).  Chunks render terrain only.  Set
+# to false to fall back to the legacy per-chunk SurfacePropProxy pipeline
+# (kept around as dead code under this flag for one release in case of regressions).
+@export var streamer_enabled: bool = true
+var surface_streamer: Node = null
 # Resources available to mine on this planet. Set externally before chunks generate.
 # Stone and Wood are always present; extras are tier-gated by how the planet was forged.
 var planet_resources: Array[String] = ["Stone", "Wood", "Copper"]
@@ -159,11 +165,36 @@ func _ready() -> void:
 	sky_zenith_color = Color.from_hsv(0.62, 0.75, 0.35)
 	
 	# ARCHETYPE SYSTEM — THE COSMOLOGIST
-	# Sync with PlanetChunk: 8 thematic archetypes with procedural hue jitter.
-	var archetypes = ["LUSH", "DESERT", "FROZEN", "ALPINE", "VOLCANIC", "CANDY", "RADIATED", "ABYSS"]
+	# Tier-gated archetype pools. Forge rank dictates visual band:
+	#   F/D = drab rocky worlds (browns, greys, tans)
+	#   C/B = vibrant living worlds (greens, yellows, oranges, purples, pinks)
+	#   A/S/SS/★ = standout (lava, ice, iridescent, crystal, aurora, sky-isles)
+	# Unranked planets (legacy/starter) draw from a wide variety pool that
+	# excludes the deliberately-drab F/D archetypes and the rare SS+
+	# exclusives — so the starter system feels rich without giving away
+	# the legendary visuals before they're earned.
+	var TIER_POOLS := {
+		"F":           ["BARREN", "ASH", "MUDFLAT"],
+		"D":           ["DESERT", "RUST", "BARREN", "ASH"],
+		"C":           ["LUSH", "SAVANNA", "SULFUR", "CORAL"],
+		"B":           ["JUNGLE", "CANDY", "TOXIC", "AMETHYST"],
+		"A":           ["VOLCANIC", "FROZEN", "ALPINE", "OBSIDIAN", "ABYSS"],
+		"S":           ["RADIATED", "CRYSTAL", "AURORA", "SKY_ISLES"],
+		"SS":          ["IRIDESCENT", "SKY_ISLES", "CRYSTAL"],
+		"★ LEGENDARY": ["IRIDESCENT", "SKY_ISLES", "CRYSTAL", "AURORA"],
+	}
+	const UNRANKED_POOL := [
+		"LUSH", "DESERT", "FROZEN", "ALPINE", "VOLCANIC", "CANDY", "RADIATED", "ABYSS",
+		"SAVANNA", "JUNGLE", "AMETHYST", "CORAL",
+	]
 	var pal_rng = RandomNumberGenerator.new()
 	pal_rng.seed = hash(str(name) + str(planet_radius) + str(planet_seed)) & 0x7FFFFFFF
-	var theme = archetypes[pal_rng.randi() % archetypes.size()]
+	var pool: Array
+	if planet_rank == "":
+		pool = UNRANKED_POOL
+	else:
+		pool = TIER_POOLS.get(planet_rank, UNRANKED_POOL)
+	var theme: String = pool[pal_rng.randi() % pool.size()]
 	self.archetype = theme
 	
 	# SEA LEVEL RANDOMIZATION: The Hydrologist
@@ -174,10 +205,13 @@ func _ready() -> void:
 	
 	# TOPOGRAPHY DIVERSIFICATION: The Cartographer
 	# We randomize how 'aggressive' the terrain is based on a separate roll.
+	# Tier biases the roll: F/D worlds skew flatter (drab feel), A/S/SS skew
+	# toward MOUNTAINOUS/EXTREME (so legendary planets are visibly dramatic).
 	var topo_rng = RandomNumberGenerator.new()
 	topo_rng.seed = hash(str(planet_seed) + "topo") & 0x7FFFFFFF
-	var topo_roll = topo_rng.randf()
-	
+	var topo_bias: float = _tier_topo_bias(planet_rank)
+	var topo_roll: float = clampf(topo_rng.randf() + topo_bias, 0.0, 1.0)
+
 	if topo_roll > 0.9:
 		terrain_mode = "EXTREME"
 		terrain_multiplier = 1.8
@@ -194,24 +228,35 @@ func _ready() -> void:
 		terrain_mode = "FLAT"
 		terrain_multiplier = 0.25
 		noise_frequency = 300.0
-	
+
 	# ACE: Global scale correction for small planets (100km range)
 	# We scale strength linearly with radius to prevent the 'spikey' look.
+	# Drama multiplier on top scales mountain HEIGHT directly with tier — an
+	# S-tier MOUNTAINOUS planet will tower well over a C-tier MOUNTAINOUS one.
 	var scale_fix = planet_radius / 180000.0
-	terrain_strength = 2800.0 * scale_fix * terrain_multiplier
+	var tier_drama: float = _tier_drama_scale(planet_rank)
+	terrain_strength = 2800.0 * scale_fix * terrain_multiplier * tier_drama
 	
 	# BIOLUMINESCENCE ROLL: The Exobiologist
-	# Only 12% of planets exhibit natural glowing flora (S-Tier rarity)
-	# CANDY and RADIATED archetypes have a 2.5x higher chance.
-	var bio_chance = 0.12
-	if archetype == "CANDY" or archetype == "RADIATED": bio_chance = 0.30
-	has_bioluminescence = hydro_rng.randf() < bio_chance
-	
-	print("--- CARTOGRAPHER: Planet [%s] Type: [%s] Topo: [%s] Bio: [%s] ---" % [name, archetype, terrain_mode, str(has_bioluminescence)])
-	
-	# INITIALIZE SHARED MATERIALS: Now at the end so trait rolls (Bio/Archetype) are baked in
-	_init_shared_materials()
-	
+	# Glow is now archetype-driven so the player reads it as a tier signal:
+	#   * S/SS exclusives glow always (CRYSTAL, AURORA, IRIDESCENT, SKY_ISLES, RADIATED)
+	#   * Vibrant C/B types glow ~30% (CANDY, JUNGLE, CORAL, SULFUR)
+	#   * Drab F/D worlds never glow (would muddle the "dead rock" read)
+	#   * Anything else gets a 5% easter-egg chance.
+	var always_bio := ["RADIATED", "CRYSTAL", "AURORA", "IRIDESCENT", "SKY_ISLES"]
+	var often_bio := ["CANDY", "JUNGLE", "CORAL", "SULFUR"]
+	var never_bio := ["BARREN", "ASH", "MUDFLAT", "DESERT", "RUST"]
+	if archetype in always_bio:
+		has_bioluminescence = true
+	elif archetype in never_bio:
+		has_bioluminescence = false
+	elif archetype in often_bio:
+		has_bioluminescence = hydro_rng.randf() < 0.30
+	else:
+		has_bioluminescence = hydro_rng.randf() < 0.05
+
+	print("--- CARTOGRAPHER: Planet [%s] Type: [%s] Rank: [%s] Topo: [%s] Bio: [%s] ---" % [name, archetype, planet_rank, terrain_mode, str(has_bioluminescence)])
+
 	match theme:
 		"LUSH":
 			var h = pal_rng.randf_range(0.28, 0.42)
@@ -256,7 +301,84 @@ func _ready() -> void:
 			pal_grass_col = Color.from_hsv(0.65, 0.8, 0.25)
 			pal_mount_col = Color.from_hsv(0.7, 0.5, 0.1)
 			pal_water_base = Color.from_hsv(0.65, 0.95, 0.2)
-	
+		# ── F-TIER drab rocky worlds ─────────────────────────────────
+		"BARREN":
+			var h = pal_rng.randf_range(0.0, 0.1)
+			pal_grass_col = Color.from_hsv(h, 0.05, 0.55)   # cratered grey dust
+			pal_mount_col = Color.from_hsv(0.0, 0.0, 0.4)   # bare rock
+			pal_water_base = Color.from_hsv(0.6, 0.1, 0.3)  # dry seabed
+		"ASH":
+			var h = pal_rng.randf_range(0.02, 0.08)
+			pal_grass_col = Color.from_hsv(h, 0.1, 0.28)    # charred soot
+			pal_mount_col = Color.from_hsv(h, 0.05, 0.15)   # near-black basalt
+			pal_water_base = Color.from_hsv(0.0, 0.0, 0.18) # black tar
+		"MUDFLAT":
+			var h = pal_rng.randf_range(0.06, 0.11)
+			pal_grass_col = Color.from_hsv(h, 0.4, 0.45)    # brown sludge
+			pal_mount_col = Color.from_hsv(h, 0.3, 0.3)     # wet rock
+			pal_water_base = Color.from_hsv(h, 0.5, 0.35)   # silty water
+		# ── D-TIER drab rocky worlds ─────────────────────────────────
+		"RUST":
+			var h = pal_rng.randf_range(0.02, 0.06)
+			pal_grass_col = Color.from_hsv(h, 0.7, 0.55)    # iron-oxide red-brown
+			pal_mount_col = Color.from_hsv(h, 0.5, 0.3)     # darker rust
+			pal_water_base = Color.from_hsv(0.05, 0.85, 0.35) # blood-red brine
+		# ── C-TIER vibrant worlds ────────────────────────────────────
+		"SAVANNA":
+			var h = pal_rng.randf_range(0.13, 0.16)
+			pal_grass_col = Color.from_hsv(h, 0.55, 0.85)   # ochre grasslands
+			pal_mount_col = Color.from_hsv(0.08, 0.4, 0.5)  # dry tan rock
+			pal_water_base = Color.from_hsv(0.55, 0.6, 0.7) # warm shallow blue
+		"SULFUR":
+			pal_grass_col = Color.from_hsv(0.14, 0.95, 0.95)  # bright yellow
+			pal_mount_col = Color.from_hsv(0.08, 0.7, 0.55)   # orange rock
+			pal_water_base = Color.from_hsv(0.06, 0.95, 0.7)  # acid orange pools
+		"CORAL":
+			var h = pal_rng.randf_range(0.02, 0.06)
+			pal_grass_col = Color.from_hsv(h, 0.7, 0.95)    # coral orange
+			pal_mount_col = Color.from_hsv(h+0.02, 0.5, 0.55)
+			pal_water_base = Color.from_hsv(0.48, 0.7, 0.85) # vivid teal
+		# ── B-TIER vibrant worlds ────────────────────────────────────
+		"JUNGLE":
+			pal_grass_col = Color.from_hsv(0.32, 0.9, 0.7)    # saturated emerald
+			pal_mount_col = Color.from_hsv(0.28, 0.45, 0.4)
+			pal_water_base = Color.from_hsv(0.42, 0.85, 0.45) # deep green river
+		"AMETHYST":
+			var h = pal_rng.randf_range(0.74, 0.82)
+			pal_grass_col = Color.from_hsv(h, 0.6, 0.7)
+			pal_mount_col = Color.from_hsv(h, 0.7, 0.45)    # purple rock
+			pal_water_base = Color.from_hsv(h+0.04, 0.7, 0.5) # violet sea
+		# ── A-TIER show-stoppers ─────────────────────────────────────
+		"OBSIDIAN":
+			pal_grass_col = Color.from_hsv(0.0, 0.0, 0.08)    # black glass
+			pal_mount_col = Color.from_hsv(0.0, 0.0, 0.04)
+			pal_water_base = Color.from_hsv(0.02, 1.0, 0.6)   # crimson lava
+		# ── S-TIER show-stoppers ─────────────────────────────────────
+		"CRYSTAL":
+			# Multi-hue saturated palette — emission uniform pulses on top.
+			var h = pal_rng.randf_range(0.0, 1.0)
+			pal_grass_col = Color.from_hsv(h, 0.85, 0.85)     # gem face
+			pal_mount_col = Color.from_hsv(fposmod(h+0.5, 1.0), 0.85, 0.55)  # complementary cluster
+			pal_water_base = Color.from_hsv(fposmod(h+0.25, 1.0), 0.7, 0.7)
+		"AURORA":
+			# ALPINE-like base — aurora ring overrides the sky tone.
+			var h = pal_rng.randf_range(0.55, 0.65)
+			pal_grass_col = Color.from_hsv(h, 0.2, 0.95)      # snow with cool tint
+			pal_mount_col = Color.from_hsv(h, 0.5, 0.4)
+			pal_water_base = Color.from_hsv(h, 0.7, 0.85)
+		"SKY_ISLES":
+			# Vibrant green/teal terrain that floating islands match.
+			var h = pal_rng.randf_range(0.35, 0.45)
+			pal_grass_col = Color.from_hsv(h, 0.75, 0.85)
+			pal_mount_col = Color.from_hsv(h-0.02, 0.5, 0.5)
+			pal_water_base = Color.from_hsv(h+0.05, 0.65, 0.85)
+		# ── SS / ★ LEGENDARY show-stopper ────────────────────────────
+		"IRIDESCENT":
+			# Neutral mid-tone base — iridescence shader uniform paints rainbow on top.
+			pal_grass_col = Color.from_hsv(0.5, 0.15, 0.65)
+			pal_mount_col = Color.from_hsv(0.5, 0.1, 0.45)
+			pal_water_base = Color.from_hsv(0.6, 0.4, 0.7)
+
 	# GENERATE SECONDARY COLOR PALETTE
 	# Using explicit derivations to ensure complementary colors 
 	pal_forest_col = pal_grass_col.darkened(0.2)
@@ -267,6 +389,12 @@ func _ready() -> void:
 	
 	base_hue = pal_grass_col.h
 	self.pal_forest_h = base_hue # Seed for tree variety
+
+	# INITIALIZE SHARED MATERIALS — must run AFTER the palette and archetype are
+	# rolled so the land/water shaders pick up the right colours and the new
+	# archetype-driven uniforms (iridescence, snow-spec, crystal emission, lava).
+	_init_shared_materials()
+
 	print("--- ARCHITECT: Planet [%s] Initialized. Theme: %s (Radius: %d) ---" % [name, theme, planet_radius])
 	
 	# MAJOR CONTINENT ARCHITECT: Every planet gets one iconic, massive landmass
@@ -277,10 +405,22 @@ func _ready() -> void:
 		var face = QuadTreeFace.new(self, FACE_NORMALS[i])
 		faces.append(face)
 		add_child(face)
+
+	# Stand up the cell streamer.  When streamer_enabled is true, chunks
+	# render terrain only and the streamer owns scatter lifecycle atomically.
+	if streamer_enabled:
+		var streamer_script: GDScript = load("res://src/world/streaming/PlanetSurfaceStreamer.gd") as GDScript
+		if streamer_script != null:
+			surface_streamer = streamer_script.new()
+			surface_streamer.name = "PlanetSurfaceStreamer"
+			add_child(surface_streamer)
 	# ACE: Inject majestic cloud belts and celestial rings — visible against the charcoal void
 	_spawn_majestic_clouds_and_rings(rng, base_hue)
 	# ACE: Scatter colossal Hero Landmarks as navigation anchors across the planet surface
 	_spawn_hero_landmarks(rng)
+	# S-tier exclusive: floating sky-islands ringing the planet.
+	if archetype == "SKY_ISLES":
+		_spawn_sky_isles(rng)
 	# Per-planet POI beacon disabled — the off-axis pillar wasn't useful as a
 	# navigation aid (it pointed at +Y pole, not the player) and rendered as
 	# stray geometry through transparent water/lava surfaces. Stations keep
@@ -291,33 +431,73 @@ func _ready() -> void:
 
 func get_terrain_height_at(pos: Vector3) -> float:
 	var sphere_norm: Vector3 = (pos - global_position).normalized()
-	var macro_h: float = noise.get_noise_3dv(sphere_norm * 500.0)
+	# Macro frequency is per-planet topography (FLAT=300..EXTREME=800). Hardcoding 500
+	# here placed hero landmarks at an estimated surface height that didn't match the
+	# actual rendered terrain on 75% of planets.
+	var macro_h: float = noise.get_noise_3dv(sphere_norm * noise_frequency)
 	var micro_crag: float = noise.get_noise_3dv(sphere_norm * 15000.0) * 0.1
 	var total_h: float = 0.0
 
 	match archetype:
-		"DESERT":
+		"DESERT", "RUST":
 			# MESAS & CANYONS: Sharp transitions between flat high-ground and flat low-ground
-			var mesa = smoothstep(-0.1, 0.1, macro_h) * 2.0 - 1.0 
+			var mesa = smoothstep(-0.1, 0.1, macro_h) * 2.0 - 1.0
 			total_h = (mesa * 0.6 + micro_crag) * terrain_strength * 0.7
-		"VOLCANIC", "ABYSS":
+		"VOLCANIC", "ABYSS", "OBSIDIAN":
 			# JAGGED RIDGES: Extreme peaks and deep, sharp ravines using 'Ridge Noise' (1.0 - abs(noise))
-			var jagged = 1.0 - abs(macro_h * 1.5) 
+			var jagged = 1.0 - abs(macro_h * 1.5)
 			total_h = (jagged * 2.0 - 0.8 + micro_crag * 2.5) * terrain_strength * 1.4
 		"FROZEN":
 			# GLACIAL PLAINS: Smooth, sweeping drifts punctuated by sudden, violent ice spikes
 			var plains = macro_h * 0.4
 			var spikes = max(0.0, noise.get_noise_3dv(sphere_norm * 2500.0) - 0.65) * 6.0
 			total_h = (plains + spikes + micro_crag * 0.4) * terrain_strength
-		"TOXIC", "RADIATED":
+		"TOXIC", "RADIATED", "SULFUR":
 			# POCKMARKED WASTELAND: Heavily cratered and unnatural, chaotic frequency
 			var craters = abs(noise.get_noise_3dv(sphere_norm * 1200.0))
 			var bubbling = noise.get_noise_3dv(sphere_norm * 3000.0) * 0.5
 			total_h = (macro_h - craters * 1.8 + bubbling + micro_crag) * terrain_strength * 0.6
-		"ALPINE":
+		"ALPINE", "AURORA", "CRYSTAL", "AMETHYST":
 			# CRAGGY PEAKS: High-frequency ridge noise for dramatic vertical scale
 			var ridge = 1.0 - abs(macro_h)
 			total_h = (ridge * 2.5 - 0.8 + micro_crag * 1.5) * terrain_strength * 1.5
+		"BARREN":
+			# CRATERED MOON: Round impact basins on otherwise rolling rock.
+			var craters = pow(abs(noise.get_noise_3dv(sphere_norm * 900.0)), 2.5)
+			total_h = (macro_h * 0.6 - craters * 1.6 + micro_crag) * terrain_strength * 0.9
+		"ASH":
+			# DEAD VOLCANIC: Like VOLCANIC but compressed — burnt-out cones rather than tall ridges.
+			var jagged = 1.0 - abs(macro_h * 1.2)
+			total_h = (jagged * 1.4 - 0.5 + micro_crag * 1.5) * terrain_strength * 0.9
+		"MUDFLAT":
+			# WET SLUDGE PLAINS: nearly flat with shallow rolling bulges.
+			total_h = (macro_h * 0.35 + micro_crag * 0.5) * terrain_strength * 0.45
+		"SAVANNA":
+			# Open rolling plains with the occasional broad rise.
+			var roll = macro_h * 0.8
+			var rises = max(0.0, noise.get_noise_3dv(sphere_norm * 1200.0) - 0.4) * 1.6
+			total_h = (roll + rises + micro_crag * 0.6) * terrain_strength * 0.85
+		"JUNGLE":
+			# Deeply terraced river valleys cut between high mesas — the
+			# classic "lost world" silhouette: more vertical than LUSH.
+			total_h = (macro_h + micro_crag * 1.4) * terrain_strength * 1.25
+			# tighter terracing on top of the base for tabletop mesas
+			var h_frac = fposmod(total_h, 60.0) / 60.0
+			total_h = (floor(total_h / 60.0) + smoothstep(0.10, 0.90, h_frac)) * 60.0
+		"CORAL":
+			# Submerged reefs and shallow shelves — most of the surface
+			# sits just under sea level with isolated coral atolls poking up.
+			var reef = max(0.0, noise.get_noise_3dv(sphere_norm * 1800.0) - 0.55) * 4.0
+			total_h = (macro_h * 0.45 + reef + micro_crag) * terrain_strength * 0.7
+		"SKY_ISLES":
+			# Shattered hill country: sharp plateaus with deep rifts that
+			# echo the floating islands above.
+			var ridge = 1.0 - abs(macro_h)
+			total_h = (ridge * 1.6 - 0.4 + micro_crag * 1.8) * terrain_strength * 1.2
+		"IRIDESCENT":
+			# Smooth oily dunes — minimal sharp features so the shader's
+			# rainbow shimmer reads cleanly across broad surfaces.
+			total_h = (macro_h * 0.7 + micro_crag * 0.3) * terrain_strength * 0.6
 		_:
 			# LUSH / CANDY / DEFAULT: The classic 'No Man's Sky' smooth terraced hills
 			total_h = (macro_h + micro_crag) * terrain_strength
@@ -578,33 +758,585 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		r_inst.scale = Vector3(1.0, 0.015, 1.0)
 		r_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(r_inst)
 
-	# 3. POLAR AURORAS — disabled. The transparent sphere shader's smoothstep
-	# gradient quantized into ~8 visible latitude rings under the halftone
-	# post-process no matter how low we pushed the alpha. Snowy poles are
-	# now driven entirely by the surface shader's polar_snow band.
-	# _spawn_polar_auroras(pal_grass_col)
+	# 3. POLAR AURORAS — generic version disabled (smoothstep gradient
+	# quantized into visible latitude rings under the halftone post-process).
+	# AURORA archetype gets a dedicated noise-driven curtain instead.
+	if archetype == "AURORA":
+		_spawn_aurora_curtain()
 
-func _spawn_polar_auroras(base_color: Color) -> void:
-	var a_mesh = SphereMesh.new(); a_mesh.radius = planet_radius + 4500.0; a_mesh.height = a_mesh.radius * 2.0; a_mesh.radial_segments = 48; a_mesh.rings = 24
-	# Toned down: narrower polar band (0.85→0.97 instead of 0.68→0.92) so the
-	# aura only kisses the poles, plus much lower alpha so the halftone
-	# post-process quantization isn't visible as concentric rings.
-	var a_shader = Shader.new(); a_shader.code = """shader_type spatial; render_mode unshaded, blend_add, depth_draw_always, cull_disabled;
-	uniform vec3 aura_col;
+func _spawn_aurora_curtain() -> void:
+	# Wide animated curtain spanning most of the planet, broken up by noise
+	# so the halftone post-process doesn't quantize it into visible rings.
+	# Colours pulled from the iconic green/violet aurora gradient — independent
+	# of the planet palette so AURORA reads consistently across worlds.
+	var a_mesh = SphereMesh.new()
+	a_mesh.radius = planet_radius + 5500.0
+	a_mesh.height = a_mesh.radius * 2.0
+	a_mesh.radial_segments = 64
+	a_mesh.rings = 32
+	var a_shader = Shader.new()
+	a_shader.code = """shader_type spatial; render_mode unshaded, blend_add, depth_draw_always, cull_disabled;
+	uniform vec3 aura_lo  : source_color = vec3(0.10, 0.85, 0.55);
+	uniform vec3 aura_hi  : source_color = vec3(0.55, 0.20, 0.95);
 	varying vec3 v_local_pos;
 	void vertex() { v_local_pos = VERTEX; }
+	float hash3(vec3 p) {
+		return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+	}
+	float vnoise(vec3 p) {
+		vec3 i = floor(p); vec3 f = fract(p);
+		f = f * f * (3.0 - 2.0 * f);
+		return mix(mix(mix(hash3(i + vec3(0,0,0)), hash3(i + vec3(1,0,0)), f.x),
+		               mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
+		           mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x),
+		               mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y), f.z);
+	}
 	void fragment() {
-		float polar = smoothstep(0.85, 0.97, abs(normalize(v_local_pos).y));
-		if (polar <= 0.01) { discard; }
-		ALBEDO = aura_col; ALPHA = polar * 0.22;
+		vec3 dir = normalize(v_local_pos);
+		// Wide latitude band centred on equator and the poles — three bands
+		// total, broken up by drifting noise so they read as ribbons not rings.
+		float lat = abs(dir.y);
+		float band_a = smoothstep(0.0, 0.35, 1.0 - lat);
+		float band_b = smoothstep(0.40, 0.85, lat);
+		float band = max(band_a, band_b);
+		float ribbon = vnoise(dir * 6.0 + vec3(TIME * 0.05, 0.0, TIME * 0.03));
+		float ribbon2 = vnoise(dir * 14.0 + vec3(0.0, TIME * 0.08, 0.0));
+		float curtain = smoothstep(0.45, 0.85, ribbon * 0.7 + ribbon2 * 0.3);
+		float a = band * curtain;
+		if (a <= 0.01) { discard; }
+		vec3 col = mix(aura_lo, aura_hi, ribbon);
+		ALBEDO = col;
+		ALPHA = a * 0.55;
 	}"""
-	var a_inst = MeshInstance3D.new(); a_inst.mesh = a_mesh; a_inst.material_override = ShaderMaterial.new(); a_inst.material_override.shader = a_shader
-	a_inst.material_override.set_shader_parameter("aura_col", base_color.lightened(0.25))
-	a_inst.visibility_range_end = PROXIMITY_CUTOFF; add_child(a_inst)
+	var a_inst = MeshInstance3D.new()
+	a_inst.mesh = a_mesh
+	a_inst.material_override = ShaderMaterial.new()
+	a_inst.material_override.shader = a_shader
+	a_inst.material_override.render_priority = 7
+	a_inst.visibility_range_end = PROXIMITY_CUTOFF
+	add_child(a_inst)
+
+func _spawn_sky_isles(rng: RandomNumberGenerator) -> void:
+	# S-tier SKY_ISLES exclusive: floating islands in stable orbits above
+	# the planet. Each isle is a StaticBody3D so the player ship can land
+	# on it; the hull is built at world-scale (no parent node scaling) so
+	# the planet's own tree/rock meshes can be reused at their natural size.
+	# The whole flotilla parents under a single rotating Node3D so we get
+	# orbital animation with one transform.
+	var orbit := Node3D.new()
+	orbit.name = "SkyIsleOrbit"
+	add_child(orbit)
+	orbit.set_script(preload("res://src/world/SkyIsleOrbit.gd"))
+
+	# Single shared hull material — vertex-colour drives biome look so we
+	# don't create thousands of unique materials. Trees, trunks, and rocks
+	# reuse the planet's own materials (planet.foliage_material etc.) so
+	# the isles are visually a chip off the planet they orbit.
+	var hull_mat := StandardMaterial3D.new()
+	hull_mat.vertex_color_use_as_albedo = true
+	hull_mat.roughness = 0.92
+	hull_mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+
+	# Pull the planet's actual tree / trunk / rock meshes. Built lazily
+	# by PlanetChunk on first chunk-gen; isles spawn before any chunk runs
+	# so we use a scratch chunk to populate the cache here.
+	var prop_meshes: Dictionary = _ensure_isle_prop_meshes()
+
+	# Tier scales the flotilla — SS/legendary worlds blanket the sky.
+	var count_mult: float = _tier_drama_scale(planet_rank)
+	var count: int = int(rng.randi_range(8, 24) * count_mult)
+	var altitude_min: float = planet_radius * 0.08
+	var altitude_max: float = planet_radius * 0.18
+	for i in range(count):
+		var lat: float = rng.randf_range(-1.0, 1.0)
+		var lon: float = rng.randf_range(0.0, TAU)
+		var sphere_dir := Vector3(cos(lat) * cos(lon), sin(lat), cos(lat) * sin(lon)).normalized()
+		var altitude: float = rng.randf_range(altitude_min, altitude_max)
+		var pos: Vector3 = sphere_dir * (planet_radius + altitude)
+
+		# Per-isle parameters. Radius in world units (no node scaling — we
+		# need props to render at their natural sizes).
+		var radius: float = rng.randf_range(2000.0, 5500.0) * count_mult
+		var height: float = radius * 0.55
+		var has_basin: bool = rng.randf() < 0.35
+
+		# StaticBody3D so the ship can land on the hull.
+		var isle := StaticBody3D.new()
+		isle.collision_layer = 1   # World layer — same as planet terrain
+		isle.collision_mask = 0    # static body, doesn't query
+		isle.position = pos
+		var up: Vector3 = sphere_dir
+		var fwd: Vector3 = up.cross(Vector3.RIGHT).normalized()
+		if fwd.length_squared() < 0.01:
+			fwd = up.cross(Vector3.FORWARD).normalized()
+		isle.transform.basis = Basis(fwd.cross(up).normalized(), up, -fwd)
+		orbit.add_child(isle)
+
+		# Pre-compute the isle's top-rim Y so the hull builder, water basin,
+		# and prop scatter all agree on where the surface is.  The procedural
+		# hull picks a randomized top_h per isle; if the scatter functions
+		# used a hardcoded 0.20*height (the old value) trees and rocks would
+		# float above the surface or sink below it on every isle whose
+		# top_h drifted away from 0.20.
+		var top_h: float = height * rng.randf_range(0.15, 0.28)
+
+		# Hull: tiered cliff + grass top + tapered rocky underside.
+		var hull_mesh: ArrayMesh = _build_sky_isle_mesh(rng, has_basin, radius, height, top_h)
+		var hull := MeshInstance3D.new()
+		hull.mesh = hull_mesh
+		hull.material_override = hull_mat
+		hull.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		hull.visibility_range_end = PROXIMITY_CUTOFF * 0.4
+		hull.visibility_range_end_margin = 50000.0
+		isle.add_child(hull)
+
+		# Convex collision derived from hull vertices — close enough for
+		# landing/docking and far cheaper than a trimesh.
+		var coll := CollisionShape3D.new()
+		coll.shape = hull_mesh.create_convex_shape()
+		isle.add_child(coll)
+
+		# Optional water basin sunk slightly into the top dome — uses the
+		# planet's own water material so colour + lava state match.
+		# Basin radius and Y offset (relative to the actual top rim) are
+		# randomized so basins on different isles read as different bodies
+		# of water.
+		if has_basin and water_material:
+			var basin_radius: float = radius * rng.randf_range(0.40, 0.65)
+			var basin_drop: float = top_h * rng.randf_range(0.10, 0.30)
+			var water := MeshInstance3D.new()
+			water.mesh = _build_isle_water_disc(basin_radius, rng)
+			water.material_override = water_material
+			water.position = Vector3(0, top_h - basin_drop, 0)
+			water.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			isle.add_child(water)
+
+		# Plant the planet's own trees + rocks on top.  Pass the actual
+		# top-rim Y so props sit on the real surface, not a hardcoded value.
+		_scatter_isle_props(isle, rng, has_basin, radius, height, top_h, prop_meshes)
+
+		# Aether Crystal — sky-isle exclusive rare mineral.  1-3 deposits per
+		# isle, placed near the top surface but away from the centre/basin.
+		_scatter_isle_aether_crystals(isle, rng, has_basin, radius, height, top_h)
+
+func _ensure_isle_prop_meshes() -> Dictionary:
+	# Returns { fol_h, trk_h, rock } — the planet's own foliage / trunk /
+	# rock meshes for this archetype. PlanetChunk caches these statically
+	# in `_c_fol_h_by_arch` etc. but the cache is only populated when a
+	# chunk's _spawn_tree_lods runs. Isles spawn during PlanetGen._ready
+	# (before any chunk renders), so we instantiate a scratch PlanetChunk
+	# here just to drive the per-archetype cache build.
+	var fol: ArrayMesh = null
+	var trk: ArrayMesh = null
+	var rock: ArrayMesh = null
+	if PlanetChunkScript:
+		var fol_cache: Dictionary = PlanetChunkScript.get("_c_fol_h_by_arch")
+		var trk_cache: Dictionary = PlanetChunkScript.get("_c_trk_h_by_arch")
+		if fol_cache != null and fol_cache.has(archetype):
+			fol = fol_cache[archetype]
+		if trk_cache != null and trk_cache.has(archetype):
+			trk = trk_cache[archetype]
+		rock = PlanetChunkScript.get("_c_r")
+		if fol == null or trk == null or rock == null:
+			# Scratch chunk just to call the (instance-method) builders.
+			# Discarded after the meshes are cached statically.
+			var scratch: Node = PlanetChunkScript.new()
+			scratch.set("archetype", archetype)
+			scratch.set("pal_grass_col", pal_grass_col)
+			scratch.set("pal_mount_col", pal_mount_col)
+			scratch.set("pal_forest_h", pal_forest_h)
+			if fol == null: fol = scratch.call("_build_varied_foliage", true, 4)
+			if trk == null: trk = scratch.call("_build_botw_trunk", true)
+			if rock == null: rock = scratch.call("_build_faceted_rock_mesh", 12)
+			# Persist into the static caches so subsequent chunks reuse them.
+			if fol_cache != null: fol_cache[archetype] = fol
+			if trk_cache != null: trk_cache[archetype] = trk
+			PlanetChunkScript.set("_c_r", rock)
+			scratch.queue_free()
+	return {"fol_h": fol, "trk_h": trk, "rock": rock}
+
+func _build_sky_isle_mesh(rng: RandomNumberGenerator, has_basin: bool, radius: float, height: float, top_h: float) -> ArrayMesh:
+	# Mesh built directly in WORLD units (no parent scaling) so the planet's
+	# tree/rock meshes — which are also world-sized — sit on top at the
+	# correct relative size.  `top_h` (Y of the outer rim) is supplied by the
+	# caller so prop scatter functions can place trees/rocks at the matching
+	# height; the rest of the silhouette is procedurally derived here.
+	#
+	# Procedural variation per isle:
+	#   - Side count (silhouette resolution) varies 18..30.
+	#   - Tier count varies 3..6 — fewer tiers feels squat, more feels tall.
+	#   - Each tier's y-position and inset (rfrac) is randomized within a band
+	#     so no two isles share the exact silhouette.
+	#   - Per-spoke radial noise (two stacked sin harmonics + per-spoke jitter)
+	#     gives every spoke a unique outline rather than a regular polygon.
+	#   - A "lean" vector tilts the whole shape slightly so isles aren't axially
+	#     symmetric, which sells the floating-rock look.
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var sides: int = rng.randi_range(18, 30)
+	var tier_count: int = rng.randi_range(3, 6)
+	var dome_h: float = (height * rng.randf_range(0.06, 0.14)) if not has_basin else (height * rng.randf_range(0.03, 0.07))
+	var bottom_y: float = -height
+
+	var grass_col: Color = pal_grass_col
+	var grass_dim: Color = pal_grass_col.darkened(0.18)
+	var dirt_col: Color = pal_mount_col.lerp(pal_grass_col, 0.18).darkened(0.05)
+	var rock_palette: Array = [
+		pal_mount_col.darkened(0.05),
+		pal_mount_col.darkened(0.18),
+		pal_mount_col.darkened(0.28),
+		pal_mount_col.darkened(0.40),
+	]
+	var rock_dark: Color = pal_mount_col.darkened(0.35)
+
+	# Build per-tier specs procedurally so each isle has a unique silhouette.
+	# The top tier is always grass_dim at top_h with the full base radius;
+	# subsequent tiers descend monotonically in y and step inward in rfrac.
+	var tier_specs: Array = [{"y": top_h, "rfrac": 1.0, "color": grass_dim}]
+	tier_specs.append({"y": top_h * rng.randf_range(0.25, 0.55), "rfrac": rng.randf_range(0.93, 0.98), "color": dirt_col})
+	var remaining: int = tier_count - 1
+	for t in range(remaining):
+		var prog: float = float(t + 1) / float(remaining + 1)
+		# y descends from ~-0.05*height to ~-0.6*height with jitter.
+		var y_norm: float = lerp(-0.05, -0.60, prog) + rng.randf_range(-0.04, 0.04)
+		var rfrac: float = lerp(0.92, 0.55, prog) + rng.randf_range(-0.06, 0.04)
+		rfrac = clamp(rfrac, 0.40, 0.96)
+		tier_specs.append({
+			"y": height * y_norm,
+			"rfrac": rfrac,
+			"color": rock_palette[t % rock_palette.size()],
+		})
+
+	# Asymmetric "lean" — drift each tier's center off-axis to make isles
+	# look chunky/uneven instead of pure rotational solids.
+	var lean_amp: float = radius * rng.randf_range(0.0, 0.08)
+	var lean_ang: float = rng.randf() * TAU
+	var lean_dir: Vector3 = Vector3(cos(lean_ang), 0.0, sin(lean_ang))
+
+	# Two stacked sin harmonics (different periods + phases) drive per-spoke
+	# radial noise.  Combined amplitude ~12%.
+	var harm_a_period: float = rng.randf_range(2.0, 4.0)
+	var harm_a_phase: float = rng.randf() * TAU
+	var harm_a_amp: float = rng.randf_range(0.04, 0.09)
+	var harm_b_period: float = rng.randf_range(5.0, 9.0)
+	var harm_b_phase: float = rng.randf() * TAU
+	var harm_b_amp: float = rng.randf_range(0.02, 0.05)
+
+	# Build per-tier rings with the procedural deformations.
+	var rings: Array = []
+	for spec_i in range(tier_specs.size()):
+		var spec: Dictionary = tier_specs[spec_i]
+		var ring: PackedVector3Array = PackedVector3Array()
+		# Lean amount tapers from 0 at the top to full at the bottom so the
+		# isle leans like a hanging stalactite.
+		var lean_t: float = float(spec_i) / float(tier_specs.size() - 1)
+		var lean_off: Vector3 = lean_dir * (lean_amp * lean_t)
+		for i in range(sides):
+			var a: float = float(i) / sides * TAU
+			var harm: float = sin(a * harm_a_period + harm_a_phase) * harm_a_amp \
+							+ sin(a * harm_b_period + harm_b_phase) * harm_b_amp \
+							+ rng.randf_range(-0.02, 0.02)
+			var r: float = max(0.30, spec.rfrac + harm) * radius
+			ring.append(Vector3(cos(a) * r + lean_off.x, spec.y, sin(a) * r + lean_off.z))
+		rings.append(ring)
+
+	var top_edge: PackedVector3Array = rings[0]
+	var top_centre := Vector3(0, top_h + dome_h, 0)
+
+	# Top fan (grass dome).
+	for i in range(sides):
+		var i_next: int = (i + 1) % sides
+		var v0: Vector3 = top_edge[i]
+		var v1: Vector3 = top_edge[i_next]
+		st.set_color(grass_col); st.add_vertex(top_centre)
+		st.set_color(grass_dim); st.add_vertex(v1)
+		st.set_color(grass_dim); st.add_vertex(v0)
+
+	# Tier walls — each pair of consecutive rings forms a tapered band of
+	# quads. Bottom ring of each pair gets the next tier's colour so the
+	# step where a tier ends is visible.
+	for tier in range(rings.size() - 1):
+		var upper: PackedVector3Array = rings[tier]
+		var lower: PackedVector3Array = rings[tier + 1]
+		var upper_col: Color = tier_specs[tier].color
+		var lower_col: Color = tier_specs[tier + 1].color
+		# Horizontal step: connect upper ring outer to lower ring outer at
+		# upper's Y level so the tier reads as a flat shelf before dropping.
+		# (Build the shelf as a triangle strip from upper to a "shelf" ring
+		# that has lower's radius but upper's Y.)
+		var shelf: PackedVector3Array = PackedVector3Array()
+		for i in range(sides):
+			var lo: Vector3 = lower[i]
+			shelf.append(Vector3(lo.x, upper[i].y, lo.z))
+		# Shelf top — between upper ring and shelf ring (flat horizontal band).
+		for i in range(sides):
+			var i_next: int = (i + 1) % sides
+			var u0: Vector3 = upper[i]
+			var u1: Vector3 = upper[i_next]
+			var s0: Vector3 = shelf[i]
+			var s1: Vector3 = shelf[i_next]
+			st.set_color(upper_col); st.add_vertex(u0)
+			st.set_color(upper_col); st.add_vertex(u1)
+			st.set_color(upper_col); st.add_vertex(s1)
+			st.set_color(upper_col); st.add_vertex(u0)
+			st.set_color(upper_col); st.add_vertex(s1)
+			st.set_color(upper_col); st.add_vertex(s0)
+		# Vertical drop — shelf ring down to lower ring.
+		for i in range(sides):
+			var i_next: int = (i + 1) % sides
+			var s0: Vector3 = shelf[i]
+			var s1: Vector3 = shelf[i_next]
+			var l0: Vector3 = lower[i]
+			var l1: Vector3 = lower[i_next]
+			st.set_color(upper_col); st.add_vertex(s0)
+			st.set_color(upper_col); st.add_vertex(s1)
+			st.set_color(lower_col); st.add_vertex(l1)
+			st.set_color(upper_col); st.add_vertex(s0)
+			st.set_color(lower_col); st.add_vertex(l1)
+			st.set_color(lower_col); st.add_vertex(l0)
+
+	# Underside cone — tapered point from the lowest ring to the tip.
+	# Tip follows the same horizontal lean as the bottom ring so the cone
+	# isn't visually disconnected from the leaning silhouette above.
+	var tip := Vector3(lean_dir.x * lean_amp, bottom_y, lean_dir.z * lean_amp)
+	var bottom_ring: PackedVector3Array = rings[rings.size() - 1]
+	for i in range(sides):
+		var i_next: int = (i + 1) % sides
+		var b0: Vector3 = bottom_ring[i]
+		var b1: Vector3 = bottom_ring[i_next]
+		st.set_color(rock_dark); st.add_vertex(tip)
+		st.set_color(rock_dark); st.add_vertex(b0)
+		st.set_color(rock_dark); st.add_vertex(b1)
+
+	st.generate_normals(false)
+	st.generate_tangents()
+	return st.commit()
+
+func _build_isle_water_disc(disc_radius: float, rng: RandomNumberGenerator) -> ArrayMesh:
+	# Procedural water basin — irregular outline driven by two sin harmonics
+	# plus per-spoke jitter so no two basins share the same shoreline.  Also
+	# offset slightly from the centre of the dome so the basin doesn't always
+	# sit perfectly centred.
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var sides: int = rng.randi_range(20, 32)
+
+	# Per-basin harmonics for the shoreline outline.
+	var h_a_period: float = rng.randf_range(2.0, 4.0)
+	var h_a_phase: float = rng.randf() * TAU
+	var h_a_amp: float = rng.randf_range(0.08, 0.18)
+	var h_b_period: float = rng.randf_range(5.0, 8.0)
+	var h_b_phase: float = rng.randf() * TAU
+	var h_b_amp: float = rng.randf_range(0.03, 0.08)
+
+	# Off-centre nudge — keeps the basin from always being perfectly axial.
+	var off_ang: float = rng.randf() * TAU
+	var off_r: float = disc_radius * rng.randf_range(0.0, 0.15)
+	var off_x: float = cos(off_ang) * off_r
+	var off_z: float = sin(off_ang) * off_r
+
+	# Pre-compute outline radii so the fan reuses the same edge vertices on
+	# both sides of each triangle (no seam from independently-jittered edges).
+	var ring: Array = []
+	for i in range(sides):
+		var a: float = float(i) / sides * TAU
+		var harm: float = sin(a * h_a_period + h_a_phase) * h_a_amp \
+						+ sin(a * h_b_period + h_b_phase) * h_b_amp \
+						+ rng.randf_range(-0.02, 0.02)
+		var r: float = max(disc_radius * 0.55, disc_radius * (1.0 + harm))
+		ring.append(Vector3(cos(a) * r + off_x, 0, sin(a) * r + off_z))
+
+	var centre := Vector3(off_x, 0, off_z)
+	for i in range(sides):
+		var i_next: int = (i + 1) % sides
+		st.add_vertex(centre)
+		st.add_vertex(ring[i])
+		st.add_vertex(ring[i_next])
+	st.generate_normals(false)
+	st.generate_tangents()
+	return st.commit()
+
+func _scatter_isle_aether_crystals(isle: Node3D, rng: RandomNumberGenerator, has_basin: bool,
+		radius: float, _height: float, top_h: float) -> void:
+	# Spawn 1-3 Aether Crystal deposits on the top surface of a sky-isle.
+	# Sky-isle exclusive — never appears on planet surfaces (filtered out by
+	# ResourceRegistry.natural_pool).  Uses the standard MineableResource
+	# pipeline so mining/HUD/loot handling needs no special-casing.
+	var m_script: Resource = load("res://src/world/MineableResource.gd")
+	if m_script == null:
+		return
+	var count: int = rng.randi_range(1, 3)
+	var top_y: float = top_h
+	# Stay away from the basin centre; orbit the outer half of the disc.
+	var inner_min: float = (radius * 0.62) if has_basin else (radius * 0.20)
+	var outer_max: float = radius * 0.82
+	for _i in range(count):
+		var ang: float = rng.randf() * TAU
+		var rad: float = rng.randf_range(inner_min, outer_max)
+		var pos := Vector3(cos(ang) * rad, top_y, sin(ang) * rad)
+		var res := StaticBody3D.new()
+		res.set_script(m_script)
+		res.set("resource_type", "Aether Crystal")
+		# Always glows — they're the centrepiece of the isle.
+		res.set("glows", true)
+		var rot := Transform3D(Basis(), pos).rotated_local(Vector3.UP, rng.randf() * TAU)
+		res.transform = rot
+		isle.add_child(res)
+
+func _scatter_isle_props(isle: Node3D, rng: RandomNumberGenerator, has_basin: bool,
+		radius: float, _height: float, top_h: float, prop_meshes: Dictionary) -> void:
+	# Plant the planet's actual trees + rocks on top of the isle. We reuse
+	# planet.foliage_material / planet.trunk_material / PlanetChunk's static
+	# rock material so the isle props are visually identical to the ones on
+	# the surface below.
+	#
+	# Positions are in isle-local coordinates (the StaticBody3D parent has
+	# no scaling, so these are world units offset from the isle's centre).
+	var top_y: float = top_h  # matches the actual top-rim Y used by the hull builder
+	var inner_min: float = (radius * 0.62) if has_basin else 0.0
+	var outer_max: float = radius * 0.85
+
+	var tree_count: int = rng.randi_range(8, 18)
+	var rock_count: int = rng.randi_range(6, 14)
+
+	var fol_mesh: ArrayMesh = prop_meshes.get("fol_h")
+	var trk_mesh: ArrayMesh = prop_meshes.get("trk_h")
+	var rock_mesh: ArrayMesh = prop_meshes.get("rock")
+
+	# ── Trees ──────────────────────────────────────────────────────────
+	# Some archetypes (BARREN, ASH, MUDFLAT, DESERT, RUST) don't have
+	# "real" trees on the surface — skip the tree pass for those so the
+	# isles match.
+	var skip_trees: bool = archetype in ["BARREN", "ASH", "MUDFLAT", "DESERT", "RUST", "OBSIDIAN"]
+	if not skip_trees and fol_mesh != null and trk_mesh != null and tree_count > 0:
+		var t_xforms: Array[Transform3D] = []
+		for _i in range(tree_count):
+			var ang: float = rng.randf() * TAU
+			var rad: float = rng.randf_range(inner_min, outer_max)
+			var pos := Vector3(cos(ang) * rad, top_y, sin(ang) * rad)
+			var xf := Transform3D(Basis(), pos)
+			xf = xf.rotated_local(Vector3.UP, rng.randf() * TAU)
+			t_xforms.append(xf)
+
+		# Foliage MultiMesh
+		var mm_f := MultiMesh.new()
+		mm_f.transform_format = MultiMesh.TRANSFORM_3D
+		mm_f.use_colors = true
+		mm_f.mesh = fol_mesh
+		mm_f.instance_count = tree_count
+		# Trunk MultiMesh
+		var mm_t := MultiMesh.new()
+		mm_t.transform_format = MultiMesh.TRANSFORM_3D
+		mm_t.use_colors = true
+		mm_t.mesh = trk_mesh
+		mm_t.instance_count = tree_count
+		for i in range(tree_count):
+			var pos: Vector3 = t_xforms[i].origin
+			var t_hue: float = fposmod(pal_forest_h + 0.5 + fposmod(pos.x * 0.012, 0.3) - 0.15, 1.0)
+			var t_col := Color.from_hsv(t_hue, 0.85, 0.92)
+			mm_f.set_instance_transform(i, t_xforms[i])
+			mm_f.set_instance_color(i, t_col)
+			mm_t.set_instance_transform(i, t_xforms[i])
+			# Trunk colour variation matches PlanetChunk: brown / tan / birch.
+			var trk_seed: int = int(abs(pos.x * 133.0 + pos.z * 77.0)) % 3
+			var tr_c := Color(0.35, 0.25, 0.15)
+			if trk_seed == 1: tr_c = Color(0.55, 0.45, 0.35)
+			elif trk_seed == 2: tr_c = Color(0.85, 0.85, 0.8)
+			mm_t.set_instance_color(i, tr_c)
+
+		var mmi_f := MultiMeshInstance3D.new()
+		mmi_f.multimesh = mm_f
+		if foliage_material:
+			mmi_f.material_override = foliage_material
+		mmi_f.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		isle.add_child(mmi_f)
+
+		var mmi_t := MultiMeshInstance3D.new()
+		mmi_t.multimesh = mm_t
+		if trunk_material:
+			mmi_t.material_override = trunk_material
+		mmi_t.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		isle.add_child(mmi_t)
+
+	# ── Rocks ──────────────────────────────────────────────────────────
+	if rock_mesh != null and rock_count > 0:
+		var r_xforms: Array[Transform3D] = []
+		for _i in range(rock_count):
+			var ang: float = rng.randf() * TAU
+			var rad: float = rng.randf_range(max(inner_min, radius * 0.45), radius * 0.92)
+			var pos := Vector3(cos(ang) * rad, top_y, sin(ang) * rad)
+			var b := Basis().rotated(Vector3.UP, rng.randf() * TAU)
+			b = b.scaled(Vector3(rng.randf_range(0.8, 1.6), rng.randf_range(0.6, 1.3), rng.randf_range(0.8, 1.6)))
+			r_xforms.append(Transform3D(b, pos))
+
+		var mm_r := MultiMesh.new()
+		mm_r.transform_format = MultiMesh.TRANSFORM_3D
+		mm_r.use_colors = true
+		mm_r.mesh = rock_mesh
+		mm_r.instance_count = rock_count
+		for i in range(rock_count):
+			var h_v := hash(r_xforms[i].origin)
+			var g: float = 0.34 + fposmod(float(h_v % 100) / 100.0, 0.32)
+			mm_r.set_instance_transform(i, r_xforms[i])
+			mm_r.set_instance_color(i, Color(g * 1.05, g * 0.95, g * 0.85, 1.0))
+
+		var mmi_r := MultiMeshInstance3D.new()
+		mmi_r.multimesh = mm_r
+		# Static rock material from PlanetChunk — matches what the surface uses.
+		if PlanetChunkScript and PlanetChunkScript.has_method("_get_rock_mat"):
+			mmi_r.material_override = PlanetChunkScript.call("_get_rock_mat")
+		mmi_r.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		isle.add_child(mmi_r)
+
+# ---------------------------------------------------------------------------
+# TIER DRAMA HELPERS — drive how exaggerated terrain features get.
+# ---------------------------------------------------------------------------
+func _tier_drama_scale(rank: String) -> float:
+	# Multiplier applied to terrain_strength. 1.0 = baseline (C / unranked).
+	match rank:
+		"F":           return 0.7
+		"D":           return 0.85
+		"C":           return 1.0
+		"B":           return 1.2
+		"A":           return 1.5
+		"S":           return 1.85
+		"SS":          return 2.2
+		"★ LEGENDARY": return 2.6
+		_:             return 1.0
+
+func _tier_topo_bias(rank: String) -> float:
+	# Additive offset to topo_roll (clamped 0..1 after). Positive shifts the
+	# distribution toward MOUNTAINOUS / EXTREME; negative pushes toward FLAT.
+	match rank:
+		"F":           return -0.30
+		"D":           return -0.15
+		"C":           return 0.0
+		"B":           return 0.15
+		"A":           return 0.30
+		"S":           return 0.45
+		"SS":          return 0.55
+		"★ LEGENDARY": return 0.65
+		_:             return 0.0
+
+func _tier_landmark_count(rank: String, rng: RandomNumberGenerator) -> int:
+	# Higher tiers get more colossal landmarks — read at a glance as "this
+	# planet is loaded with hero geometry."
+	match rank:
+		"F":           return rng.randi_range(2, 3)
+		"D":           return rng.randi_range(3, 4)
+		"C":           return rng.randi_range(4, 6)
+		"B":           return rng.randi_range(5, 8)
+		"A":           return rng.randi_range(7, 11)
+		"S":           return rng.randi_range(10, 14)
+		"SS":          return rng.randi_range(12, 16)
+		"★ LEGENDARY": return rng.randi_range(14, 20)
+		_:             return rng.randi_range(4, 6)
 
 func _spawn_hero_landmarks(rng: RandomNumberGenerator) -> void:
-	# 4-6 colossal navigation anchors per planet.
-	var num = rng.randi_range(4, 6)
+	var num: int = _tier_landmark_count(planet_rank, rng)
+	# Drama scale also enlarges individual landmarks at higher tiers.
+	var size_scale: float = _tier_drama_scale(planet_rank)
 	# Rock color derived from the planet palette — dark, slightly desaturated
 	var rock_col: Color = pal_mount_col.darkened(0.15)
 	var accent_col: Color = pal_grass_col.lightened(0.1)
@@ -631,17 +1363,17 @@ func _spawn_hero_landmarks(rng: RandomNumberGenerator) -> void:
 		# Hallelujah-Mountain style floating island with stalactite tip.
 		var landmark_type: int = rng.randi() % 3
 		match landmark_type:
-			0: _build_spire(base_pos, basis, rng, rock_col, accent_col)
-			1: _build_arch(base_pos, basis, rng, rock_col)
-			2: _build_floating_island(base_pos, basis, rng, rock_col, accent_col)
+			0: _build_spire(base_pos, basis, rng, rock_col, accent_col, size_scale)
+			1: _build_arch(base_pos, basis, rng, rock_col, size_scale)
+			2: _build_floating_island(base_pos, basis, rng, rock_col, accent_col, size_scale)
 
 # ---------------------------------------------------------------------------
 # SPIRE — a tapered hexagonal monolith, stacked in 8 rings that narrow toward
 # the peak, giving natural "geological column" silhouette from any angle.
 # ---------------------------------------------------------------------------
-func _build_spire(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: Color, accent: Color) -> void:
-	var height: float = rng.randf_range(600.0, 1500.0)
-	var base_r: float = rng.randf_range(80.0, 180.0)
+func _build_spire(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: Color, accent: Color, size_scale: float = 1.0) -> void:
+	var height: float = rng.randf_range(600.0, 1500.0) * size_scale
+	var base_r: float = rng.randf_range(80.0, 180.0) * size_scale
 	var sides: int = 6  # Hexagonal — looks natural and low-poly simultaneously
 	var rings: int = 8
 
@@ -709,10 +1441,10 @@ func _build_spire(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: 
 # ARCH — two rectangular columns bridged by a curved 8-segment stone span.
 # Creates the classic "natural arch" navigation landmark silhouette.
 # ---------------------------------------------------------------------------
-func _build_arch(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: Color) -> void:
-	var pillar_h: float = rng.randf_range(350.0, 650.0)
-	var pillar_w: float = rng.randf_range(50.0, 90.0)
-	var span: float = rng.randf_range(280.0, 480.0)  # Gap between pillar centers
+func _build_arch(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: Color, size_scale: float = 1.0) -> void:
+	var pillar_h: float = rng.randf_range(350.0, 650.0) * size_scale
+	var pillar_w: float = rng.randf_range(50.0, 90.0) * size_scale
+	var span: float = rng.randf_range(280.0, 480.0) * size_scale  # Gap between pillar centers
 	var arch_segs: int = 8
 
 	var st := SurfaceTool.new()
@@ -782,9 +1514,9 @@ func _build_arch(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: C
 # reads as a real 3D landmass from every viewing angle (orbit included),
 # not a flat disc.
 # ---------------------------------------------------------------------------
-func _build_floating_island(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: Color, accent: Color) -> void:
-	var r: float = rng.randf_range(220.0, 380.0)
-	var float_alt: float = rng.randf_range(1200.0, 2400.0)  # well above clouds @ 35 km? no — clouds at planet_radius+35 km, we're metres above terrain. Comfortably below cloud sphere.
+func _build_floating_island(base: Vector3, basis: Basis, rng: RandomNumberGenerator, col: Color, accent: Color, size_scale: float = 1.0) -> void:
+	var r: float = rng.randf_range(220.0, 380.0) * size_scale
+	var float_alt: float = rng.randf_range(1200.0, 2400.0) * sqrt(size_scale)  # higher tier = larger and slightly higher
 	var sides: int = 12
 
 	# Random off-axis tilt (±15°) so the top isn't always perfectly aligned
@@ -1036,7 +1768,10 @@ func queue_chunk_for_finalization(chunk: Node) -> void:
 func get_terrain_elevation(sn: Vector3) -> float:
 	if not noise: return 0.0
 	# ACE: Master Elevation Formula (STRICT SYNC with PlanetChunk)
-	var macro_h: float = noise.get_noise_3dv(sn * 600.0)
+	# Macro frequency is per-planet (FLAT=300, HILLY=400, MOUNTAINOUS=600, EXTREME=800)
+	# — must match PlanetChunk.get_terrain_elevation or callers (Player anti-clip floor,
+	# parked-ship landing snap) see a different surface than the rendered terrain.
+	var macro_h: float = noise.get_noise_3dv(sn * noise_frequency)
 	var micro_crag: float = noise.get_noise_3dv(sn * 15000.0) * 0.1
 	var local_geo: float = 0.0
 
@@ -1281,12 +2016,28 @@ func _init_shared_materials() -> void:
 	# white (and so they read distinctly between archetypes).
 	land_material.set_shader_parameter("col_snow",
 		Color(0.92, 0.94, 0.98).lerp(pal_mount_col, 0.15))
-	
+
+	# Archetype-driven FX uniforms. The shader treats 0.0 as "off" and only
+	# costs branches when active, so non-FX archetypes pay nothing here.
+	var iridescence: float = 0.55 if archetype == "IRIDESCENT" else 0.0
+	var snow_spec: float = 0.0
+	if archetype == "FROZEN" or archetype == "ALPINE" or archetype == "AURORA":
+		snow_spec = 1.0
+	var crystal_em: float = 1.4 if archetype == "CRYSTAL" else 0.0
+	land_material.set_shader_parameter("iridescence_strength", iridescence)
+	land_material.set_shader_parameter("snow_specular", snow_spec)
+	land_material.set_shader_parameter("crystal_emission", crystal_em)
+
 	water_material = ShaderMaterial.new()
 	var w_shader = load("res://src/world/water.gdshader")
 	if w_shader:
 		water_material.shader = w_shader
 		water_material.set_shader_parameter("radius", planet_radius)
+		# OBSIDIAN: black-glass world with crimson lava lakes — same lava path
+		# as VOLCANIC. Set on the shared material so chunks pick it up via the
+		# pal_water_base override below in PlanetChunk.
+		if archetype == "OBSIDIAN" or archetype == "VOLCANIC":
+			water_material.set_shader_parameter("is_lava", true)
 	
 	# FOLIAGE MATERIALS
 	foliage_material = ShaderMaterial.new()

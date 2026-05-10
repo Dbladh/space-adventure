@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode diffuse_lambert, specular_disabled;
+render_mode diffuse_lambert;
 
 // Biome-aware planet land shader (FloatingOrigin-proof: samples in LOCAL space).
 // Drives ground / forest / rock / snow / beach colour from the planet's
@@ -16,6 +16,12 @@ uniform vec3 col_grass   : source_color = vec3(0.27, 0.67, 0.27);
 uniform vec3 col_forest  : source_color = vec3(0.20, 0.55, 0.20);
 uniform vec3 col_rock    : source_color = vec3(0.50, 0.45, 0.40);
 uniform vec3 col_snow    : source_color = vec3(0.92, 0.94, 0.98);
+
+// Archetype-driven FX uniforms (set non-zero only when the planet's archetype
+// calls for it — e.g. IRIDESCENT, ALPINE/FROZEN/AURORA, CRYSTAL).
+uniform float iridescence_strength : hint_range(0.0, 1.0) = 0.0;
+uniform float snow_specular        : hint_range(0.0, 1.0) = 0.0;
+uniform float crystal_emission     : hint_range(0.0, 2.0) = 0.0;
 
 varying vec3 v_local_pos;
 varying vec3 v_local_norm;
@@ -79,9 +85,40 @@ void fragment() {
 
 	albedo *= detail_level;
 
+	// Track how much of the surface is snow vs rock so archetype FX can
+	// target the right zones below.
+	float snow_mass = max(t_snow, polar_snow);
+	float rock_mass = (t_rock_start * (1.0 - t_snow)) + cliff_mask * (1.0 - t_snow);
+
+	// IRIDESCENCE: oil-slick rainbow shift driven by view angle. Hue offset
+	// by NORMAL·VIEW so strafing the planet sweeps the spectrum across its
+	// surface. Only paints fragments when the uniform is non-zero.
+	if (iridescence_strength > 0.001) {
+		float irid_phase = dot(NORMAL, VIEW) * 6.28 + TIME * 0.1;
+		vec3 irid = sin(vec3(0.0, 2.094, 4.189) + irid_phase) * 0.5 + 0.5;
+		albedo = mix(albedo, irid, iridescence_strength);
+	}
+
+	// SNOW SPECULAR: cool blue subsurface tint on the snow zones (snowline +
+	// polar caps). Driven by the same uniform that lifts SPECULAR below.
+	if (snow_specular > 0.001 && snow_mass > 0.0) {
+		vec3 cool_snow = mix(col_snow, vec3(0.85, 0.92, 1.0), snow_specular * 0.3);
+		albedo = mix(albedo, cool_snow, snow_mass);
+	}
+
+	// CRYSTAL EMISSION: pulsing glow on the rock zones — driven by the
+	// triplanar detail field so it varies across the surface like real gem
+	// clusters rather than a flat overlay.
+	vec3 emission_col = vec3(0.0);
+	if (crystal_emission > 0.001) {
+		float pulse = sin(TIME * 0.6 + detail.r * 18.0) * 0.5 + 0.5;
+		emission_col = col_rock * crystal_emission * (0.5 + 0.5 * pulse) * rock_mass;
+	}
+
 	ALBEDO = albedo;
-	ROUGHNESS = 0.92;
-	SPECULAR = 0.05;
+	EMISSION = emission_col;
+	ROUGHNESS = mix(0.92, 0.45, snow_specular * snow_mass);
+	SPECULAR = mix(0.05, 0.6, snow_specular * snow_mass);
 }
 
 void light() {

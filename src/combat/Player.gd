@@ -573,7 +573,10 @@ func _process_ace_camera(delta: float) -> void:
 	if is_instance_valid(pinned_target):
 		var t_dir = (pinned_target.global_position - global_position).normalized()
 		var s_fwd = -global_transform.basis.z
-		var look_dir = s_fwd.lerp(t_dir, 0.35).normalized()
+		# Softer camera-toward-target bias (0.35 → 0.18) so locking on doesn't
+		# yank the camera away from "behind the ship" every frame. Still enough
+		# pull to subtly frame the target during a turn.
+		var look_dir = s_fwd.lerp(t_dir, 0.18).normalized()
 		var cam_q = Basis.looking_at(look_dir, world_up).get_rotation_quaternion()
 		var orbit_q = Quaternion(Vector3.UP, cam_orbit.x) * Quaternion(Vector3.RIGHT, cam_orbit.y)
 		cam_pivot.global_transform.basis = Basis(cam_q * orbit_q)
@@ -1566,10 +1569,17 @@ func _input(event: InputEvent) -> void:
 		if (cur_time2 - last_tap_r) < 0.22: _trigger_barrel_roll(-1.0)
 		last_tap_r = cur_time2
 
-	# ACE LOCK-ON: Left Joystick Click (L3) OR B-Button (Right Face)
+	# ACE LOCK-ON: Left Joystick Click (L3) OR B-Button (Right Face).
+	# Toggle: press once to pin, press again (or press while pinned) to release.
+	# Without this, once you locked on the camera kept lerping 18% toward the
+	# target every frame and there was no way to unlock from input.
 	if event is InputEventJoypadButton and event.pressed and (event.button_index == JOY_BUTTON_LEFT_STICK or event.button_index == JOY_BUTTON_B):
-		pinned_target = lock_on_target
-		if pinned_target: print("--- PILOT: TARGET PINNED ---")
+		if is_instance_valid(pinned_target):
+			pinned_target = null
+			print("--- PILOT: TARGET RELEASED ---")
+		else:
+			pinned_target = lock_on_target
+			if pinned_target: print("--- PILOT: TARGET PINNED ---")
 
 	# E: Embark / Disembark
 	if event is InputEventKey and event.keycode == KEY_E and event.pressed:

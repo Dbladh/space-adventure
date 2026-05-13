@@ -292,7 +292,11 @@ func _setup_combat_hud() -> void:
 			mobile_ui_ref = mc
 			mc.throttle_changed.connect(func(val): mobile_throttle = val)
 			mc.throttle_dragging_changed.connect(func(active): mobile_throttle_dragging = active)
-			mc.fire_pressed.connect(func(p): mobile_fire = p)
+			mc.fire_pressed.connect(func(p):
+				mobile_fire = p
+				if not p:
+					pinned_target = null
+			)
 			mc.boost_pressed.connect(func(p): mobile_boost = p)
 			mc.brake_pressed.connect(_on_mobile_brake)
 			mc.roll_triggered.connect(func(dir): _trigger_barrel_roll(dir))
@@ -1551,7 +1555,7 @@ func _process(delta: float) -> void:
 
 			# AUTO-LOCK: On mobile or when firing, automatically pin the best target
 			if auto_lock_enabled and lock_on_target and not is_instance_valid(pinned_target):
-				if _mobile_perf or mobile_fire:
+				if mobile_fire:
 					pinned_target = lock_on_target
 
 			# FLEET THREAT TRACKER: Draw arrows for ALL off-screen enemies

@@ -8,7 +8,15 @@ extends Control
 #             Combat buttons are hidden so the player can't accidentally fire while
 #             browsing settings.  Roll buttons are also hidden.
 #
+# All buttons render via HUDStyle.draw_beveled_rect — chunky 80s-arcade depth
+# (top/left highlight + drop shadow when raised, bottom/right highlight + no
+# shadow + content nudged down/right when held), so a held FIRE/BOOST/BRAKE
+# visibly recesses into the screen and toggles like GYRO stay recessed while
+# active.
+#
 # process_mode = ALWAYS so the overlay keeps drawing while get_tree().paused == true.
+
+const HUDStyle := preload("res://src/ui/HUDStyle.gd")
 
 signal throttle_changed(value: float)
 signal throttle_dragging_changed(active: bool)
@@ -187,7 +195,7 @@ func _process(_delta: float) -> void:
 
 func _draw() -> void:
 	var v_size = get_viewport_rect().size
-	var font   = ThemeDB.fallback_font
+	var font   = HUDStyle.PIXEL_FONT
 	var sx     = v_size.x
 	var sy     = v_size.y
 	var paused = get_tree().paused
@@ -223,81 +231,86 @@ func _draw() -> void:
 		var tlbl = "NEUTRAL"
 		if   throttle > 0.52: tlbl = "FWD %d%%" % int((throttle - 0.5) * 200.0)
 		elif throttle < 0.48: tlbl = "REV %d%%" % int((0.5 - throttle) * 200.0)
-		draw_string(font, Vector2(bar_x + 48, handle_y + 8), tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, C_CREAM)
-		draw_string(font, Vector2(bar_x - 40, bar_top - 18), "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, C_TEAL)
+		draw_string(font, Vector2(bar_x + 48, handle_y + 6), tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_CREAM)
+		draw_string(font, Vector2(bar_x - 40, bar_top - 14), "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_TEAL)
 
 	# ----- TOP-LEFT: RECENTER only (always visible) -----
-	_draw_space_button(_rect_recenter, "RECENTER GYRO", C_BG, C_TEAL, false, 14)
+	_draw_space_button(_rect_recenter, "RECENTER", C_TEAL.darkened(0.45), C_TEAL, false, 11)
 
 	# ----- TOP-RIGHT: PAUSE button (always visible) -----
-	var pause_label = "▶  RESUME" if paused else "⏸  PAUSE"
-	var pause_col   = C_RESUME if paused else C_BG
-	var pause_bdr   = C_RESUME if paused else C_PANEL_BDR
-	_draw_space_button(_rect_menu, pause_label, pause_col, pause_bdr, false, 15)
+	# When paused the button switches to RESUME with the green fill so it
+	# reads as the next action.  The bevel always renders raised — pressing
+	# triggers a one-shot signal, no held state.
+	var pause_label = "RESUME" if paused else "PAUSE"
+	var pause_col   = C_RESUME if paused else C_TEAL.darkened(0.45)
+	_draw_space_button(_rect_menu, pause_label, pause_col, C_TEAL, false, 13)
 
 	# Motion indicator (only in play mode — not needed during pause)
 	if not paused:
 		var grav      = Input.get_gravity()
 		var motion_ok = grav.length() > 1.0
-		draw_string(font, Vector2(sx - 180 - 36 - _safe_right, 112 + _safe_top),
-			"MOTION: " + ("OK" if motion_ok else "WAIT"), HORIZONTAL_ALIGNMENT_LEFT, 180, 13,
+		draw_string(font, Vector2(sx - 180 - 36 - _safe_right, 116 + _safe_top),
+			"MOTION " + ("OK" if motion_ok else "WAIT"), HORIZONTAL_ALIGNMENT_LEFT, 180, HUDStyle.HUD_FONT_TINY,
 			Color.SPRING_GREEN if motion_ok else Color(1.0, 0.7, 0.2))
 
-	# ----- TELEMETRY HUD (always visible) -----
+	# ----- TELEMETRY HUD (always visible) — beveled chip in deep navy -----
 	var hud_box = Rect2(sx * 0.5 - 174, 36.0 + _safe_top, 348, 58)
-	_draw_rounded_rect(hud_box, C_BG, 8.0)
-	_draw_rounded_rect(hud_box, C_PANEL_BDR, 8.0, false, 1.5)
-	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 22),
-		"SPD %4d m/s" % int(hud_speed), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, C_CREAM)
-	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 44),
-		"ALT " + _format_alt(hud_alt), HORIZONTAL_ALIGNMENT_LEFT, -1, 14, C_TEAL)
+	HUDStyle.draw_beveled_rect(self, hud_box, HUDStyle.BG_DEEP_NAVY, false)
+	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 20),
+		"SPD %4d M/S" % int(hud_speed), HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_SMALL, C_CREAM)
+	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 42),
+		"ALT " + _format_alt(hud_alt).to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_TEAL)
 	if hud_warp:
-		draw_string(font, Vector2(hud_box.position.x + 210, hud_box.position.y + 36),
-			"WARP", HORIZONTAL_ALIGNMENT_LEFT, -1, 20, C_ORANGE)
+		draw_string(font, Vector2(hud_box.position.x + 240, hud_box.position.y + 32),
+			"WARP", HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_SMALL, C_ORANGE)
 
 	if paused:
 		# ============================================================
 		#  PAUSE MENU (right side, replaces combat cluster)
 		# ============================================================
-		# Settings panel background
+		# Settings panel background — beveled deep-navy plate framing the
+		# RESUME / GYRO / SENS column.
 		var pm_pad  = 36.0 + _safe_bottom
 		var pm_col_x = sx - pm_pad - _safe_right
 		var pm_base  = sy - pm_pad
 		var pm_w     = 220.0
-		var pm_top   = _rect_psens.position.y - 16.0
+		var pm_top   = _rect_psens.position.y - 22.0
 		var pm_bot   = pm_base + 16.0
-		var pm_panel = Rect2(pm_col_x - pm_w - 12, pm_top, pm_w + 24, pm_bot - pm_top)
-		_draw_rounded_rect(pm_panel, Color(0.05, 0.07, 0.13, 0.88), 14.0)
-		_draw_rounded_rect(pm_panel, C_TEAL_DIM, 14.0, false, 1.5)
+		var pm_panel = Rect2(pm_col_x - pm_w - 14, pm_top, pm_w + 28, pm_bot - pm_top)
+		HUDStyle.draw_beveled_rect(self, pm_panel, HUDStyle.BG_DEEP_NAVY, false)
 
 		# SETTINGS label inside panel
-		draw_string(font, Vector2(pm_col_x - pm_w, pm_top + 18), "SETTINGS",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, C_TEAL)
+		draw_string(font, Vector2(pm_col_x - pm_w, pm_top + 14), "SETTINGS",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_TEAL)
 
-		# GYRO toggle
-		var g_lbl = "GYRO: ON" if not gyro_paused else "GYRO: OFF"
-		_draw_space_button(_rect_pgyro, g_lbl,
-			C_BG, C_GYRO_ON if not gyro_paused else C_GYRO_OFF, _pgyro_touch != -1, 16)
+		# GYRO toggle — toggle_mode style: when ON, render permanently
+		# recessed so it matches the EASY-style selected look.  Active fill
+		# is teal; inactive fill is muted grey.
+		var g_lbl = "GYRO ON" if not gyro_paused else "GYRO OFF"
+		var g_fill: Color = C_GYRO_ON if not gyro_paused else C_GYRO_OFF
+		_draw_space_button(_rect_pgyro, g_lbl, g_fill, g_fill, not gyro_paused, 13)
 
-		# SENSITIVITY cycle
-		_draw_space_button(_rect_psens, "SENS: %s" % SENS_LABELS[sens_idx],
-			C_BG, C_TEAL, _psens_touch != -1, 16)
+		# SENSITIVITY cycle — momentary press feedback, not a persistent toggle
+		_draw_space_button(_rect_psens, "SENS %s" % SENS_LABELS[sens_idx],
+			C_TEAL, C_TEAL, _psens_touch != -1, 13)
 
-		# RESUME button (large green)
-		_draw_space_button(_rect_resume, "▶  RESUME",
-			C_RESUME.darkened(0.15) if _resume_touch != -1 else Color(0.05, 0.18, 0.10, 0.95),
-			C_RESUME, _resume_touch != -1, 26)
+		# RESUME button (large green) — always raised, recesses while held.
+		_draw_space_button(_rect_resume, "RESUME",
+			C_RESUME, C_RESUME, _resume_touch != -1, 18)
 
 	else:
 		# ============================================================
 		#  PLAY MODE — combat buttons + roll buttons
 		# ============================================================
-		_draw_space_button(_rect_fire,  "FIRE",  C_RED.darkened(0.75)  if fire_touch  == -1 else C_RED,  C_RED,  fire_touch  != -1, 34)
-		_draw_space_button(_rect_boost, "BOOST", C_ORANGE.darkened(0.7) if boost_touch == -1 else C_ORANGE, C_ORANGE, boost_touch != -1, 28)
-		_draw_space_button(_rect_brake, "BRAKE", C_TEAL.darkened(0.7)  if brake_touch == -1 else C_TEAL, C_TEAL, brake_touch != -1, 20)
+		# Held = recessed: button visibly sinks into the surface, mirroring
+		# the EASY/MEDIUM/HARD reference.  Fill stays the bright button
+		# colour so it remains identifiable; the bevel/nudge does the work.
+		_draw_space_button(_rect_fire,  "FIRE",  C_RED,    C_RED,    fire_touch  != -1, 24)
+		_draw_space_button(_rect_boost, "BOOST", C_ORANGE, C_ORANGE, boost_touch != -1, 20)
+		_draw_space_button(_rect_brake, "BRAKE", C_TEAL,   C_TEAL,   brake_touch != -1, 16)
 
-		_draw_space_button(_rect_rolll, "◀ ROLL", C_BG, C_TEAL, rolll_touch != -1, 22)
-		_draw_space_button(_rect_rollr, "ROLL ▶", C_BG, C_TEAL, rollr_touch != -1, 22)
+		_draw_space_button(_rect_rolll, "ROLL L", C_TEAL.darkened(0.35), C_TEAL, rolll_touch != -1, 14)
+		_draw_space_button(_rect_rollr, "ROLL R", C_TEAL.darkened(0.35), C_TEAL, rollr_touch != -1, 14)
 
 # =====================================================================
 #  DRAW HELPERS
@@ -323,28 +336,25 @@ func _draw_rounded_rect(r: Rect2, color: Color, radius: float, filled: bool = tr
 		draw_line(Vector2(r.position.x + r.size.x - radius, r.position.y + r.size.y), Vector2(r.position.x + radius, r.position.y + r.size.y), color, width)
 		draw_line(Vector2(r.position.x, r.position.y + r.size.y - radius), Vector2(r.position.x, r.position.y + radius), color, width)
 
-func _draw_space_button(r: Rect2, label: String, fill: Color, accent: Color, pressed: bool, font_size: int = 16) -> void:
-	var bg = fill.darkened(0.15) if pressed else fill
-	_draw_rounded_rect(r, bg, 12.0)
-	if fill.a > 0.5:
-		var stripe_a = 0.07 if not pressed else 0.12
-		var sy_s := r.position.y + 5.0
-		while sy_s < r.position.y + r.size.y - 4.0:
-			draw_line(Vector2(r.position.x + 12, sy_s), Vector2(r.position.x + r.size.x - 12, sy_s),
-				Color(accent.r, accent.g, accent.b, stripe_a), 1.0)
-			sy_s += 5.0
-	var border_col = accent if not pressed else accent.lightened(0.2)
-	_draw_rounded_rect(r, border_col, 12.0, false, 2.0)
-	if pressed:
-		_draw_rounded_rect(Rect2(r.position.x + 4, r.position.y + 4, r.size.x - 8, 6), Color(0, 0, 0, 0.35), 3.0)
+func _draw_space_button(r: Rect2, label: String, fill: Color, _accent: Color, pressed: bool, font_size: int = 14) -> void:
+	# Draw the chunky beveled rectangle.  When pressed, the helper handles
+	# the inverted highlight/shadow + darker fill, so the button visibly
+	# sinks into the surface (matches the EASY-style selected look).
+	HUDStyle.draw_beveled_rect(self, r, fill, pressed)
+
 	if label.is_empty(): return
-	var font = ThemeDB.fallback_font
+	var font := HUDStyle.PIXEL_FONT
 	var text_size = font.get_string_size(label, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size)
-	var lx = r.position.x + (r.size.x - text_size.x) * 0.5
-	var ly = r.position.y + r.size.y * 0.5 + font_size * 0.36
+	# When pressed, nudge the label 2px down-right so it visibly pushes in.
+	var nudge: Vector2 = Vector2(2.0, 2.0) if pressed else Vector2.ZERO
+	var lx = r.position.x + (r.size.x - text_size.x) * 0.5 + nudge.x
+	var ly = r.position.y + r.size.y * 0.5 + font_size * 0.36 + nudge.y
+	# Pixel-art readable text colour — white on dark fills, dark on bright.
+	var text_col: Color = C_CREAM if fill.get_luminance() < 0.5 else C_NAVY_TEXT
+	if pressed: text_col = text_col.lightened(0.05)
+	# Tiny black drop-shadow on the text so labels stay legible over both
+	# bright and dark fills.
 	draw_string(font, Vector2(lx + 1, ly + 1), label, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size, Color(0, 0, 0, 0.55))
-	var text_col = C_CREAM if fill.get_luminance() < 0.45 else C_NAVY_TEXT
-	if pressed: text_col = text_col.lightened(0.1)
 	draw_string(font, Vector2(lx, ly), label, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size, text_col)
 
 func _format_alt(alt: float) -> String:

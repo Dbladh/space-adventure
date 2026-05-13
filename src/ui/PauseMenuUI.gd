@@ -14,6 +14,8 @@ signal resume_requested()
 signal rebind_requested()
 signal quit_requested()
 
+const HUDStyle = preload("res://src/ui/HUDStyle.gd")
+
 var _resume_btn: Button = null
 
 func _ready() -> void:
@@ -21,40 +23,45 @@ func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
-	# Translucent dim
+	# Saturated arcade-purple dim — picks up the Designercize reference's
+	# canvas colour so the menu reads as a "screen" rather than a faded fade.
 	var bg := ColorRect.new()
-	bg.color = Color(0, 0, 0, 0.65)
+	bg.color = Color(HUDStyle.BG_DEEP_PURPLE.r, HUDStyle.BG_DEEP_PURPLE.g, HUDStyle.BG_DEEP_PURPLE.b, 0.86)
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
 
-	# Centred VBox
+	# Centred beveled panel — the menu plate.  Uses PANEL_BEVEL (medium
+	# navy) so the chunky highlight + drop shadow reads clearly.
+	var plate := PanelContainer.new()
+	plate.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
+	plate.set_anchors_preset(Control.PRESET_CENTER)
+	plate.offset_left = -220; plate.offset_right = 220
+	plate.offset_top = -220;  plate.offset_bottom = 220
+	add_child(plate)
+
 	var vb := VBoxContainer.new()
 	vb.alignment = BoxContainer.ALIGNMENT_CENTER
 	vb.add_theme_constant_override("separation", 14)
-	vb.set_anchors_preset(Control.PRESET_CENTER)
-	vb.offset_left = -180; vb.offset_right = 180
-	vb.offset_top = -180;  vb.offset_bottom = 180
-	add_child(vb)
+	plate.add_child(vb)
 
 	var title := Label.new()
 	title.text = "PAUSED"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 56)
-	title.add_theme_color_override("font_color", Color(0.95, 0.95, 1.0))
+	HUDStyle.style_label(title, HUDStyle.HUD_FONT_TITLE, HUDStyle.CRT_GREEN_BG)
 	vb.add_child(title)
 
 	var pad := Control.new(); pad.custom_minimum_size = Vector2(0, 12); vb.add_child(pad)
 
-	_resume_btn = _make_btn("RESUME")
+	_resume_btn = _make_btn("RESUME", HUDStyle.BTN_GREEN)
 	_resume_btn.pressed.connect(func() -> void: resume_requested.emit())
 	vb.add_child(_resume_btn)
 
-	var rebind_btn := _make_btn("REBIND CONTROLS")
+	var rebind_btn := _make_btn("REBIND CONTROLS", HUDStyle.BTN_BLUE)
 	rebind_btn.pressed.connect(func() -> void: rebind_requested.emit())
 	vb.add_child(rebind_btn)
 
-	var quit_btn := _make_btn("QUIT TO DESKTOP")
+	var quit_btn := _make_btn("QUIT TO DESKTOP", HUDStyle.BTN_RED)
 	quit_btn.pressed.connect(func() -> void: quit_requested.emit())
 	vb.add_child(quit_btn)
 
@@ -71,11 +78,11 @@ func _on_visibility_changed() -> void:
 		_resume_btn.call_deferred("grab_focus")
 
 
-func _make_btn(text: String) -> Button:
+func _make_btn(text: String, color: Color = HUDStyle.BTN_BLUE) -> Button:
 	var b := Button.new()
 	b.text = text
-	b.add_theme_font_size_override("font_size", 22)
-	b.custom_minimum_size = Vector2(300, 48)
+	HUDStyle.style_button(b, color, HUDStyle.HUD_FONT_LRG)
+	b.custom_minimum_size = Vector2(340, 56)
 	return b
 
 

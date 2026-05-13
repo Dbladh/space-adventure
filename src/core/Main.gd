@@ -51,6 +51,10 @@ func _ready() -> void:
 	var ia_script: Script = load("res://src/core/InputActions.gd")
 	if ia_script and ia_script.has_method("register_all"):
 		ia_script.call("register_all")
+	# Pixel-art arcade theme (chunky bevel buttons, CRT-green data panels,
+	# Press Start 2P font).  Installed on the root window so any
+	# Button/Panel/Label/LineEdit picks it up unless explicitly overridden.
+	HUDStyle.apply_default_theme(get_window())
 	_setup_titan_splash()
 	
 	# ECONOMY GENESIS: The Architect's Vault
@@ -197,8 +201,7 @@ func _setup_titan_splash() -> void:
 	
 	_load_label = Label.new()
 	_load_label.text = "TITAN UNIVERSAL GENESIS - BOOTING..."
-	_load_label.add_theme_font_size_override("font_size", 32)
-	_load_label.add_theme_color_override("font_color", Color.CHARTREUSE)
+	HUDStyle.style_label(_load_label, HUDStyle.HUD_FONT_LRG, HUDStyle.CRT_GREEN_BG)
 	_load_overlay.add_child(_load_label)
 	_load_label.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
 	
@@ -387,27 +390,29 @@ func _setup_hardened_diag_hud() -> void:
 	diag_label = Label.new()
 	# ACE: Safe Area Padding for iPhone 15 (Dynamic Island fallback)
 	diag_label.position = Vector2(80, 40)
-	diag_label.add_theme_font_size_override("font_size", 20)
-	diag_label.add_theme_color_override("font_color", Color.CHARTREUSE)
+	HUDStyle.style_label(diag_label, HUDStyle.HUD_FONT_SMALL, HUDStyle.CRT_GREEN_BG)
 	hud_layer.add_child(diag_label)
 	diag_label.visible = diag_visible
 	
-	# ACE ECONOMY: Real-time Credit Display — moved to top-right corner,
-	# right-justified, sized down from 72pt to HUDStyle.HUD_FONT_LRG (22pt)
-	# so it stops dominating the centre of the screen.
+	# ACE ECONOMY: Real-time Credit Display — top-right corner, wrapped in a
+	# beveled gold chip so it reads as part of the chunky pixel-art chrome.
+	# The chip's PanelContainer hugs its label so the chip auto-sizes as the
+	# credits grow; we anchor only the right edge so it grows leftwards.
+	var creds_chip := PanelContainer.new()
+	creds_chip.name = "CreditChip"
+	creds_chip.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.TIER_COLOR_4.darkened(0.15)))
+	creds_chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud_layer.add_child(creds_chip)
+	creds_chip.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_MINSIZE, 0)
+	creds_chip.position = Vector2(HUDStyle.CREDITS_OFFSET.x, HUDStyle.CREDITS_OFFSET.y)
+	creds_chip.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+
 	var creds = Label.new(); creds.name = "CreditLabel"
 	creds.text = "$0"
-	creds.add_theme_font_size_override("font_size", HUDStyle.HUD_FONT_LRG)
-	creds.add_theme_color_override("font_color", Color.GOLD)
-	creds.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.7))
-	creds.add_theme_constant_override("outline_size", 4)
+	HUDStyle.style_label(creds, HUDStyle.HUD_FONT_MED, Color.WHITE)
 	creds.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	hud_layer.add_child(creds)
-	creds.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_KEEP_SIZE, 0)
-	creds.offset_left = -200
-	creds.offset_right = HUDStyle.CREDITS_OFFSET.x
-	creds.offset_top = HUDStyle.CREDITS_OFFSET.y
-	creds.offset_bottom = HUDStyle.CREDITS_OFFSET.y + 32
+	creds.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	creds_chip.add_child(creds)
 
 	if Engine.has_meta("EconomyManager"):
 		var econ = Engine.get_meta("EconomyManager")

@@ -3,6 +3,8 @@ extends Control
 signal placement_confirmed(world_pos: Vector3, planet_name: String)
 signal placement_canceled()
 
+const HUDStyle := preload("res://src/ui/HUDStyle.gd")
+
 # Sci-fi planet name pool — classical, compound, catalog-style, and pure made-
 # up entries so each cycle through feels distinct. The randomize button picks
 # from this list on every press; the initial name is also rolled from here.
@@ -76,84 +78,92 @@ func _ready() -> void:
 	add_to_group("PlacementUI")
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	
-	# 1. Dark Background
+	# 1. Saturated arcade-purple background — matches Designercize canvas.
 	var bg = ColorRect.new()
-	bg.color = Color(0.02, 0.02, 0.05, 0.98)
+	bg.color = Color(HUDStyle.BG_DEEP_PURPLE.r, HUDStyle.BG_DEEP_PURPLE.g, HUDStyle.BG_DEEP_PURPLE.b, 0.96)
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
-	
-	# 2. Map Display (dedicated node for drawing)
+
+	# 2. Map Display — drawn into a CRT-green screen via _on_map_draw.
+	#    Wrapped in a beveled bezel that frames the screen.
+	var map_bezel := PanelContainer.new()
+	map_bezel.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
+	map_bezel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	map_bezel.offset_left = -312
+	map_bezel.offset_top = -312
+	map_bezel.offset_right = 312
+	map_bezel.offset_bottom = 312
+	add_child(map_bezel)
+
 	map_display = Control.new()
-	map_display.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
 	map_display.custom_minimum_size = Vector2(600, 600)
-	map_display.offset_left = -300
-	map_display.offset_top = -300
-	map_display.offset_right = 300
-	map_display.offset_bottom = 300
 	map_display.mouse_filter = Control.MOUSE_FILTER_STOP
 	map_display.draw.connect(_on_map_draw)
 	map_display.gui_input.connect(_on_map_input)
-	add_child(map_display)
-	
+	map_bezel.add_child(map_display)
+
 	# Title
 	var lbl = Label.new()
 	lbl.text = "SELECT PLANET ORBIT"
-	lbl.add_theme_font_size_override("font_size", 42)
+	HUDStyle.style_label(lbl, HUDStyle.HUD_FONT_TITLE, HUDStyle.CRT_GREEN_BG)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	lbl.offset_top = 60
+	lbl.offset_top = 48
 	add_child(lbl)
-	
-	# Name input row — LineEdit + randomize button paired in an HBox.
+
+	# Name input row — LineEdit (auto-styled by theme as a CRT screen) +
+	# randomize button.  Anchored at bottom-centre below the map.
 	_name_rng.randomize()
 	var name_row := HBoxContainer.new()
 	name_row.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
-	name_row.custom_minimum_size = Vector2(540, 60)
-	name_row.offset_left = -270
-	name_row.offset_top = -180
-	name_row.offset_right = 270
-	name_row.offset_bottom = -120
-	name_row.add_theme_constant_override("separation", 12)
+	name_row.custom_minimum_size = Vector2(540, 64)
+	name_row.offset_left = -300
+	name_row.offset_top = -200
+	name_row.offset_right = 300
+	name_row.offset_bottom = -136
+	name_row.add_theme_constant_override("separation", 10)
 	add_child(name_row)
 
 	name_input = LineEdit.new()
-	name_input.placeholder_text = "Enter Planet Name..."
+	name_input.placeholder_text = "ENTER PLANET NAME..."
 	name_input.alignment = HORIZONTAL_ALIGNMENT_CENTER
-	name_input.add_theme_font_size_override("font_size", 24)
-	name_input.custom_minimum_size = Vector2(420, 60)
+	HUDStyle.style_line_edit(name_input, HUDStyle.HUD_FONT_MED)
+	name_input.custom_minimum_size = Vector2(420, 64)
 	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_input.text = PLANET_NAMES[_name_rng.randi_range(0, PLANET_NAMES.size() - 1)]
 	name_row.add_child(name_input)
 
 	var randomize_btn := Button.new()
-	randomize_btn.text = "  🎲  "
+	randomize_btn.text = "RND"
 	randomize_btn.tooltip_text = "Pick a random sci-fi name"
-	randomize_btn.add_theme_font_size_override("font_size", 28)
-	randomize_btn.custom_minimum_size = Vector2(72, 60)
+	HUDStyle.style_button(randomize_btn, HUDStyle.BTN_PINK, HUDStyle.HUD_FONT_MED)
+	randomize_btn.custom_minimum_size = Vector2(96, 64)
 	randomize_btn.focus_mode = Control.FOCUS_NONE
 	randomize_btn.pressed.connect(func(): name_input.text = _pick_random_planet_name())
 	name_row.add_child(randomize_btn)
-	
-	# Buttons HBox
+
+	# Confirm / Cancel buttons.
 	var hbox = HBoxContainer.new()
 	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	hbox.add_theme_constant_override("separation", 30)
+	hbox.add_theme_constant_override("separation", 24)
 	hbox.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
-	hbox.offset_top = -100
+	hbox.offset_top = -110
 	hbox.offset_bottom = -40
-	hbox.offset_left = -300
-	hbox.offset_right = 300
+	hbox.offset_left = -320
+	hbox.offset_right = 320
 	add_child(hbox)
-	
+
 	var confirm_btn = Button.new()
-	confirm_btn.text = "  FORGE PLANET  "
-	confirm_btn.add_theme_font_size_override("font_size", 28)
+	confirm_btn.text = "FORGE PLANET"
+	HUDStyle.style_button(confirm_btn, HUDStyle.BTN_GREEN, HUDStyle.HUD_FONT_LRG)
+	confirm_btn.custom_minimum_size = Vector2(280, 64)
 	confirm_btn.pressed.connect(_on_confirm)
 	hbox.add_child(confirm_btn)
 
 	var cancel_btn = Button.new()
-	cancel_btn.text = "  CANCEL  "
-	cancel_btn.add_theme_font_size_override("font_size", 28)
+	cancel_btn.text = "CANCEL"
+	HUDStyle.style_button(cancel_btn, HUDStyle.BTN_RED, HUDStyle.HUD_FONT_LRG)
+	cancel_btn.custom_minimum_size = Vector2(220, 64)
 	cancel_btn.pressed.connect(func(): placement_canceled.emit(); queue_free())
 	hbox.add_child(cancel_btn)
 
@@ -228,35 +238,44 @@ func _on_confirm() -> void:
 func _on_map_draw() -> void:
 	var map_cen = map_display.size / 2.0
 	var map_r = map_display.size.x / 2.0
-	
-	# Draw background grid
+
+	# CRT-green screen background — fill the whole map area then draw the
+	# rest of the radar in dark "CRT ink" so it reads as a vintage tactical
+	# monitor.  Border colours are picked from HUDStyle.CRT_GREEN_BORDER /
+	# CRT_GREEN_INK so the radar feels of-a-piece with the surrounding chrome.
+	map_display.draw_rect(Rect2(Vector2.ZERO, map_display.size), HUDStyle.CRT_GREEN_BG)
+
+	var ink: Color = HUDStyle.CRT_GREEN_INK
+	var faint: Color = Color(ink.r, ink.g, ink.b, 0.35)
+
+	# Grid rings + crosshair drawn in dark green ink on the bright CRT.
 	for i in range(1, 6):
-		map_display.draw_arc(map_cen, map_r * (float(i) / 5.0), 0, TAU, 64, Color(1, 1, 1, 0.12), 1.5)
-	
-	map_display.draw_line(Vector2(0, map_cen.y), Vector2(map_display.size.x, map_cen.y), Color(1, 1, 1, 0.2), 1.0)
-	map_display.draw_line(Vector2(map_cen.x, 0), Vector2(map_cen.x, map_display.size.y), Color(1, 1, 1, 0.2), 1.0)
-	
+		map_display.draw_arc(map_cen, map_r * (float(i) / 5.0), 0, TAU, 64, faint, 1.5)
+	map_display.draw_line(Vector2(0, map_cen.y), Vector2(map_display.size.x, map_cen.y), faint, 1.0)
+	map_display.draw_line(Vector2(map_cen.x, 0), Vector2(map_cen.x, map_display.size.y), faint, 1.0)
+
 	var planets = get_tree().get_nodes_in_group("Planet")
 	var stations = get_tree().get_nodes_in_group("SpaceStation")
 	var player = get_tree().get_nodes_in_group("Player")
-	var font = ThemeDB.get_fallback_font()
-	
-	# Draw Player
+	var font: Font = HUDStyle.PIXEL_FONT
+
+	# Draw Player — bright pink dot, easy to spot on the green screen.
 	if player.size() > 0:
 		var p_node = player[0]
 		var p_ui = _world_to_map(p_node.global_position)
-		var p_col = Color(0.2, 1.0, 0.5)
+		var p_col = HUDStyle.BTN_PINK
 		map_display.draw_circle(map_cen + p_ui, 6.0, p_col)
 		map_display.draw_arc(map_cen + p_ui, 12.0, 0, TAU, 16, p_col, 2.0)
-	
-	# Draw Planets
+
+	# Draw Planets — solid CRT-ink dots labelled with pixel font.
 	for p in planets:
 		if not is_instance_valid(p): continue
 		var p_ui = _world_to_map(p.global_position)
-		map_display.draw_circle(map_cen + p_ui, 10.0, Color(0.4, 0.7, 1.0))
-		map_display.draw_string(font, map_cen + p_ui + Vector2(14, 6), p.name.replace("Planet_", ""), HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color.WHITE)
-		
-	# Draw Stations
+		map_display.draw_circle(map_cen + p_ui, 10.0, ink)
+		map_display.draw_string(font, map_cen + p_ui + Vector2(14, 6), p.name.replace("Planet_", "").to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, ink)
+
+	# Draw Stations — diamond markers in tier-orange so they stand out from
+	# planets without abandoning the CRT palette.
 	for s in stations:
 		if not is_instance_valid(s): continue
 		var s_ui = _world_to_map(s.global_position)
@@ -266,21 +285,23 @@ func _on_map_draw() -> void:
 			map_cen + s_ui + Vector2(0, 9),
 			map_cen + s_ui + Vector2(-9, 0)
 		])
-		map_display.draw_colored_polygon(s_pts, Color(0.95, 0.85, 0.2))
+		var s_col: Color = HUDStyle.TIER_COLOR_4
+		map_display.draw_colored_polygon(s_pts, s_col)
 		var s_name = s.name.replace("SpaceStation_", "").replace("OrbitalStation", "Orbital")
-		map_display.draw_string(font, map_cen + s_ui + Vector2(14, 6), s_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.95, 0.85, 0.2))
-		
-	# Draw Placement Marker
+		map_display.draw_string(font, map_cen + s_ui + Vector2(14, 6), s_name.to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, s_col.darkened(0.3))
+
+	# Draw Placement Marker — green for valid, red for invalid.  Both pop
+	# against the CRT background.
 	if placement_target != Vector2.ZERO:
-		var col = Color.GREEN if is_valid_placement else Color.RED
+		var col: Color = HUDStyle.BTN_GREEN if is_valid_placement else HUDStyle.BTN_RED
 		var pulse = (sin(Time.get_ticks_msec() * 0.012) + 1.0) * 0.5
 		map_display.draw_arc(placement_target, 20.0 + pulse * 10.0, 0, TAU, 32, col, 3.0)
 		map_display.draw_circle(placement_target, 5.0, col)
 		map_display.draw_line(placement_target - Vector2(30, 0), placement_target + Vector2(30, 0), col, 2.0)
 		map_display.draw_line(placement_target - Vector2(0, 30), placement_target + Vector2(0, 30), col, 2.0)
-		
+
 		if not is_valid_placement:
-			map_display.draw_string(font, placement_target + Vector2(-100, -45), "ORBIT OCCUPIED", HORIZONTAL_ALIGNMENT_CENTER, -1, 20, Color.RED)
+			map_display.draw_string(font, placement_target + Vector2(-90, -45), "ORBIT OCCUPIED", HORIZONTAL_ALIGNMENT_CENTER, -1, HUDStyle.HUD_FONT_SMALL, col.darkened(0.2))
 
 func _world_to_map(w_pos: Vector3) -> Vector2:
 	var rel = Vector2(w_pos.x, w_pos.z)

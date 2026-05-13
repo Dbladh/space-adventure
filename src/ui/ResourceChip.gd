@@ -53,22 +53,19 @@ func setup(res_name: String) -> void:
 
 	custom_minimum_size = Vector2(0, PILL_HEIGHT)
 
-	# Pill background — TIER colour with transparency.  Using tier (not the
-	# per-resource colour) keeps the chip palette consistent with the forge
-	# menu's resource cards: all T2 resources read as cyan, all T3 as purple,
-	# etc.  Two visual cues for rarity: circle hue AND chip tint.
+	# Beveled chip — chunky raised panel in a darkened tier colour so each
+	# resource reads as a tiny pixel button.  The tier circle on the left
+	# keeps its full vivid tier hue, so rarity is still legible at a glance.
+	# Tight content margins keep the 28px-tall pill shape — the standard
+	# bevel_panel factory uses larger margins meant for full-size buttons.
 	var tier_col: Color = HUDStyle.tier_color(tier)
-	var body_bg: Color = tier_col
-	body_bg.a = 0.22
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = body_bg
-	sb.set_corner_radius_all(int(PILL_HEIGHT * 0.5))
-	sb.set_border_width_all(1)
-	sb.border_color = Color(tier_col.r, tier_col.g, tier_col.b, 0.55)
+	var body_bg: Color = tier_col.darkened(0.55)
+	body_bg.a = 0.95
+	var sb := HUDStyle.bevel_panel(body_bg)
 	sb.content_margin_left = PILL_PAD_LEFT
 	sb.content_margin_right = PILL_PAD_RIGHT
-	sb.content_margin_top = 0
-	sb.content_margin_bottom = 0
+	sb.content_margin_top = 1
+	sb.content_margin_bottom = 1
 	add_theme_stylebox_override("panel", sb)
 
 	# Internal layout: [circle] [count]
@@ -85,14 +82,14 @@ func setup(res_name: String) -> void:
 	_circle.draw.connect(_draw_circle)
 	hbox.add_child(_circle)
 
-	# Right: count.  Colour is the tier hue lightened (matches the menu's
-	# tier-coloured labels).  _readable_text_color upgrades it to white/black
-	# if the tint ever ends up unreadable.
+	# Right: count.  Pixel font with a tier-tinted ink so the count visually
+	# anchors to the chip's rarity bucket.
 	_count_label = Label.new()
-	_count_label.add_theme_font_size_override("font_size", HUDStyle.HUD_FONT_MED)
+	_count_label.add_theme_font_override("font", HUDStyle.PIXEL_FONT)
+	_count_label.add_theme_font_size_override("font_size", HUDStyle.HUD_FONT_SMALL)
 	_count_label.add_theme_color_override("font_color", _tier_text_color(tier_col, body_bg))
-	_count_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.75))
-	_count_label.add_theme_constant_override("outline_size", 3)
+	_count_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	_count_label.add_theme_constant_override("outline_size", 0)
 	_count_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_count_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(_count_label)
@@ -113,13 +110,13 @@ func _draw_circle() -> void:
 	# Subtle inner shading so the circle reads as a 3D badge, not a flat dot.
 	_circle.draw_circle(center, radius - 1.5, ring_col.darkened(0.05))
 
-	# Two-letter abbreviation centred in the circle.
-	var font: Font = ThemeDB.get_fallback_font()
-	var fs: int = 14
+	# Two-letter abbreviation centred in the circle — pixel font keeps the
+	# chip on-brand with the rest of the chrome.
+	var font: Font = HUDStyle.PIXEL_FONT
+	var fs: int = HUDStyle.HUD_FONT_TINY
 	var text_col: Color = _readable_text_color(ring_col)
 	var text_size: Vector2 = font.get_string_size(abbrev, HORIZONTAL_ALIGNMENT_CENTER, -1, fs)
 	var text_pos: Vector2 = Vector2(center.x - text_size.x * 0.5, center.y + fs * 0.34)
-	_circle.draw_string_outline(font, text_pos, abbrev, HORIZONTAL_ALIGNMENT_CENTER, -1, fs, 2, Color(0, 0, 0, 0.6))
 	_circle.draw_string(font, text_pos, abbrev, HORIZONTAL_ALIGNMENT_CENTER, -1, fs, text_col)
 
 func set_count(new_amount: int) -> void:

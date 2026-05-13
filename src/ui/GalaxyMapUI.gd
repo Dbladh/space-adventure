@@ -5,6 +5,12 @@ extends Control
 # Tactical galaxy overview — compact icons, high contrast player marker.
 # process_mode = ALWAYS so the map stays live while the tree is paused.
 
+const HUDStyle := preload("res://src/ui/HUDStyle.gd")
+
+# Bezel ring (in pixels) painted around the radar disc — gives the map a
+# chunky beveled frame in the same arcade style as the rest of the chrome.
+const BEZEL_PAD: float = 14.0
+
 var is_fullscreen: bool = false
 var player_node: Node3D = null
 var planets: Array = []
@@ -25,52 +31,59 @@ func _ready() -> void:
 func _draw() -> void:
 	var ms   = size if size.x > 1.0 else base_map_size
 	var cen  = ms / 2.0
-	var rad  = ms.x / 2.0
+	var rad  = ms.x / 2.0 - BEZEL_PAD
 
-	# ── Background disc ──────────────────────────────────────────────
-	draw_circle(cen, rad, Color(0.05, 0.06, 0.10, 0.92))
+	# ── Beveled bezel — chunky deep-navy frame around the CRT-green disc.
+	#    Top-left highlight + bottom-right shadow gives it the same raised
+	#    look as the menu buttons.
+	draw_circle(cen, rad + BEZEL_PAD, HUDStyle.BG_DEEP_NAVY)
+	# Top-left highlight arc
+	draw_arc(cen, rad + BEZEL_PAD - 2.0, PI * 0.75, PI * 1.75, 32,
+		HUDStyle.BG_DEEP_NAVY.lightened(0.45), 4.0)
+	# Bottom-right shadow arc
+	draw_arc(cen, rad + BEZEL_PAD - 2.0, -PI * 0.25, PI * 0.75, 32,
+		HUDStyle.BG_DEEP_NAVY.darkened(0.45), 4.0)
 
-	# Subtle grid rings
+	# ── CRT-green tactical disc ──────────────────────────────────────
+	draw_circle(cen, rad, HUDStyle.CRT_GREEN_BG)
+	var ink: Color = HUDStyle.CRT_GREEN_INK
+	var faint: Color = Color(ink.r, ink.g, ink.b, 0.30)
+
+	# Grid rings drawn in dark CRT ink so they read as engraved on the
+	# bright-green screen surface.
 	for i in range(1, 5):
-		draw_arc(cen, rad * (float(i) / 4.0), 0, TAU, 48, Color(1, 1, 1, 0.06), 1.0)
+		draw_arc(cen, rad * (float(i) / 4.0), 0, TAU, 48, faint, 1.0)
 
-	# Outer border
-	draw_arc(cen, rad - 1.5, 0, TAU, 64, Color(0.35, 0.68, 0.78, 0.55), 2.5)
+	# Inner border at the edge of the screen surface.
+	draw_arc(cen, rad - 1.5, 0, TAU, 64, HUDStyle.CRT_GREEN_BORDER, 2.5)
 
-	# ── Planet dots ──────────────────────────────────────────────────
+	# ── Planet dots — solid CRT-ink so they pop against the green ────
 	for p in planets:
 		if not is_instance_valid(p): continue
 		var ui_pos = _world_to_map(p.global_position, ms)
 
-		# Compact dot: 10px in pause map, 8px in mini-map corner
 		var p_r   = 10.0 if is_fullscreen else 8.0
-		var p_col = Color(0.45, 0.75, 0.95, 0.85)   # soft sky-blue
-		draw_circle(ui_pos, p_r, p_col)
-		draw_arc(ui_pos, p_r + 2.5, 0, TAU, 16, Color(1, 1, 1, 0.20), 1.5)
+		draw_circle(ui_pos, p_r, ink)
+		draw_arc(ui_pos, p_r + 2.5, 0, TAU, 16, faint, 1.5)
 
-		# Planet name: only in pause/fullscreen map, smaller font
 		if is_fullscreen:
-			var font = ThemeDB.get_fallback_font()
-			var p_name = p.name.replace("Planet_", "")
-			draw_string(font, ui_pos + Vector2(p_r + 6, 8),
-				p_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color.WHITE)
+			var p_name = p.name.replace("Planet_", "").to_upper()
+			draw_string(HUDStyle.PIXEL_FONT, ui_pos + Vector2(p_r + 6, 6),
+				p_name, HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_SMALL, ink)
 
-	# ── Space Stations (star markers) ──────────────────────────────────
+	# ── Space Stations — orange-gold star (tier-4 colour) ───────────────
 	for s in stations:
 		if not is_instance_valid(s): continue
 		var ui_pos = _world_to_map(s.global_position, ms)
 
-		# Render as a 6-pointed star in gold
 		var s_r = 12.0 if is_fullscreen else 9.0
-		var s_col = Color(0.95, 0.85, 0.2, 0.9)  # gold
+		var s_col: Color = HUDStyle.TIER_COLOR_4
 		_draw_star(ui_pos, s_r, s_col)
 
-		# Station name: only in pause/fullscreen map
 		if is_fullscreen:
-			var font = ThemeDB.get_fallback_font()
-			var s_name = s.name.replace("SpaceStation_", "")
-			draw_string(font, ui_pos + Vector2(s_r + 6, 8),
-				s_name, HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color(0.95, 0.85, 0.2))
+			var s_name = s.name.replace("SpaceStation_", "").to_upper()
+			draw_string(HUDStyle.PIXEL_FONT, ui_pos + Vector2(s_r + 6, 6),
+				s_name, HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_SMALL, s_col.darkened(0.25))
 
 	# ── Player ───────────────────────────────────────────────────────
 	if not player_node:
@@ -80,11 +93,10 @@ func _draw() -> void:
 	if player_node:
 		var p_ui = cen   # player always at centre of its own map
 
-		# Bright pulsing ring so the player is easy to spot
+		# Bright pink pulsing ring — stands out on the CRT green.
 		var pulse = (sin(Time.get_ticks_msec() * 0.008) + 1.0) * 0.5
 		var ring_r = 18.0 if is_fullscreen else 14.0
-		draw_arc(p_ui, ring_r + pulse * 4.0, 0, TAU, 32,
-			Color(0.25, 1.0, 0.5, 0.9), 2.5)
+		draw_arc(p_ui, ring_r + pulse * 4.0, 0, TAU, 32, HUDStyle.BTN_PINK, 2.5)
 
 		# Compact bright triangle for heading direction
 		var p_size = 16.0 if is_fullscreen else 12.0
@@ -97,8 +109,8 @@ func _draw() -> void:
 		for i in range(pts.size()):
 			pts[i] = (pts[i] - p_ui).rotated(ang) + p_ui
 
-		draw_colored_polygon(pts, Color(0.25, 1.0, 0.5, 1.0))
-		draw_polyline(pts + PackedVector2Array([pts[0]]), Color(0, 0, 0, 0.6), 1.5)
+		draw_colored_polygon(pts, HUDStyle.BTN_PINK)
+		draw_polyline(pts + PackedVector2Array([pts[0]]), ink, 1.5)
 
 	# ── Enemy diamonds ───────────────────────────────────────────────
 	for e in enemies:
@@ -111,8 +123,8 @@ func _draw() -> void:
 			e_ui + Vector2(0, d_size),
 			e_ui + Vector2(-d_size, 0)
 		])
-		draw_colored_polygon(d_pts, Color(0.9, 0.2, 0.2, 0.85))
-		draw_polyline(d_pts + PackedVector2Array([d_pts[0]]), Color.BLACK, 1.0)
+		draw_colored_polygon(d_pts, HUDStyle.BTN_RED)
+		draw_polyline(d_pts + PackedVector2Array([d_pts[0]]), ink, 1.0)
 
 func _world_to_map(world_pos: Vector3, ms: Vector2) -> Vector2:
 	var cen   = ms / 2.0

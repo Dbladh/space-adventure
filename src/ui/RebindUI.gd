@@ -12,6 +12,7 @@ extends Control
 signal closed()
 
 const InputActions := preload("res://src/core/InputActions.gd")
+const HUDStyle := preload("res://src/ui/HUDStyle.gd")
 
 var _listening_action: String = ""    # empty when no row is listening
 var _listening_label: Label = null    # the row's "Current: X" label, updated after capture
@@ -24,49 +25,62 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 
 	var bg := ColorRect.new()
-	bg.color = Color(0.03, 0.03, 0.06, 0.95)
+	bg.color = Color(HUDStyle.BG_DEEP_PURPLE.r, HUDStyle.BG_DEEP_PURPLE.g, HUDStyle.BG_DEEP_PURPLE.b, 0.92)
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
 
+	# Outer beveled plate, then a CRT-green list panel inside for the action rows.
+	var plate := PanelContainer.new()
+	plate.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
+	plate.set_anchors_preset(Control.PRESET_CENTER)
+	plate.offset_left = -300; plate.offset_right = 300
+	plate.offset_top = -280; plate.offset_bottom = 280
+	add_child(plate)
+
 	var vb := VBoxContainer.new()
 	vb.alignment = BoxContainer.ALIGNMENT_CENTER
-	vb.add_theme_constant_override("separation", 12)
-	vb.set_anchors_preset(Control.PRESET_CENTER)
-	vb.offset_left = -260; vb.offset_right = 260
-	vb.offset_top = -260; vb.offset_bottom = 260
-	add_child(vb)
+	vb.add_theme_constant_override("separation", 10)
+	plate.add_child(vb)
 
 	var title := Label.new()
 	title.text = "REBIND CONTROLS"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 36)
-	title.add_theme_color_override("font_color", Color(0.4, 0.85, 1.0))
+	HUDStyle.style_label(title, HUDStyle.HUD_FONT_XL, HUDStyle.CRT_GREEN_BG)
 	vb.add_child(title)
 
 	var hint := Label.new()
-	hint.text = "Select an action and press the gamepad button you want to bind."
+	hint.text = "PICK AN ACTION,\nTHEN PRESS A GAMEPAD BUTTON"
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	hint.add_theme_font_size_override("font_size", 14)
-	hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.75))
+	HUDStyle.style_label(hint, HUDStyle.HUD_FONT_TINY, Color(0.85, 0.85, 0.95))
 	vb.add_child(hint)
 
-	var pad := Control.new(); pad.custom_minimum_size = Vector2(0, 12); vb.add_child(pad)
+	var pad := Control.new(); pad.custom_minimum_size = Vector2(0, 8); vb.add_child(pad)
+
+	# CRT-green data screen housing the action rows.
+	var rows_panel := PanelContainer.new()
+	rows_panel.add_theme_stylebox_override("panel", HUDStyle.crt_screen_panel())
+	rows_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vb.add_child(rows_panel)
+
+	var rows_box := VBoxContainer.new()
+	rows_box.add_theme_constant_override("separation", 6)
+	rows_panel.add_child(rows_box)
 
 	# One row per remappable action.
 	var first_set: Button = null
 	for entry in InputActions.REBINDABLE:
 		var row := _build_row(entry["label"], entry["action"])
-		vb.add_child(row)
+		rows_box.add_child(row)
 		if first_set == null:
 			first_set = row.get_meta("set_btn") as Button
 
-	var pad2 := Control.new(); pad2.custom_minimum_size = Vector2(0, 12); vb.add_child(pad2)
+	var pad2 := Control.new(); pad2.custom_minimum_size = Vector2(0, 8); vb.add_child(pad2)
 
 	var back_btn := Button.new()
 	back_btn.text = "BACK"
-	back_btn.add_theme_font_size_override("font_size", 22)
-	back_btn.custom_minimum_size = Vector2(220, 44)
+	HUDStyle.style_button(back_btn, HUDStyle.BTN_RED, HUDStyle.HUD_FONT_LRG)
+	back_btn.custom_minimum_size = Vector2(240, 50)
 	back_btn.pressed.connect(_on_back)
 	vb.add_child(back_btn)
 
@@ -76,28 +90,27 @@ func _ready() -> void:
 func _build_row(label_text: String, action: String) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 12)
+	row.add_theme_constant_override("separation", 10)
 
 	var name_lbl := Label.new()
-	name_lbl.text = label_text
-	name_lbl.custom_minimum_size = Vector2(180, 36)
-	name_lbl.add_theme_font_size_override("font_size", 18)
+	name_lbl.text = label_text.to_upper()
+	name_lbl.custom_minimum_size = Vector2(200, 40)
+	HUDStyle.style_label(name_lbl, HUDStyle.HUD_FONT_SMALL, HUDStyle.CRT_GREEN_INK)
 	name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	row.add_child(name_lbl)
 
 	var current_lbl := Label.new()
 	current_lbl.text = _current_binding_text(action)
-	current_lbl.custom_minimum_size = Vector2(110, 36)
-	current_lbl.add_theme_font_size_override("font_size", 16)
-	current_lbl.add_theme_color_override("font_color", Color(0.95, 0.85, 0.3))
+	current_lbl.custom_minimum_size = Vector2(130, 40)
+	HUDStyle.style_label(current_lbl, HUDStyle.HUD_FONT_SMALL, HUDStyle.CRT_GREEN_INK)
 	current_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	current_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	row.add_child(current_lbl)
 
 	var set_btn := Button.new()
 	set_btn.text = "SET"
-	set_btn.custom_minimum_size = Vector2(90, 36)
-	set_btn.add_theme_font_size_override("font_size", 16)
+	HUDStyle.style_button(set_btn, HUDStyle.BTN_BLUE, HUDStyle.HUD_FONT_SMALL)
+	set_btn.custom_minimum_size = Vector2(96, 40)
 	set_btn.pressed.connect(func() -> void: _on_set(action, set_btn, current_lbl))
 	row.add_child(set_btn)
 
@@ -115,12 +128,20 @@ func _current_binding_text(action: String) -> String:
 
 func _on_set(action: String, set_btn: Button, current_lbl: Label) -> void:
 	# Enter listening mode for this action — next joypad-button press
-	# captured by _input replaces the binding.
+	# captured by _input replaces the binding.  The SET button is restyled
+	# in yellow with the bevel inverted so it visibly sinks into the row,
+	# matching the EASY-style "selected" look from the reference image.
 	_listening_action = action
 	_listening_label = current_lbl
 	set_btn.text = "..."
-	current_lbl.text = "press a button"
-	current_lbl.add_theme_color_override("font_color", Color(0.4, 0.85, 1.0))
+	# Lock into the recessed yellow look by overriding ALL state styleboxes.
+	var rec := HUDStyle.bevel_stylebox(HUDStyle.BTN_YELLOW, true, false)
+	set_btn.add_theme_stylebox_override("normal",   rec)
+	set_btn.add_theme_stylebox_override("hover",    rec)
+	set_btn.add_theme_stylebox_override("pressed",  rec)
+	set_btn.add_theme_stylebox_override("focus",    rec)
+	current_lbl.text = "PRESS A BUTTON"
+	current_lbl.add_theme_color_override("font_color", HUDStyle.BTN_YELLOW.darkened(0.3))
 
 
 func _on_back() -> void:
@@ -138,12 +159,13 @@ func _input(event: InputEvent) -> void:
 			# Refresh the row labels and clear listening state.
 			if _listening_label:
 				_listening_label.text = InputActions.joy_button_name(jb.button_index)
-				_listening_label.add_theme_color_override("font_color", Color(0.95, 0.85, 0.3))
-			# Restore SET button label on whichever row was listening.
+				_listening_label.add_theme_color_override("font_color", HUDStyle.CRT_GREEN_INK)
+			# Restore SET button styleboxes on whichever row was listening.
 			for child in _find_set_buttons():
 				var btn: Button = child
 				if btn.text == "...":
 					btn.text = "SET"
+					HUDStyle.style_button(btn, HUDStyle.BTN_BLUE, HUDStyle.HUD_FONT_SMALL)
 			_listening_action = ""
 			_listening_label = null
 			get_viewport().set_input_as_handled()

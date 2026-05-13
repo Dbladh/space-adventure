@@ -7,12 +7,14 @@ extends Control
 #   • Occluded by planet → dimmed icon with dashed border and "(behind)" tag
 # Added to the HUD CanvasLayer in Main.gd.
 
+const HUDStyle = preload("res://src/ui/HUDStyle.gd")
+
 const ICON_R    = 16.0   # hexagon / circle icon radius (px) — was 22, slimmed
 const MARGIN    = 64.0   # screen-edge margin for clamped icons
-const FONT_SZ   = 11     # was 13 — keeps the POI bar from dominating the top
-const FONT_SM   = 9      # was 10
-const LABEL_BG_PAD_X = 4.0
-const LABEL_BG_PAD_Y = 1.0
+const FONT_SZ   = HUDStyle.HUD_FONT_TINY
+const FONT_SM   = HUDStyle.HUD_FONT_TINY - 1
+const LABEL_BG_PAD_X = 6.0
+const LABEL_BG_PAD_Y = 3.0
 
 var _camera: Camera3D = null
 var _player: Node3D   = null
@@ -23,7 +25,7 @@ var _tick: int         = 0
 func _ready() -> void:
 	mouse_filter = MOUSE_FILTER_IGNORE
 	set_anchors_preset(PRESET_FULL_RECT)
-	_font = ThemeDB.get_fallback_font()
+	_font = HUDStyle.PIXEL_FONT
 	set_process(true)
 	_refresh_pois()
 
@@ -128,32 +130,40 @@ func _draw() -> void:
 		if at_edge:
 			_draw_edge_arrow(spos, (spos - vp * 0.5).normalized(), col)
 
-		# Labels — wrapped in a slim dark backing so each POI reads as its
-		# own small chip rather than as bright text floating in the sky.
+		# Labels — wrapped in a mini beveled chip so each POI reads as a tiny
+		# pixel-art panel matching the rest of the chrome.  1px highlight +
+		# 1px drop shadow keeps it slim so dense POI scenes don't crowd.
 		var label_text: String = poi.label.to_upper()
 		var dist_text: String = _fmt_dist(dist)
-		var ly: float = spos.y + ICON_R + 4.0
+		var ly: float = spos.y + ICON_R + 6.0
 		var label_size: Vector2 = _font.get_string_size(label_text, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SZ)
 		var dist_size: Vector2 = _font.get_string_size(dist_text, HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SM)
 		var chip_w: float = max(label_size.x, dist_size.x) + LABEL_BG_PAD_X * 2.0
-		var chip_h: float = FONT_SZ + FONT_SM + LABEL_BG_PAD_Y * 3.0 + 3.0
-		var chip_pos: Vector2 = Vector2(spos.x - chip_w * 0.5, ly)
-		draw_rect(Rect2(chip_pos, Vector2(chip_w, chip_h)), Color(0.0, 0.0, 0.0, 0.55 * alpha))
-		draw_rect(Rect2(chip_pos, Vector2(chip_w, chip_h)), Color(col.r, col.g, col.b, 0.6 * alpha), false, 1.0)
+		var chip_h: float = FONT_SZ + FONT_SM + LABEL_BG_PAD_Y * 3.0 + 4.0
+		var chip_pos: Vector2 = Vector2(round(spos.x - chip_w * 0.5), round(ly))
+		var chip_rect := Rect2(chip_pos, Vector2(chip_w, chip_h))
+		# Mini bevel (1px strips so the chip stays compact).
+		var fill: Color = Color(HUDStyle.BG_DEEP_NAVY.r, HUDStyle.BG_DEEP_NAVY.g, HUDStyle.BG_DEEP_NAVY.b, 0.92 * alpha)
+		var hi: Color = Color(col.r, col.g, col.b, 0.85 * alpha)
+		var sh: Color = Color(0.0, 0.0, 0.0, 0.55 * alpha)
+		draw_rect(Rect2(chip_pos + Vector2(1, 1), chip_rect.size), sh, true)
+		draw_rect(chip_rect, fill, true)
+		draw_rect(Rect2(chip_pos.x, chip_pos.y, chip_rect.size.x, 1), hi, true)
+		draw_rect(Rect2(chip_pos.x, chip_pos.y, 1, chip_rect.size.y), hi, true)
 		var text_x: float = chip_pos.x + LABEL_BG_PAD_X
 		var text_y: float = chip_pos.y + LABEL_BG_PAD_Y + FONT_SZ
 		draw_string(_font, Vector2(text_x, text_y),
 			label_text,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SZ,
 			Color(1.0, 1.0, 1.0, alpha))
-		draw_string(_font, Vector2(text_x, text_y + FONT_SM + 2.0),
+		draw_string(_font, Vector2(text_x, text_y + FONT_SM + 3.0),
 			dist_text,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SM,
 			Color(col.r, col.g, col.b, alpha * 0.9))
 		if occluded:
-			draw_string(_font, Vector2(text_x, text_y + FONT_SM * 2 + 4.0),
-				"(behind planet)",
-				HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SM - 1,
+			draw_string(_font, Vector2(text_x, text_y + FONT_SM * 2 + 5.0),
+				"(BEHIND)",
+				HORIZONTAL_ALIGNMENT_LEFT, -1, FONT_SM,
 				Color(0.75, 0.75, 0.75, 0.6))
 
 # ---------------------------------------------------------------------------
@@ -190,8 +200,8 @@ func _draw_icon(center: Vector2, color: Color, type: String, at_edge: bool, occl
 		else:
 			draw_polyline(poly_pts, color, 2.5)
 		# Inner "S" symbol
-		draw_string(_font, center + Vector2(-5.0, 5.5), "S",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, color)
+		draw_string(_font, center + Vector2(-4.0, 4.0), "S",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, color)
 	else:
 		# Circular planet icon with orbit arc hints
 		var inner_alpha := 0.28 if (at_edge or occluded) else 0.55

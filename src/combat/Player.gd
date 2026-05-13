@@ -2256,9 +2256,9 @@ func _setup_polar_weather() -> void:
 	snow_particles = CPUParticles3D.new()
 	# Attach to camera so they always surround the player but stay local to the world
 	if camera: camera.add_child(snow_particles)
-	# MOBILE: Cut particle budget ~60% across the board. Weather is a flavour layer,
-	# not a gameplay system, and 800 box-mesh particles at 30fps eats GPU on A14.
-	snow_particles.amount = 320 if _mobile_perf else 800
+	# MOBILE: Cut particle budget hard. Weather is a flavour layer, not a
+	# gameplay system, and box-mesh particles eat fill on mobile tilers.
+	snow_particles.amount = 120 if _mobile_perf else 800
 	snow_particles.lifetime = 2.5
 	snow_particles.preprocess = 1.0
 	

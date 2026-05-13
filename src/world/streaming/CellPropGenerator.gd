@@ -60,6 +60,14 @@ const GRASS_ABOVE_SEA_M: float = 20.0
 # are what sells the ground texture.
 const MAX_PER_TYPE: int = 128
 const MAX_GRASS_PER_CELL: int = 384
+# Mobile caps — applied at emission time below. Worst-case visible trees with
+# the 3x3 cell window: 9 * 48 = 432 (vs. 1152 on desktop).
+const MAX_PER_TYPE_MOBILE: int = 48
+const MAX_GRASS_PER_CELL_MOBILE: int = 96
+# Density multiplier applied on top of DebugSettings.tree_mult / rock_mult.
+# 0.35 leaves enough vegetation to read as "covered" without overloading the
+# GPU. Grass uses the same multiplier via the cap above.
+const MOBILE_DENSITY_MULT: float = 0.35
 
 # Returns:
 # {
@@ -144,6 +152,16 @@ static func generate(planet: Node, cell_id: int, destroyed_indices: PackedInt32A
 	var tree_mult: float = float(debug_settings_script.get("tree_mult"))
 	var rock_mult: float = float(debug_settings_script.get("rock_mult"))
 
+	# Mobile: thin out vegetation and shrink per-cell caps. Reading from the
+	# Platform helper here is safe — it's just a cached int.
+	var max_per_type: int = MAX_PER_TYPE
+	var max_grass_per_cell: int = MAX_GRASS_PER_CELL
+	if MobilePerf.is_mobile():
+		tree_mult *= MOBILE_DENSITY_MULT
+		rock_mult *= MOBILE_DENSITY_MULT
+		max_per_type = MAX_PER_TYPE_MOBILE
+		max_grass_per_cell = MAX_GRASS_PER_CELL_MOBILE
+
 	# Cell parametric bounds in face-local [-1, 1] space.
 	var step: float = 2.0 / float(SurfaceCellId.CELLS_PER_FACE)
 	var u_lo: float = -1.0 + float(ix) * step
@@ -200,7 +218,7 @@ static func generate(planet: Node, cell_id: int, destroyed_indices: PackedInt32A
 				if h > sea_level + ROCK_ABOVE_SEA_M:
 					var type: String = mineable_pool[int(abs(float(h_v >> 7))) % mineable_pool.size()]
 					var xf := PropXform.object_xform(cp * (planet_radius + h + 5.0), cp, detail_n, 1.0)
-					if minerals.size() < MAX_PER_TYPE:
+					if minerals.size() < max_per_type:
 						var idx: int = local_idx_counter
 						local_idx_counter += 1
 						if not _is_destroyed(destroyed_indices, idx):
@@ -218,14 +236,14 @@ static func generate(planet: Node, cell_id: int, destroyed_indices: PackedInt32A
 						var xform := PropXform.object_xform(base_pos, cp, detail_n, 12.0)
 						# Mineable-tree variant (rare).
 						if h_v % MINEABLE_TREE_RARITY < 1:
-							if minerals.size() < MAX_PER_TYPE:
+							if minerals.size() < max_per_type:
 								var idx: int = local_idx_counter
 								local_idx_counter += 1
 								if not _is_destroyed(destroyed_indices, idx):
 									minerals.append({"xform": xform, "type": "Wood", "local_idx": idx})
 									mineral_indices.append(idx)
 						else:
-							if trees.size() < MAX_PER_TYPE:
+							if trees.size() < max_per_type:
 								var idx2: int = local_idx_counter
 								local_idx_counter += 1
 								if not _is_destroyed(destroyed_indices, idx2):
@@ -254,7 +272,7 @@ static func generate(planet: Node, cell_id: int, destroyed_indices: PackedInt32A
 						if not too_close:
 							var r_xf := PropXform.rock_xform(r_pos, cp, detail_n, 5.0)
 							if h_v % MINEABLE_ROCK_RARITY < 1:
-								if minerals.size() < MAX_PER_TYPE:
+								if minerals.size() < max_per_type:
 									var idx3: int = local_idx_counter
 									local_idx_counter += 1
 									if not _is_destroyed(destroyed_indices, idx3):
@@ -262,7 +280,7 @@ static func generate(planet: Node, cell_id: int, destroyed_indices: PackedInt32A
 										minerals.append({"xform": mineable_xf, "type": "Stone", "local_idx": idx3})
 										mineral_indices.append(idx3)
 							else:
-								if rocks.size() < MAX_PER_TYPE:
+								if rocks.size() < max_per_type:
 									var idx4: int = local_idx_counter
 									local_idx_counter += 1
 									if not _is_destroyed(destroyed_indices, idx4):
@@ -312,14 +330,14 @@ static func generate(planet: Node, cell_id: int, destroyed_indices: PackedInt32A
 					continue
 				var g_xf := PropXform.object_xform(cp * (planet_radius + h_g), cp, 0.0, 3.5)
 				if h_v % MINEABLE_GRASS_RARITY < 1:
-					if minerals.size() < MAX_PER_TYPE:
+					if minerals.size() < max_per_type:
 						var idx5: int = local_idx_counter
 						local_idx_counter += 1
 						if not _is_destroyed(destroyed_indices, idx5):
 							minerals.append({"xform": g_xf, "type": "Carbon Fiber", "local_idx": idx5})
 							mineral_indices.append(idx5)
 				else:
-					if grass.size() < MAX_GRASS_PER_CELL:
+					if grass.size() < max_grass_per_cell:
 						var idx6: int = local_idx_counter
 						local_idx_counter += 1
 						# Grass has no destruction routing (visual-only) but we

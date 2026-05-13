@@ -194,7 +194,11 @@ func _apply_station_materials(node: Node) -> void:
 					new_mat.emission_enabled = true
 					new_mat.emission_texture = tex_emission
 					new_mat.emission = Color(1.0, 0.9, 0.4)
-					new_mat.emission_energy_multiplier = 8.0
+					# 8x looks great with glow on desktop, but on mobile (glow
+					# disabled, low FSR scale) the emission texture clips to
+					# pure white and bleaches the entire silhouette. 2x keeps
+					# the lit-windows read without the bleach.
+					new_mat.emission_energy_multiplier = 2.0 if MobilePerf.is_mobile() else 8.0
 					
 					child.set_surface_override_material(i, new_mat)
 		_apply_station_materials(child)

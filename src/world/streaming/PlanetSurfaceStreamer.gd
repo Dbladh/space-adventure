@@ -113,6 +113,19 @@ func _ready() -> void:
 	if not found.is_empty():
 		_player = found[0]
 
+	# Mobile: raise the throttle thresholds so the engine still defers under
+	# real spikes but doesn't permanently stall. At a 25-30 fps baseline the
+	# desktop default (32 ms soft) engages every frame and the streamer never
+	# spawns props. Also shrink the activation window and altitude so we don't
+	# waste budget on cells the player can't make out at low resolution.
+	if MobilePerf.is_mobile():
+		frame_time_budget_ms = 80.0
+		frame_time_hard_limit_ms = 130.0
+		max_frames_between_activations = 20
+		spawn_budget_per_frame = 1
+		max_stream_altitude_m = 15000.0
+		max_stream_altitude_exit_m = 20000.0
+
 	set_process(true)
 
 func get_destruction_registry() -> Node:

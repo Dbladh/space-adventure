@@ -166,16 +166,23 @@ func _setup_stellar_horizon() -> void:
 	sky_env.fog_light_color = Color(0.72, 0.82, 0.95)  # Soft sky blue starter — updated per planet
 	sky_env.fog_light_energy = 0.4  # Low enough that OmniLights don't expose cluster tile boundaries
 	sky_env.fog_density = 0.0   # Start at 0, updated per-frame in _update_atmospheric_transition
-	sky_env.fog_aerial_perspective = 0.3  # Subtle sky blend — only affects very distant horizon
+	# Aerial perspective adds a per-pixel sky sample to the fog math — cheap on
+	# desktop, but a noticeable hit on mobile tiled renderers. Drop to 0 there.
+	sky_env.fog_aerial_perspective = 0.0 if MobilePerf.is_mobile() else 0.3
 	sky_env.fog_sun_scatter = 0.25  # Warm glow near the sun direction for golden horizon feel
 	# Subtle bloom: only HDR highlights (>1.05) glow, lit surfaces don't bleach.
-	sky_env.glow_enabled = true
-	sky_env.glow_intensity = 0.35
-	sky_env.glow_strength = 0.7
-	sky_env.glow_bloom = 0.05
-	sky_env.glow_hdr_threshold = 1.05
-	sky_env.glow_hdr_scale = 1.4
-	sky_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+	# Glow is the single biggest mobile cost in this scene (the station's 8x
+	# emission floods the blur passes and bleaches the silhouette at FSR scale).
+	if not MobilePerf.is_mobile():
+		sky_env.glow_enabled = true
+		sky_env.glow_intensity = 0.35
+		sky_env.glow_strength = 0.7
+		sky_env.glow_bloom = 0.05
+		sky_env.glow_hdr_threshold = 1.05
+		sky_env.glow_hdr_scale = 1.4
+		sky_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+	else:
+		sky_env.glow_enabled = false
 	
 	env.environment = sky_env
 	add_child(env); move_child(env, 0); main_env = env
@@ -184,14 +191,18 @@ func _setup_stellar_horizon() -> void:
 	# DESKTOP RETRO SCALING: 40% internal resolution gives the chunky pixel aesthetic
 	# while keeping the GPU well within budget on a 1080p/1440p monitor.
 	# FSR 1.0 upscales cleanly from ~540p/720p → native.
+	# Mobile drops to 30% — the extra blur is hidden by the pixel-art aesthetic
+	# and FSR upscaling, and fragment cost drops ~44% vs. 40%.
 	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
-	vp.scaling_3d_scale = 0.40
+	vp.scaling_3d_scale = 0.30 if MobilePerf.is_mobile() else 0.40
 	vp.canvas_item_default_texture_filter = Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST
 	# 2x MSAA is essentially free on desktop discrete GPUs and eliminates the worst
-	# aliasing on geometry edges at our resolution scale.
-	vp.msaa_3d = Viewport.MSAA_2X
+	# aliasing on geometry edges at our resolution scale — but on mobile tilers it
+	# doubles per-pixel bandwidth, so disable.
+	vp.msaa_3d = Viewport.MSAA_DISABLED if MobilePerf.is_mobile() else Viewport.MSAA_2X
 	vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED  # FSR already handles this
-	vp.use_debanding = true
+	# Debanding does a fullscreen dither pass; mobile fillrate is precious.
+	vp.use_debanding = not MobilePerf.is_mobile()
 
 func _setup_titan_splash() -> void:
 	_load_overlay = ColorRect.new()
@@ -246,10 +257,14 @@ func _setup_hardened_solar_genesis() -> void:
 	sun.rotation_degrees = Vector3(-45, 45, 0)
 	sun.light_color = Color("#FFF0CE")
 	sun.light_energy = 1.2
-	sun.shadow_enabled = true
+	# Shadows are the second-biggest mobile win after glow — the cascade render
+	# costs pile up on tiled GPUs and every lit fragment pays for a sample even
+	# when the cascade is mostly empty. Day/night feel is preserved by the sun
+	# direction + ambient.
+	sun.shadow_enabled = not MobilePerf.is_mobile()
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	sun.directional_shadow_blend_splits = false # Sharp splits for that retro feel
-	sun.directional_shadow_max_distance = 6500.0 
+	sun.directional_shadow_max_distance = 6500.0
 	
 	sun.add_to_group("World")
 	add_child(sun)
@@ -677,8 +692,9 @@ func _update_atmospheric_transition(p: Node) -> void:
 		# Aerial perspective at 0.85 was blending 85% of the bright sky colour
 		# into distant terrain, so even a vivid pink CANDY planet read as
 		# uniform cyan-white from any distance. 0.2 keeps subtle horizon haze
-		# without erasing the procedural biome colour.
-		sky_env.fog_aerial_perspective = 0.2
+		# without erasing the procedural biome colour. Mobile drops to 0 —
+		# the per-pixel sky sample is the most expensive fog term.
+		sky_env.fog_aerial_perspective = 0.0 if MobilePerf.is_mobile() else 0.2
 		
 		# Tint the fog to the planet's horizon color for per-biome atmosphere feel
 		var fog_col = Color(0.72, 0.82, 0.95) # Default sky blue

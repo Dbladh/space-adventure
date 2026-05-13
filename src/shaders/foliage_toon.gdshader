@@ -8,6 +8,9 @@ uniform float shadow_strength : hint_range(0.0, 1.0) = 0.8;
 uniform float wind_speed : hint_range(0.0, 10.0) = 1.2;
 uniform float wind_strength : hint_range(0.0, 5.0) = 0.8;
 uniform float biolum_intensity : hint_range(0.0, 2.0) = 0.0;
+// Mobile path: skip halftone / SSS / rim / biolum tiers in light(),
+// and pull the dither fade range in (3-5 km vs 8-12 km).
+uniform bool mobile_simple = false;
 
 varying vec3 v_color;
 varying vec2 v_uv;
@@ -61,8 +64,9 @@ void fragment() {
 	
 	// ACE DISTANCE DITHER: Saturn-style dissolve for the far horizon (LOD Replacement)
 	// Gradually dissolves objects into the background between 8km and 12km
-	float fade_start = 8000.0;
-	float fade_end = 12000.0;
+	// (mobile pulls these in to 3-5 km — half the fragment-shaded foliage area).
+	float fade_start = mobile_simple ? 3000.0 : 8000.0;
+	float fade_end = mobile_simple ? 5000.0 : 12000.0;
 	float transparency = 1.0 - clamp((v_cam_dist - fade_start) / (fade_end - fade_start), 0.0, 1.0);
 	
 	ivec2 d_uv = ivec2(mod(FRAGCOORD.xy, 4.0));
@@ -113,32 +117,40 @@ void light() {
 	float t2 = aa_step(0.20, l_level);
 	float t1 = aa_step(0.60, l_level);
 	
-	vec3 shadow_col = ALBEDO * 0.45; 
+	vec3 shadow_col = ALBEDO * 0.45;
 	vec3 mid_col = ALBEDO * 0.75;
-	
-	// ACE HALFTONE: Add dot-matrix texture to the midtones and shadows
-	// This creates a 'Comic/Sketch' look that is unique to Shadowglass
-	vec2 dot_uv = FRAGCOORD.xy * 0.15;
-	float dots = sin(dot_uv.x) * sin(dot_uv.y);
-	float halftone = smoothstep(0.0, 0.15, dots);
-	shadow_col *= mix(0.7, 1.0, halftone);
-	mid_col *= mix(0.85, 1.0, halftone);
-	
-	vec3 final_col = mix(shadow_col, mid_col, t2);
-	final_col = mix(final_col, ALBEDO, t1);
-	
-	// 1. BACKLIT TRANSLUCENCY (Fake SSS): Leaves softly transmit when the sun is behind them.
-	float sss = pow(clamp(dot(LIGHT, VIEW), 0.0, 1.0), 4.0) * 0.18;
-	final_col += ALBEDO * sss;
 
-	// 2. ILLUSTRATIVE RIM LIGHT: Subtle edge-lighting (was 0.5 — read as a glow halo on every tree).
-	float rim = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 5.0) * max(dot(NORMAL, LIGHT), 0.0);
-	final_col += LIGHT_COLOR * clamp(rim, 0.0, 1.0) * 0.12;
+	// Mobile path: skip halftone, SSS, rim, biolum — keeps the toon tiering
+	// (cheap) but drops ~5 sin/pow/smoothstep ops per fragment per light.
+	if (mobile_simple) {
+		vec3 final_col = mix(shadow_col, mid_col, t2);
+		final_col = mix(final_col, ALBEDO, t1);
+		DIFFUSE_LIGHT += final_col * LIGHT_COLOR * ATTENUATION;
+	} else {
+		// ACE HALFTONE: Add dot-matrix texture to the midtones and shadows
+		// This creates a 'Comic/Sketch' look that is unique to Shadowglass
+		vec2 dot_uv = FRAGCOORD.xy * 0.15;
+		float dots = sin(dot_uv.x) * sin(dot_uv.y);
+		float halftone = smoothstep(0.0, 0.15, dots);
+		shadow_col *= mix(0.7, 1.0, halftone);
+		mid_col *= mix(0.85, 1.0, halftone);
 
-	// 3. BIOLUMINESCENT PULSE: Rare planetary attribute (driven by biolum_intensity uniform).
-	float bio_pulse = (sin(TIME * 1.5) * 0.5 + 0.5) * biolum_intensity;
-	final_col += ALBEDO * bio_pulse * 1.2;
+		vec3 final_col = mix(shadow_col, mid_col, t2);
+		final_col = mix(final_col, ALBEDO, t1);
 
-	// ATTENUATION respect — leaves now darken in shadow instead of being full-bright.
-	DIFFUSE_LIGHT += final_col * LIGHT_COLOR * ATTENUATION;
+		// 1. BACKLIT TRANSLUCENCY (Fake SSS): Leaves softly transmit when the sun is behind them.
+		float sss = pow(clamp(dot(LIGHT, VIEW), 0.0, 1.0), 4.0) * 0.18;
+		final_col += ALBEDO * sss;
+
+		// 2. ILLUSTRATIVE RIM LIGHT: Subtle edge-lighting (was 0.5 — read as a glow halo on every tree).
+		float rim = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), 5.0) * max(dot(NORMAL, LIGHT), 0.0);
+		final_col += LIGHT_COLOR * clamp(rim, 0.0, 1.0) * 0.12;
+
+		// 3. BIOLUMINESCENT PULSE: Rare planetary attribute (driven by biolum_intensity uniform).
+		float bio_pulse = (sin(TIME * 1.5) * 0.5 + 0.5) * biolum_intensity;
+		final_col += ALBEDO * bio_pulse * 1.2;
+
+		// ATTENUATION respect — leaves now darken in shadow instead of being full-bright.
+		DIFFUSE_LIGHT += final_col * LIGHT_COLOR * ATTENUATION;
+	}
 }

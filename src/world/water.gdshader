@@ -9,6 +9,10 @@ uniform vec3 pal_water_base  : source_color = vec3(0.0, 0.35, 0.95);
 uniform vec3 pal_water_light : source_color = vec3(0.0, 0.65, 1.00);
 uniform vec3 pal_water_shore : source_color = vec3(0.3, 0.85, 1.00);
 uniform bool is_lava = false;
+// Mobile: skip the high-frequency detail FBM in waves and replace the
+// shimmer FBM with a single value_noise call. Saves ~6 hash() ops per
+// fragment on a shader with full-screen ocean coverage at low altitude.
+uniform bool mobile_simple = false;
 
 varying vec3 v_local_pos;     // Local-space position (immune to origin-shift drift)
 varying float v_shore;        // 0=deep ocean, 1=shoreline (baked into vertex color)
@@ -93,10 +97,13 @@ void fragment() {
 		float shoal_freq = mix(1.0, 1.8, smoothstep(0.2, 0.8, shore));
 		// Add a higher-frequency detail octave so the dominant fbm cell
 		// (~500 m at SCALE=0.0018) doesn't read as one big diamond patch
-		// at low altitude — the detail breaks the silhouette.
+		// at low altitude — the detail breaks the silhouette. Skipped on
+		// mobile (the dominant cell is small enough at iPhone DPI).
 		float ocean_n = fbm((ocean_uv + warp) * shoal_freq + vec2(wt * 0.06, wt * 0.04));
-		float ocean_d = fbm((ocean_uv + warp) * shoal_freq * 4.3 + vec2(-wt * 0.08, wt * 0.05));
-		ocean_n = ocean_n * 0.78 + ocean_d * 0.22;
+		if (!mobile_simple) {
+			float ocean_d = fbm((ocean_uv + warp) * shoal_freq * 4.3 + vec2(-wt * 0.08, wt * 0.05));
+			ocean_n = ocean_n * 0.78 + ocean_d * 0.22;
+		}
 
 		// Soft thresholds via smoothstep — old hard step()s stamped out
 		// discrete polygonal cells when noise crossed the cutoff.  Now
@@ -121,7 +128,9 @@ void fragment() {
 	// Same planet-radius scaling as the main wave noise — original constant
 	// 0.009 corresponds to 0.009 * 1M = 9000 on a 1 M-radius planet.
 	float shimmer_scale = 9000.0 / max(radius, 2.0);
-	float shimmer_n = fbm(v_local_pos.xz * shimmer_scale + vec2(wt * 0.4, -wt * 0.35));
+	float shimmer_n = mobile_simple
+		? value_noise(v_local_pos.xz * shimmer_scale + vec2(wt * 0.4, -wt * 0.35))
+		: fbm(v_local_pos.xz * shimmer_scale + vec2(wt * 0.4, -wt * 0.35));
 	float shimmer = smoothstep(0.74, 0.88, shimmer_n)
 				  * smoothstep(0.35, 0.55, dot(v_world_normal, vec3(0.0, 1.0, 0.0)));
 	shimmer *= smoothstep(0.45, 0.0, shore);

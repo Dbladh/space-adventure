@@ -72,7 +72,24 @@ func _ready() -> void:
 		inv.name = "InventoryManager"
 		add_child(inv)
 		Engine.set_meta("InventoryManager", inv)
-	
+
+	# UPGRADE GENESIS: Stat tracks (Attack/Health/Luck/Slots/Movement)
+	var up_script = load("res://src/core/UpgradeManager.gd")
+	if up_script:
+		var up = up_script.new()
+		up.name = "UpgradeManager"
+		add_child(up)
+		Engine.set_meta("UpgradeManager", up)
+
+	# SAVE GENESIS: JSON persistence (user://save.json)
+	var save_script = load("res://src/core/SaveManager.gd")
+	if save_script:
+		var sm = save_script.new()
+		sm.name = "SaveManager"
+		add_child(sm)
+		Engine.set_meta("SaveManager", sm)
+		sm.load_if_exists()
+
 	# 1. ATOMIC PURGE
 	_purge_ghost_entities()
 	
@@ -96,7 +113,14 @@ func _ready() -> void:
 
 	# 5.6 SPACE STATION
 	_setup_space_station()
-	
+
+	# 5.7 REHYDRATE FORGED PLANETS from save (no-op if save was empty).
+	# Has to wait until WorldRoot exists and at least one SpaceStation is in
+	# the tree (the rehydrate method is an instance method).
+	var stations := get_tree().get_nodes_in_group("SpaceStation")
+	if stations.size() > 0 and stations[0].has_method("_rehydrate_active_planets"):
+		stations[0]._rehydrate_active_planets()
+
 	# 6. TITAN TELEMETRY HUD (F3)
 	_setup_hardened_diag_hud()
 	
@@ -115,6 +139,11 @@ func _ready() -> void:
 	# 11. BENCHMARK UTILITY
 	benchmark_manager = load("res://src/tests/BenchmarkManager.gd").new()
 	add_child(benchmark_manager)
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_WM_GO_BACK_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED:
+		if Engine.has_meta("SaveManager"):
+			Engine.get_meta("SaveManager").save_now()
 
 func _purge_ghost_entities() -> void:
 	for child in get_children():
@@ -420,10 +449,17 @@ func _setup_hardened_diag_hud() -> void:
 	creds_chip.name = "CreditChip"
 	creds_chip.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.TIER_COLOR_4.darkened(0.15)))
 	creds_chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	creds_chip.modulate.a = 0.85
 	hud_layer.add_child(creds_chip)
 	creds_chip.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_MINSIZE, 0)
 	creds_chip.position = Vector2(HUDStyle.CREDITS_OFFSET.x, HUDStyle.CREDITS_OFFSET.y)
 	creds_chip.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	# On mobile the PAUSE button lives in the top-right and is wider than on
+	# desktop — push the credit chip further down so it doesn't sit underneath
+	# the button.  Below the top button rect (24 inset + 88 high + a few px
+	# breathing room) lands the chip at y≈124.
+	if MobilePerf.is_mobile():
+		creds_chip.position = Vector2(HUDStyle.CREDITS_OFFSET.x, 124.0)
 
 	var creds = Label.new(); creds.name = "CreditLabel"
 	creds.text = "$0"
@@ -435,6 +471,9 @@ func _setup_hardened_diag_hud() -> void:
 	if Engine.has_meta("EconomyManager"):
 		var econ = Engine.get_meta("EconomyManager")
 		econ.currency_changed.connect(func(n): creds.text = "$" + str(n))
+		# Reflect any credits already restored by SaveManager (whose load
+		# emission happens before this HUD listener attaches).
+		creds.text = "$" + str(int(econ.credits))
 
 	# INVENTORY ROW: top-left chip strip.  Each resource becomes a
 	# colour-tinted chip with a tier-coloured top stripe.  Chips are pooled
@@ -446,12 +485,27 @@ func _setup_hardened_diag_hud() -> void:
 	inv_box.add_theme_constant_override("h_separation", HUDStyle.CHIP_GAP)
 	inv_box.add_theme_constant_override("v_separation", HUDStyle.CHIP_GAP)
 	inv_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	inv_box.modulate.a = 0.85
 	hud_layer.add_child(inv_box)
-	inv_box.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT, Control.PRESET_MODE_KEEP_SIZE, 0)
-	inv_box.offset_left = HUDStyle.INVENTORY_OFFSET.x
-	inv_box.offset_right = HUDStyle.INVENTORY_OFFSET.x + 720
-	inv_box.offset_top = HUDStyle.INVENTORY_OFFSET.y
-	inv_box.offset_bottom = HUDStyle.INVENTORY_OFFSET.y + 240
+	if MobilePerf.is_mobile():
+		# Mobile layout: centre the chip strip below the health bar (which is
+		# at y≈24 with 18 px height) and span the full top width MINUS the
+		# RECENTER / PAUSE button rects on the corners.  alignment=CENTER
+		# packs the chips in the middle and lets them flow outward; the inset
+		# stops them from sliding under either button.
+		const _MOBILE_TOP_BTN_INSET := 24.0 + 260.0 + 16.0   # button left/right inset + width + small gap
+		inv_box.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE, Control.PRESET_MODE_KEEP_SIZE, 0)
+		inv_box.offset_left  = _MOBILE_TOP_BTN_INSET
+		inv_box.offset_right = -_MOBILE_TOP_BTN_INSET
+		inv_box.offset_top   = 52.0    # 24 (bar top) + 18 (bar) + 10 (gap)
+		inv_box.offset_bottom = 240.0
+		inv_box.alignment = FlowContainer.ALIGNMENT_CENTER
+	else:
+		inv_box.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT, Control.PRESET_MODE_KEEP_SIZE, 0)
+		inv_box.offset_left = HUDStyle.INVENTORY_OFFSET.x
+		inv_box.offset_right = HUDStyle.INVENTORY_OFFSET.x + 720
+		inv_box.offset_top = HUDStyle.INVENTORY_OFFSET.y
+		inv_box.offset_bottom = HUDStyle.INVENTORY_OFFSET.y + 240
 
 	var chips_by_name: Dictionary = {}
 
@@ -478,6 +532,16 @@ func _setup_hardened_diag_hud() -> void:
 			chip.set_count(amt)
 			_resort_inventory_row(inv_box, chips_by_name)
 		inv.inventory_changed.connect(_refresh_inv)
+		# Replay any items already restored by SaveManager so they appear
+		# in the HUD on launch (SaveManager runs before this listener attaches).
+		# Deferred because inv_box's CanvasLayer parent isn't add_child'd until
+		# later in _ready — ResourceChip.set_count() touches get_tree() and
+		# would crash if invoked before the chip is in the tree.
+		var restored: Dictionary = inv.get_all()
+		for res_type in restored.keys():
+			var amt: int = int(restored[res_type])
+			if amt > 0:
+				_refresh_inv.call_deferred(res_type, amt)
 
 	# Station-guide NavBeacon widget removed — the screen-space POI HUD
 	# below renders bearing + distance markers for every station / planet

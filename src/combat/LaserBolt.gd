@@ -122,7 +122,10 @@ func _on_body_entered(body: Node) -> void:
 			target = target.get_parent()
 	
 	if target.is_in_group("Mineable") or target.has_method("take_damage"):
-		target.take_damage(1.0)
+		var atk_mul: float = 1.0
+		if Engine.has_meta("UpgradeManager"):
+			atk_mul = Engine.get_meta("UpgradeManager").get_attack_multiplier()
+		target.take_damage(1.0 * atk_mul)
 		_trigger_explosion(body)
 		queue_free()
 		return

@@ -4,8 +4,9 @@ importer="texture"
 type="CompressedTexture2D"
 uid="uid://co70deqyphuks"
 path.s3tc="res://.godot/imported/space_station_3.jpg-79dd8af1f340da4511dd9530d28358a5.s3tc.ctex"
+path.etc2="res://.godot/imported/space_station_3.jpg-79dd8af1f340da4511dd9530d28358a5.etc2.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
 "vram_texture": true
 }
 generator_parameters={
@@ -15,7 +16,7 @@ generator_parameters={
 [deps]
 
 source_file="res://assets/models/space station/space_station_3.jpg"
-dest_files=["res://.godot/imported/space_station_3.jpg-79dd8af1f340da4511dd9530d28358a5.s3tc.ctex"]
+dest_files=["res://.godot/imported/space_station_3.jpg-79dd8af1f340da4511dd9530d28358a5.s3tc.ctex", "res://.godot/imported/space_station_3.jpg-79dd8af1f340da4511dd9530d28358a5.etc2.ctex"]
 
 [params]
 

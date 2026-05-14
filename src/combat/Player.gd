@@ -42,14 +42,23 @@ var _mobile_look_last_pos: Vector2 = Vector2.ZERO
 # GYRO STEERING (Star Fox Style)
 @export var gyro_enabled: bool = true
 @export var gyro_sensitivity: float = 0.8 # iPhone-15-tuned. Was 1.9 — combined with ±1.5 clamp produced ~330°/s yaw, way too jumpy on a real phone IMU. Pause-menu SENS slider can scale up.
-var _gyro_neutral_x: float = 0.0 # X-axis (side tilt) neutral — captured alongside Z so both axes are zeroed relative to the player's actual hand pose.
-var _gyro_neutral_z: float = 0.0 # ACE Calibration
+# YAW comes from grav.y, not grav.x.  In iOS landscape the sensor frame stays in
+# portrait, so the gravity vector at rest is dominated by ±X (~±9.8).  Tilting
+# the phone like a steering wheel rotates around the screen-perpendicular axis,
+# which redistributes gravity between X and Y — X only ever *decreases* from its
+# near-saturated rest value (no headroom in the +direction), while Y swings
+# cleanly through zero.  Using X gave one-direction-only behaviour; Y is the
+# correct yaw signal.  Pitch stays on Z (lean-the-phone-forward/back).
+var _gyro_neutral_x: float = 0.0 # captured for diagnostic only — not used for control
+var _gyro_neutral_y: float = 0.0 # YAW neutral
+var _gyro_neutral_z: float = 0.0 # PITCH neutral
 var _is_calibrated: bool = false
 # Calibration accumulator — averages ~0.5s of stable readings before
 # locking in the neutral, so a tilted-at-startup pose can't poison the
 # neutral and produce a permanent rotation drift.
 var _calib_samples: int = 0
 var _calib_x_sum: float = 0.0
+var _calib_y_sum: float = 0.0
 var _calib_z_sum: float = 0.0
 var _gyro_print_t: float = 0.0  # throttle accumulator for the 1Hz gyro diagnostic print
 
@@ -147,6 +156,43 @@ var _last_flash_ms: int = 0
 # "I am inside a cloud volume" rather than "I am looking at a flat shell."
 var _cloud_cockpit_particles: GPUParticles3D = null
 
+# UPGRADES: base values for stats that get scaled by UpgradeManager.
+# Captured once on _ready so re-applies always re-derive from the base.
+const _BASE_PLAYER_HEALTH: float = 1000.0
+var _base_max_space_speed: float = 0.0
+var _base_max_warp_speed: float = 0.0
+var _base_max_hyperdrive_speed: float = 0.0
+
+func _upm():
+	return Engine.get_meta("UpgradeManager") if Engine.has_meta("UpgradeManager") else null
+
+func _attack_mult() -> float:
+	var u = _upm()
+	return u.get_attack_multiplier() if u else 1.0
+
+func _apply_movement_upgrade() -> void:
+	var u = _upm()
+	var m: float = u.get_speed_multiplier() if u else 1.0
+	max_space_speed = _base_max_space_speed * m
+	max_warp_speed = _base_max_warp_speed * m
+	max_hyperdrive_speed = _base_max_hyperdrive_speed * m
+	# max_deep_space_warp_speed is the LOD streaming ceiling — never scale it.
+
+func _apply_health_upgrade() -> void:
+	if health_component == null:
+		return
+	var u = _upm()
+	var bonus: int = u.get_max_health_bonus() if u else 0
+	health_component.max_health = _BASE_PLAYER_HEALTH + float(bonus)
+	if health_component.current_health > health_component.max_health:
+		health_component.current_health = health_component.max_health
+
+func _on_upgrade_changed(track: String, _new_level: int) -> void:
+	if track == "health":
+		_apply_health_upgrade()
+	elif track == "movement":
+		_apply_movement_upgrade()
+
 
 func _ready() -> void:
 	self.add_to_group("Player")
@@ -199,10 +245,21 @@ func _ready() -> void:
 	self.collision_mask = 1 | 4 | 8 
 	
 	# COMBAT HARDENING: Player Health Tracking
-	health_component = HealthComponent.new(); health_component.max_health = 1000.0
+	# Base 1000 HP + Health upgrade bonus from UpgradeManager.
+	var _upm_for_hp = _upm()
+	var _hp_bonus: int = _upm_for_hp.get_max_health_bonus() if _upm_for_hp else 0
+	health_component = HealthComponent.new(); health_component.max_health = _BASE_PLAYER_HEALTH + float(_hp_bonus)
 	add_child(health_component)
 	health_component.damaged.connect(func(amt): _trigger_hit_flash(0.85))
 	health_component.health_depleted.connect(_on_player_death)
+
+	# UPGRADES: capture base speeds, apply movement multiplier, listen for changes.
+	_base_max_space_speed = max_space_speed
+	_base_max_warp_speed = max_warp_speed
+	_base_max_hyperdrive_speed = max_hyperdrive_speed
+	_apply_movement_upgrade()
+	if _upm_for_hp and not _upm_for_hp.is_connected("upgrade_changed", _on_upgrade_changed):
+		_upm_for_hp.upgrade_changed.connect(_on_upgrade_changed)
 	
 	_setup_player_hud() # Vitality Visuals
 	
@@ -399,10 +456,12 @@ func _setup_combat_hud() -> void:
 			mc.deadzone_changed.connect(func(v): mobile_gyro_dead = v)
 			mc.recalibrate_pressed.connect(func():
 				_gyro_neutral_x = 0.0
+				_gyro_neutral_y = 0.0
 				_gyro_neutral_z = 0.0
 				_is_calibrated = false
 				_calib_samples = 0
 				_calib_x_sum = 0.0
+				_calib_y_sum = 0.0
 				_calib_z_sum = 0.0
 			)
 			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
@@ -477,7 +536,7 @@ func _setup_thruster_trails() -> void:
 
 func _setup_starhawk_hull() -> void:
 	var path = "res://assets/models/player/ship/Meshy_AI_Starhawk_01_0331051011_texture.glb"
-	if FileAccess.file_exists(path):
+	if ResourceLoader.exists(path):
 		var scene = load(path)
 		if scene:
 			ship_model = scene.instantiate()
@@ -648,6 +707,7 @@ func _setup_player_hud() -> void:
 	health_bar_bg.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
 	health_bar_bg.position.y = 24.0
 	health_bar_bg.position.x -= bar_w / 2.0
+	health_bar_bg.modulate.a = 0.85
 	hud.add_child(health_bar_bg)
 
 	health_bar_fill = ColorRect.new()
@@ -844,38 +904,58 @@ func _process_ace_flight(delta: float) -> void:
 	# semantics, same deadzone, same downstream rotate() calls.
 	var yaw_stick: float = 0.0
 	var pitch_stick: float = 0.0
+	# Hoisted so we can push these to the mobile HUD debug overlay below.
+	var gyro_grav: Vector3 = Vector3.ZERO
+	var gyro_tx: float = 0.0
+	var gyro_ty: float = 0.0
+	var gyro_tz: float = 0.0
 	if _mobile_perf and gyro_enabled and not mobile_gyro_paused:
-		var grav = Input.get_gravity()
-		if grav.length() > 1.0:
+		gyro_grav = Input.get_gravity()
+		if gyro_grav.length() > 1.0:
 			if not _is_calibrated:
 				_calib_samples += 1
-				_calib_x_sum += grav.x
-				_calib_z_sum += grav.z
+				_calib_x_sum += gyro_grav.x
+				_calib_y_sum += gyro_grav.y
+				_calib_z_sum += gyro_grav.z
 				if _calib_samples >= 30:
 					_gyro_neutral_x = _calib_x_sum / float(_calib_samples)
+					_gyro_neutral_y = _calib_y_sum / float(_calib_samples)
 					_gyro_neutral_z = _calib_z_sum / float(_calib_samples)
 					_is_calibrated = true
-					print("[GYRO] calibrated. neutral_x=", _gyro_neutral_x, " neutral_z=", _gyro_neutral_z)
+					print("[GYRO] calibrated. neutral_x=", _gyro_neutral_x,
+						" neutral_y=", _gyro_neutral_y, " neutral_z=", _gyro_neutral_z)
 			else:
 				const TILT_SAT = 5.0   # ~30° tilt = full virtual-stick deflection
-				var tx = grav.x - _gyro_neutral_x
-				var tz = grav.z - _gyro_neutral_z
-				if abs(tx) < mobile_gyro_dead: tx = 0.0
-				if abs(tz) < mobile_gyro_dead: tz = 0.0
+				gyro_tx = gyro_grav.x - _gyro_neutral_x  # diagnostic only
+				gyro_ty = gyro_grav.y - _gyro_neutral_y  # YAW signal
+				gyro_tz = gyro_grav.z - _gyro_neutral_z  # PITCH signal
+				if abs(gyro_ty) < mobile_gyro_dead: gyro_ty = 0.0
+				if abs(gyro_tz) < mobile_gyro_dead: gyro_tz = 0.0
 				# Sign convention matches gamepad: yaw_stick is -joy_axis(LEFT_X), pitch_stick is +joy_axis(LEFT_Y).
-				yaw_stick   = -clamp(tx / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
-				pitch_stick =  clamp(tz / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
+				# Empirically (iOS landscape, home-button-right): steering-wheel-right gesture drives grav.y
+				# positive, so negating ty gives a negative yaw_stick == right turn, matching keyboard D=-1.
+				# If the sign feels backwards on a different grip/orientation, flip the leading sign here.
+				yaw_stick   = -clamp(gyro_ty / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
+				pitch_stick =  clamp(gyro_tz / TILT_SAT, -1.0, 1.0) * gyro_sensitivity * mobile_sens_mult
 		# 1Hz live diagnostic — read in Godot's runtime console while tilting
 		# to verify which gravity axis actually corresponds to which physical
-		# motion. We need this to confirm the (x→yaw, z→pitch) mapping is right
-		# for iPhone landscape.
+		# motion. Confirms the (y→yaw, z→pitch) mapping after the X→Y switch.
 		_gyro_print_t += delta
 		if _gyro_print_t > 1.0:
 			_gyro_print_t = 0.0
-			print("[GYRO] grav=(", grav.x, ", ", grav.y, ", ", grav.z,
-				") tx=", grav.x - _gyro_neutral_x, " tz=", grav.z - _gyro_neutral_z,
+			print("[GYRO] grav=(", gyro_grav.x, ", ", gyro_grav.y, ", ", gyro_grav.z,
+				") tx=", gyro_tx, " ty=", gyro_ty, " tz=", gyro_tz,
 				" yaw_stick=", yaw_stick, " pitch_stick=", pitch_stick,
 				" calib=", _is_calibrated, "/", _calib_samples)
+		# On-device debug overlay: push the full gyro pipeline state to the
+		# mobile HUD so the iOS right-turn bug can be diagnosed without Xcode
+		# console access.  Throttled to ~10 Hz inside the UI's _process.
+		if mobile_ui_ref and mobile_ui_ref.has_method("set_gyro_debug"):
+			mobile_ui_ref.set_gyro_debug(gyro_grav,
+				_gyro_neutral_x, _gyro_neutral_y, _gyro_neutral_z,
+				gyro_tx, gyro_ty, gyro_tz,
+				yaw_stick, pitch_stick,
+				_is_calibrated, _calib_samples)
 	else:
 		yaw_stick = -Input.get_joy_axis(0, JOY_AXIS_LEFT_X)
 		pitch_stick = Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
@@ -1888,13 +1968,15 @@ func _process(delta: float) -> void:
 			elif target.get_parent() and target.get_parent().is_in_group("Mineable"):
 				mineable = target.get_parent()
 
+			var atk_mul: float = _attack_mult()
 			if mineable and mineable.has_method("take_damage"):
-				# is_dying based on the mineral's own health field (1 dmg per
-				# shot, so health <= 1 means this hit shatters it).
+				# is_dying based on the mineral's own health field; mining damage
+				# scaled by Attack Power upgrade.
+				var mine_dmg: float = 1.0 * atk_mul
 				var hp_var = mineable.get("health")
 				var cur_hp: float = float(hp_var) if hp_var != null else 1.0
-				is_dying = cur_hp <= 1.0
-				mineable.take_damage(1.0)
+				is_dying = cur_hp <= mine_dmg
+				mineable.take_damage(mine_dmg)
 			elif mineable and mineable.has_method("apply_damage_to_shape"):
 				# PlanetSurfaceStreamer cell aggregate body: one StaticBody3D
 				# holds many CollisionShape3D children, one per scatter prop.
@@ -1903,11 +1985,12 @@ func _process(delta: float) -> void:
 				# bolt would explode visually but never deal damage to trees.
 				# apply_damage_to_shape returns 0=miss, 1=wounded, 2=killed.
 				var shape_idx: int = int(result.get("shape", 0))
-				var hit_code: int = int(mineable.call("apply_damage_to_shape", shape_idx, 1.0))
+				var hit_code: int = int(mineable.call("apply_damage_to_shape", shape_idx, 1.0 * atk_mul))
 				is_dying = (hit_code == 2)
 			elif hp:
-				is_dying = (hp.current_health <= 25.0)
-				hp.take_damage(25.0)
+				var combat_dmg: float = 25.0 * atk_mul
+				is_dying = (hp.current_health <= combat_dmg)
+				hp.take_damage(combat_dmg)
 
 				# ACE DESTRUCTION: Handle actual removal if health is depleted
 				if is_dying:
@@ -2108,7 +2191,7 @@ func _disembark() -> void:
 	
 	# Manifest an empty decoy hull SNAPPED to the surface
 	var path = "res://assets/models/player/ship/Meshy_AI_Starhawk_01_0331051011_texture.glb"
-	if FileAccess.file_exists(path) and target_planet:
+	if ResourceLoader.exists(path) and target_planet:
 		var scene = load(path)
 		if scene:
 			parked_ship = scene.instantiate()

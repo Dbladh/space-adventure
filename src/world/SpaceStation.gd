@@ -9,7 +9,12 @@ const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
 #   • Dismantle — destroy a forged planet and recover the resources
 
 const DOCK_RANGE: float = 2000000.0   # 2000 km — Closer to the model surface
-const MAX_PLANETS: int = 3
+const _DEFAULT_MAX_PLANETS: int = 1   # starting cap before any Forge Slot upgrades
+
+static func _max_planets() -> int:
+	if Engine.has_meta("UpgradeManager"):
+		return int(Engine.get_meta("UpgradeManager").get_forge_slots())
+	return _DEFAULT_MAX_PLANETS
 
 var station_display_name: String = "Alpha"   # set before add_child()
 var _ring_node: Node3D = null                # rotated each frame
@@ -41,10 +46,13 @@ var _market_status: Label = null
 const BUY_MARKUP: float = 1.8
 
 # Tab references
-var _tab_btns: Array = []  # [market_btn, forge_btn]
-var _active_tab: int = 0  # 0 = Market, 1 = Forge
+var _tab_btns: Array = []  # [market_btn, forge_btn, upgrades_btn]
+var _active_tab: int = 0  # 0 = Market, 1 = Forge, 2 = Upgrades
 var _tab_market_panel: Control = null
 var _tab_forge_panel: Control = null
+var _tab_upgrades_panel: Control = null
+var _upgrade_rows: Dictionary = {}  # track -> PanelContainer
+var _upgrades_status: Label = null
 
 # Gamepad cursor/focus
 var _virtual_cursor: ColorRect = null
@@ -281,8 +289,8 @@ func _build_ui() -> void:
 	tab_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_child(tab_row)
 
-	for tab_i in range(2):
-		var tab_lbl: String = ["  MARKET  ", "  FORGE  "][tab_i]
+	for tab_i in range(3):
+		var tab_lbl: String = ["  MARKET  ", "  FORGE  ", "  UPGRADES  "][tab_i]
 		var tb: Button = Button.new()
 		tb.text = tab_lbl
 		tb.add_theme_font_size_override("font_size", 20)
@@ -412,11 +420,18 @@ func _build_ui() -> void:
 	_forge_btn.pressed.connect(_on_forge_planet)
 	_tab_forge_panel.add_child(_forge_btn)
 
+	# ======================== UPGRADES TAB ========================
+	_tab_upgrades_panel = VBoxContainer.new()
+	_tab_upgrades_panel.add_theme_constant_override("separation", 8)
+	_tab_upgrades_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_child(_tab_upgrades_panel)
+	_build_upgrades_panel(_tab_upgrades_panel)
+
 	vbox.add_child(HSeparator.new())
 
 	# ---- Active Worlds (always visible below tabs) ----
 	_worlds_header = Label.new()
-	_worlds_header.text = "— ACTIVE WORLDS (0/" + str(MAX_PLANETS) + ") —"
+	_worlds_header.text = "— ACTIVE WORLDS (0/" + str(_max_planets()) + ") —"
 	_worlds_header.add_theme_font_size_override("font_size", 20)
 	_worlds_header.add_theme_color_override("font_color", Color(0.6, 1.0, 0.8))
 	_worlds_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -440,8 +455,22 @@ func _build_ui() -> void:
 
 	if Engine.has_meta("InventoryManager"):
 		var inv = Engine.get_meta("InventoryManager")
-		inv.inventory_changed.connect(func(_t: String, _a: int) -> void: _refresh_inv_display())
+		inv.inventory_changed.connect(func(_t: String, _a: int) -> void:
+			_refresh_inv_display()
+			if _active_tab == 2:
+				_rebuild_all_upgrade_rows())
 		_refresh_inv_display()
+
+	if Engine.has_meta("EconomyManager"):
+		var econ2 = Engine.get_meta("EconomyManager")
+		econ2.currency_changed.connect(func(_n: int) -> void:
+			if _active_tab == 2:
+				_rebuild_all_upgrade_rows())
+
+	if Engine.has_meta("UpgradeManager"):
+		var up = Engine.get_meta("UpgradeManager")
+		up.upgrade_changed.connect(_on_upgrade_changed)
+		up.upgrade_purchase_failed.connect(_on_upgrade_purchase_failed)
 
 	_panel.hide()
 
@@ -616,7 +645,7 @@ func _refresh_planets_ui() -> void:
 	for child in _planets_container.get_children():
 		child.queue_free()
 
-	_worlds_header.text = "— ACTIVE WORLDS (" + str(_active_planets.size()) + "/" + str(MAX_PLANETS) + ") —"
+	_worlds_header.text = "— ACTIVE WORLDS (" + str(_active_planets.size()) + "/" + str(_max_planets()) + ") —"
 
 	if _active_planets.is_empty():
 		var none_lbl := Label.new()
@@ -634,7 +663,7 @@ func _refresh_planets_ui() -> void:
 
 		var combo: String = ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2) + "+" + ResourceRegistry.get_abbrev(entry.r3)
 		var seed_val: int = PlanetSeedKitchen.make_seed(entry.r1, entry.r2, entry.r3)
-		var rank: Dictionary = PlanetSeedKitchen.rank_planet(entry.r1, entry.r2, entry.r3, seed_val)
+		var rank: Dictionary = PlanetSeedKitchen.rank_planet(entry.r1, entry.r2, entry.r3, seed_val, float(entry.get("luck_variance", 0.0)))
 
 		# ── Planet thumbnail (32x32 procedural icon) ────────────────────
 		var thumb := TextureRect.new()
@@ -816,8 +845,11 @@ func _hide_ui() -> void:
 
 func _switch_tab(idx: int) -> void:
 	_active_tab = idx
-	if _tab_market_panel: _tab_market_panel.visible = (idx == 0)
-	if _tab_forge_panel:  _tab_forge_panel.visible  = (idx == 1)
+	if _tab_market_panel:   _tab_market_panel.visible   = (idx == 0)
+	if _tab_forge_panel:    _tab_forge_panel.visible    = (idx == 1)
+	if _tab_upgrades_panel: _tab_upgrades_panel.visible = (idx == 2)
+	if idx == 2:
+		_rebuild_all_upgrade_rows()
 	# Style active tab btn brighter, inactive dimmed
 	for i in _tab_btns.size():
 		var btn: Button = _tab_btns[i]
@@ -837,7 +869,11 @@ func _switch_tab(idx: int) -> void:
 
 
 func _grab_first_in_active_tab() -> void:
-	var panel: Control = _tab_market_panel if _active_tab == 0 else _tab_forge_panel
+	var panel: Control = null
+	match _active_tab:
+		0: panel = _tab_market_panel
+		1: panel = _tab_forge_panel
+		2: panel = _tab_upgrades_panel
 	if panel == null: return
 	var first := _find_first_focusable(panel)
 	if first: first.grab_focus()
@@ -1011,12 +1047,14 @@ func _rebuild_market_rows() -> void:
 func _on_forge_planet() -> void:
 	_set_status("", Color(1.0, 0.5, 0.3))
 
-	# Prune entries whose planets were destroyed externally
+	# Prune entries whose planets were destroyed externally.
+	# Entries restored from a save start with node == null and are kept
+	# (rehydration spawns the node lazily — see _rehydrate_active_planets).
 	_active_planets = _active_planets.filter(func(e: Dictionary) -> bool:
-		return is_instance_valid(e.node))
+		return e.get("node", null) == null or is_instance_valid(e.node))
 
-	if _active_planets.size() >= MAX_PLANETS:
-		_set_status("Max " + str(MAX_PLANETS) + " planets reached.\nDismantle one first.", Color(1.0, 0.5, 0.3))
+	if _active_planets.size() >= _max_planets():
+		_set_status("Max " + str(_max_planets()) + " planets reached.\nDismantle one first.", Color(1.0, 0.5, 0.3))
 		return
 
 	if _forge_selected.size() < 3:
@@ -1061,18 +1099,35 @@ func _on_forge_planet() -> void:
 		# PlanetGen would always fall through to the C-tier archetype pool fallback.
 		var pos_salt: int = hash(pos.round()) & 0x7FFFFFFF
 		var seed_val: int = PlanetSeedKitchen.make_seed(r1, r2, r3) + (_active_planets.size() * 777) + pos_salt
-		var rank: Dictionary = PlanetSeedKitchen.rank_planet(r1, r2, r3, seed_val)
+		# Luck variance is captured at forge time so a later Luck upgrade
+		# doesn't retroactively shift the displayed rank of older planets.
+		var luck_var: float = 0.0
+		if Engine.has_meta("UpgradeManager"):
+			luck_var = float(Engine.get_meta("UpgradeManager").get_luck_forge_variance())
+		var rank: Dictionary = PlanetSeedKitchen.rank_planet(r1, r2, r3, seed_val, luck_var)
 		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
 		var planet_node := _spawn_planet_node(seed_val, pos, p_name, String(rank.get("label", "")), planet_res)
 		# (Impostor activation is deferred to the cinematic — the planet stays
 		# hidden until the flash peaks and is revealed there.)
 
-		# Record to persistent registry
-		_active_planets.append({node=planet_node, r1=r1, r2=r2, r3=r3})
-		
+		# Record to persistent registry. pos / name / seed_val are stored so
+		# SaveManager can rehydrate this planet on a future launch.
+		_active_planets.append({
+			node = planet_node,
+			r1 = r1, r2 = r2, r3 = r3,
+			luck_variance = luck_var,
+			pos = pos,
+			name = p_name,
+			seed_val = seed_val,
+		})
+
 		# ACE UNIVERSE SYNC: Notify that a planet was added
 		planet_forged.emit(_active_planets.size())
-		
+
+		# Persist immediately — forging is a milestone, no debounce needed.
+		if Engine.has_meta("SaveManager"):
+			Engine.get_meta("SaveManager").save_now()
+
 		_refresh_planets_ui()
 
 		# 3. Clear selection for next forge
@@ -1112,6 +1167,10 @@ func _on_dismantle(entry: Dictionary) -> void:
 
 	_active_planets.erase(entry)
 	_refresh_planets_ui()
+
+	# Persist the smaller planet list immediately.
+	if Engine.has_meta("SaveManager"):
+		Engine.get_meta("SaveManager").save_now()
 
 	var combo: String = ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2) + "+" + ResourceRegistry.get_abbrev(entry.r3)
 	_set_status("Dismantled (" + combo + ")\nResources refunded.", Color(0.8, 0.8, 0.4))
@@ -1297,3 +1356,274 @@ func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String,
 	planet.global_position = custom_pos
 
 	return planet
+
+# ---------------------------------------------------------------------------
+# UPGRADES TAB
+# ---------------------------------------------------------------------------
+
+func _build_upgrades_panel(parent: VBoxContainer) -> void:
+	var title := Label.new()
+	title.text = "— UPGRADES —"
+	title.add_theme_font_size_override("font_size", 20)
+	title.add_theme_color_override("font_color", Color(1.0, 0.65, 0.85))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	parent.add_child(title)
+
+	_upgrades_status = Label.new()
+	_upgrades_status.text = ""
+	_upgrades_status.add_theme_font_size_override("font_size", 14)
+	_upgrades_status.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+	_upgrades_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	parent.add_child(_upgrades_status)
+
+	if not Engine.has_meta("UpgradeManager"):
+		var warn := Label.new()
+		warn.text = "(UpgradeManager not loaded)"
+		warn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		warn.add_theme_color_override("font_color", Color(1.0, 0.4, 0.4))
+		parent.add_child(warn)
+		return
+
+	var up = Engine.get_meta("UpgradeManager")
+	_upgrade_rows.clear()
+	for track in up.TRACKS:
+		var row := _build_upgrade_row(track)
+		parent.add_child(row)
+		_upgrade_rows[track] = row
+
+func _build_upgrade_row(track: String) -> PanelContainer:
+	var up = Engine.get_meta("UpgradeManager")
+	var lvl: int = up.get_level(track)
+	var max_lvl: int = up.get_max_level(track)
+	var maxed: bool = up.is_maxed(track)
+	var cost: Dictionary = up.next_cost(track)
+	var affordable: bool = up.can_afford(track)
+
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.10, 0.14, 0.85)
+	sb.border_color = Color(0.35, 0.35, 0.5)
+	sb.border_width_left = 2; sb.border_width_top = 2
+	sb.border_width_right = 2; sb.border_width_bottom = 2
+	sb.content_margin_left = 10; sb.content_margin_right = 10
+	sb.content_margin_top = 8; sb.content_margin_bottom = 8
+	panel.add_theme_stylebox_override("panel", sb)
+	panel.set_meta("track", track)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.add_child(row)
+
+	# LEFT: name + pips + level label
+	var left := VBoxContainer.new()
+	left.add_theme_constant_override("separation", 4)
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(left)
+
+	var name_lbl := Label.new()
+	name_lbl.text = String(up.DISPLAY_NAME.get(track, track.to_upper()))
+	name_lbl.add_theme_font_size_override("font_size", 18)
+	name_lbl.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
+	left.add_child(name_lbl)
+
+	var pip_row := HBoxContainer.new()
+	pip_row.add_theme_constant_override("separation", 3)
+	left.add_child(pip_row)
+	var pip_color: Color = _tier_color(int(ceilf(float(maxi(lvl, 1)) / float(maxi(max_lvl, 1)) * 4.0)))
+	for i in range(max_lvl):
+		var pip := ColorRect.new()
+		pip.custom_minimum_size = Vector2(16, 10)
+		pip.color = pip_color if i < lvl else Color(0.2, 0.2, 0.25)
+		pip_row.add_child(pip)
+
+	var lvl_lbl := Label.new()
+	lvl_lbl.text = "Lvl " + str(lvl) + " / " + str(max_lvl)
+	lvl_lbl.add_theme_font_size_override("font_size", 13)
+	lvl_lbl.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
+	left.add_child(lvl_lbl)
+
+	# RIGHT: cost + materials + button
+	var right := VBoxContainer.new()
+	right.add_theme_constant_override("separation", 4)
+	right.custom_minimum_size = Vector2(240, 0)
+	row.add_child(right)
+
+	if maxed:
+		var maxed_lbl := Label.new()
+		maxed_lbl.text = "MAXED"
+		maxed_lbl.add_theme_font_size_override("font_size", 18)
+		maxed_lbl.add_theme_color_override("font_color", Color(1.0, 0.8, 0.2))
+		maxed_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		right.add_child(maxed_lbl)
+	else:
+		var econ_credits: int = int(Engine.get_meta("EconomyManager").credits) if Engine.has_meta("EconomyManager") else 0
+		var cost_credits: int = int(cost.get("credits", 0))
+		var credits_ok: bool = econ_credits >= cost_credits
+
+		var cost_lbl := Label.new()
+		cost_lbl.text = "$" + str(cost_credits)
+		cost_lbl.add_theme_font_size_override("font_size", 16)
+		cost_lbl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2) if credits_ok else Color(1.0, 0.4, 0.4))
+		cost_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		right.add_child(cost_lbl)
+
+		var mat_row := HFlowContainer.new()
+		mat_row.add_theme_constant_override("h_separation", 6)
+		mat_row.add_theme_constant_override("v_separation", 3)
+		right.add_child(mat_row)
+
+		var inv = Engine.get_meta("InventoryManager") if Engine.has_meta("InventoryManager") else null
+		var mats: Dictionary = cost.get("mats", {})
+		for mat_name in mats.keys():
+			var need: int = int(mats[mat_name])
+			var have: int = inv.get_amount(mat_name) if inv else 0
+			var ok: bool = have >= need
+			var chip := PanelContainer.new()
+			var csb := StyleBoxFlat.new()
+			csb.bg_color = _tier_color(ResourceRegistry.get_tier(mat_name)).darkened(0.55)
+			csb.border_color = Color(0.1, 0.1, 0.12)
+			csb.border_width_left = 1; csb.border_width_right = 1
+			csb.border_width_top = 1; csb.border_width_bottom = 1
+			csb.content_margin_left = 5; csb.content_margin_right = 5
+			csb.content_margin_top = 1; csb.content_margin_bottom = 1
+			chip.add_theme_stylebox_override("panel", csb)
+			var chip_lbl := Label.new()
+			chip_lbl.text = ResourceRegistry.get_abbrev(mat_name) + " " + str(have) + "/" + str(need)
+			chip_lbl.add_theme_font_size_override("font_size", 12)
+			chip_lbl.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0) if ok else Color(1.0, 0.45, 0.45))
+			chip.add_child(chip_lbl)
+			mat_row.add_child(chip)
+
+		var btn := Button.new()
+		btn.text = "UPGRADE"
+		btn.add_theme_font_size_override("font_size", 18)
+		btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.55) if affordable else Color(0.55, 0.55, 0.55))
+		btn.disabled = not affordable
+		btn.custom_minimum_size = Vector2(0, 38)
+		var captured_track: String = track
+		btn.pressed.connect(func() -> void: _on_upgrade_purchase_pressed(captured_track))
+		right.add_child(btn)
+
+	return panel
+
+func _rebuild_all_upgrade_rows() -> void:
+	if not Engine.has_meta("UpgradeManager"):
+		return
+	if _tab_upgrades_panel == null:
+		return
+	var up = Engine.get_meta("UpgradeManager")
+	for track in up.TRACKS:
+		_rebuild_upgrade_row(track)
+
+func _rebuild_upgrade_row(track: String) -> void:
+	if not _upgrade_rows.has(track):
+		return
+	var old: PanelContainer = _upgrade_rows[track]
+	if old == null or not is_instance_valid(old):
+		return
+	var parent := old.get_parent()
+	if parent == null:
+		return
+	var idx: int = old.get_index()
+	var fresh := _build_upgrade_row(track)
+	parent.add_child(fresh)
+	parent.move_child(fresh, idx)
+	old.queue_free()
+	_upgrade_rows[track] = fresh
+
+func _on_upgrade_purchase_pressed(track: String) -> void:
+	if not Engine.has_meta("UpgradeManager"):
+		return
+	Engine.get_meta("UpgradeManager").try_purchase(track)
+
+func _on_upgrade_changed(track: String, new_level: int) -> void:
+	if _upgrades_status != null:
+		_upgrades_status.text = String(track).to_upper() + " UPGRADED → Lvl " + str(new_level)
+		_upgrades_status.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+	if _active_tab == 2:
+		_rebuild_all_upgrade_rows()
+
+func _on_upgrade_purchase_failed(track: String, reason: String) -> void:
+	if _upgrades_status == null:
+		return
+	var msg := ""
+	match reason:
+		"maxed": msg = String(track).to_upper() + " is already MAXED."
+		"insufficient": msg = "Insufficient credits or materials for " + String(track).to_upper() + "."
+		_: msg = "Could not upgrade " + String(track).to_upper() + " (" + reason + ")."
+	_upgrades_status.text = msg
+	_upgrades_status.add_theme_color_override("font_color", Color(1.0, 0.5, 0.4))
+
+# ---------------------------------------------------------------------------
+# FORGED PLANET PERSISTENCE
+# ---------------------------------------------------------------------------
+
+# Serialize the static _active_planets registry to a JSON-safe Array.
+# Skips the live node reference and the cached thumbnail (regenerated on load).
+static func active_planets_for_save() -> Array:
+	var out: Array = []
+	for entry in _active_planets:
+		# Skip entries whose nodes were freed without a clean dismantle —
+		# we don't want to resurrect a planet the engine has already discarded.
+		if entry.get("node", null) != null and not is_instance_valid(entry.node):
+			continue
+		var pos: Vector3 = entry.get("pos", Vector3.ZERO)
+		out.append({
+			"r1":             String(entry.get("r1", "")),
+			"r2":             String(entry.get("r2", "")),
+			"r3":             String(entry.get("r3", "")),
+			"luck_variance":  float(entry.get("luck_variance", 0.0)),
+			"seed_val":       int(entry.get("seed_val", 0)),
+			"name":           String(entry.get("name", "")),
+			"pos":            {"x": pos.x, "y": pos.y, "z": pos.z},
+		})
+	return out
+
+# Replace _active_planets with descriptors loaded from disk. Nodes are
+# left null; _rehydrate_active_planets() spawns them once world_root exists.
+static func load_active_planets_from_save(arr: Array) -> void:
+	_active_planets.clear()
+	for raw in arr:
+		if typeof(raw) != TYPE_DICTIONARY:
+			continue
+		var pos_data: Dictionary = raw.get("pos", {})
+		var pos := Vector3(
+			float(pos_data.get("x", 0.0)),
+			float(pos_data.get("y", 0.0)),
+			float(pos_data.get("z", 0.0)),
+		)
+		_active_planets.append({
+			node = null,
+			r1 = String(raw.get("r1", "")),
+			r2 = String(raw.get("r2", "")),
+			r3 = String(raw.get("r3", "")),
+			luck_variance = float(raw.get("luck_variance", 0.0)),
+			seed_val = int(raw.get("seed_val", 0)),
+			name = String(raw.get("name", "")),
+			pos = pos,
+		})
+
+# Walk _active_planets and spawn a Node3D for any entry whose node is null.
+# Called from Main.gd once world_root is in the tree.
+func _rehydrate_active_planets() -> void:
+	var spawned: int = 0
+	for entry in _active_planets:
+		if entry.get("node", null) != null and is_instance_valid(entry.node):
+			continue
+		var r1: String = entry.r1
+		var r2: String = entry.r2
+		var r3: String = entry.r3
+		var seed_val: int = int(entry.get("seed_val", 0))
+		var pos: Vector3 = entry.get("pos", Vector3.ZERO)
+		var p_name: String = String(entry.get("name", ""))
+		var luck_var: float = float(entry.get("luck_variance", 0.0))
+		var rank: Dictionary = PlanetSeedKitchen.rank_planet(r1, r2, r3, seed_val, luck_var)
+		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
+		var node := _spawn_planet_node(seed_val, pos, p_name, String(rank.get("label", "")), planet_res)
+		entry.node = node
+		spawned += 1
+	if spawned > 0:
+		print("--- SAVE: rehydrated ", spawned, " forged planet(s) ---")
+		planet_forged.emit(_active_planets.size())
+		_refresh_planets_ui()

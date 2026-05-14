@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://c0q4eykub0wam"]
+
+[ext_resource type="Script" uid="uid://d26tv7yhol4na" path="res://tests/mineral_influence_smoke.gd" id="1_qu0ni"]
+
+[node name="SmokeTest" type="Node" unique_id=602577238]
+script = ExtResource("1_qu0ni")

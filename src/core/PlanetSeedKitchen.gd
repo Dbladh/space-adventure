@@ -1,6 +1,7 @@
 class_name PlanetSeedKitchen
 
 const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+# MineralInfluence is available globally via its class_name declaration.
 
 # PlanetSeedKitchen.gd
 # Deterministic planet seed + resource list derivation from three forge ingredients.
@@ -59,17 +60,17 @@ static func rank_planet(r1: String, r2: String, r3: String, seed_val: int, luck_
 		elif t == 3: rarity_bonus += 3.0
 	rarity_bonus = minf(rarity_bonus, 20.0)
 
-	# 3. Cosmic variance bonus (0–20): seed-derived exotic properties
-	#    Oversized planet (seed % 11 == 0) = +8
-	#    Rare palette roll (seed % 7 == 0)  = +6
-	#    Unique orbit distance (seed % 5 == 0) = +3
-	#    Crystalline terrain (seed % 3 == 0)   = +3
+	# 3. Cosmic variance bonus (0–10): seed-derived exotic properties
+	#    Oversized planet (seed % 11 == 0) = +4
+	#    Rare palette roll (seed % 7 == 0)  = +3
+	#    Unique orbit distance (seed % 5 == 0) = +2
+	#    Crystalline terrain (seed % 3 == 0)   = +1
 	var cosmic: float = 0.0
-	if seed_val % 11 == 0: cosmic += 8.0
-	if seed_val % 7  == 0: cosmic += 6.0
-	if seed_val % 5  == 0: cosmic += 3.0
-	if seed_val % 3  == 0: cosmic += 3.0
-	cosmic = minf(cosmic, 20.0)
+	if seed_val % 11 == 0: cosmic += 4.0
+	if seed_val % 7  == 0: cosmic += 3.0
+	if seed_val % 5  == 0: cosmic += 2.0
+	if seed_val % 3  == 0: cosmic += 1.0
+	cosmic = minf(cosmic, 10.0)
 
 	# Luck-driven variance: deterministic per (seed, luck) so the same forge
 	# always produces the same rank — can't be save-scummed by undocking.
@@ -78,7 +79,10 @@ static func rank_planet(r1: String, r2: String, r3: String, seed_val: int, luck_
 		lrng.seed = seed_val
 		cosmic += lrng.randf_range(-luck_variance, luck_variance)
 
-	var score: float = resource_score + rarity_bonus + cosmic
+	# 4. Synergy bonus (0–10): matched rank_synergy_tag across the trio.
+	var synergy: float = _synergy_bonus(r1, r2, r3)
+
+	var score: float = resource_score + rarity_bonus + cosmic + synergy
 
 	# Map score → rank tier
 	var label: String
@@ -140,3 +144,28 @@ static func resource_cost(r1: String, r2: String, r3: String) -> Dictionary:
 	for r in [r1, r2, r3]:
 		cost[r] = cost.get(r, 0) + 1
 	return cost
+
+# All 3 minerals share a tag → +10. Exactly 2 share → +4. Otherwise 0.
+# Empty tags don't count as a match.
+static func _synergy_bonus(r1: String, r2: String, r3: String) -> float:
+	var t1 := MineralInfluence.get_synergy_tag(r1)
+	var t2 := MineralInfluence.get_synergy_tag(r2)
+	var t3 := MineralInfluence.get_synergy_tag(r3)
+	var counts: Dictionary = {}
+	for t in [t1, t2, t3]:
+		if t == "": continue
+		counts[t] = counts.get(t, 0) + 1
+	var best := 0
+	for k in counts.keys():
+		if counts[k] > best: best = counts[k]
+	if best >= 3: return 10.0
+	if best == 2: return 4.0
+	return 0.0
+
+# Returns the full PlanetProfile dict for a forged planet:
+# combined influence vector + resolved archetype string + ingredient list.
+# This is what SpaceStation passes to PlanetGen via `planet_profile`.
+static func derive_profile(r1: String, r2: String, r3: String, seed_val: int) -> Dictionary:
+	var profile: Dictionary = MineralInfluence.combine(r1, r2, r3)
+	profile["archetype"] = MineralInfluence.pick_archetype(profile, seed_val)
+	return profile

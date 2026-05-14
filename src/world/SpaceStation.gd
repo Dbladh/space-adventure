@@ -1105,8 +1105,11 @@ func _on_forge_planet() -> void:
 		if Engine.has_meta("UpgradeManager"):
 			luck_var = float(Engine.get_meta("UpgradeManager").get_luck_forge_variance())
 		var rank: Dictionary = PlanetSeedKitchen.rank_planet(r1, r2, r3, seed_val, luck_var)
+		# MINERAL INFLUENCE — combined PlanetProfile drives archetype, noise,
+		# palette, clouds, biolum, rings, glow inside PlanetGen._ready().
+		var profile: Dictionary = PlanetSeedKitchen.derive_profile(r1, r2, r3, seed_val)
 		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
-		var planet_node := _spawn_planet_node(seed_val, pos, p_name, String(rank.get("label", "")), planet_res)
+		var planet_node := _spawn_planet_node(seed_val, pos, p_name, String(rank.get("label", "")), planet_res, profile)
 		# (Impostor activation is deferred to the cinematic — the planet stays
 		# hidden until the flash peaks and is revealed there.)
 
@@ -1318,7 +1321,7 @@ func _planet_thumbnail_for(entry: Dictionary) -> ImageTexture:
 	entry["thumbnail"] = tex
 	return tex
 
-func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String, rank_label: String = "", planet_res: Array = []) -> Node3D:
+func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String, rank_label: String = "", planet_res: Array = [], profile: Dictionary = {}) -> Node3D:
 	print("--- FORGE: Spawning Planet Node at %s ---" % str(custom_pos))
 	var pg_script = load("res://src/world/PlanetGen.gd")
 	if not pg_script:
@@ -1333,11 +1336,14 @@ func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String,
 	planet.name = "Planet_" + custom_name.replace(" ", "_")
 	planet.set("planet_seed", seed_val)
 	planet.set("planet_radius", base_radius)
-	# Rank and resources MUST be set before add_child — _ready() reads them to
-	# pick the archetype pool and seed the resource list.
+	# Rank, resources, and the combined MineralInfluence profile MUST be set
+	# BEFORE add_child — PlanetGen._ready() reads them to pick the archetype
+	# pool, seed the resource list, and apply the per-mineral palette /
+	# noise / cloud / glow knobs.
 	planet.set("planet_rank", rank_label)
 	if not planet_res.is_empty():
 		planet.set("planet_resources", planet_res)
+	planet.set("planet_profile", profile)
 	planet.add_to_group("Planet")
 	planet.add_to_group("ForgedPlanet")
 
@@ -1620,7 +1626,8 @@ func _rehydrate_active_planets() -> void:
 		var luck_var: float = float(entry.get("luck_variance", 0.0))
 		var rank: Dictionary = PlanetSeedKitchen.rank_planet(r1, r2, r3, seed_val, luck_var)
 		var planet_res := PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
-		var node := _spawn_planet_node(seed_val, pos, p_name, String(rank.get("label", "")), planet_res)
+		var profile: Dictionary = PlanetSeedKitchen.derive_profile(r1, r2, r3, seed_val)
+		var node := _spawn_planet_node(seed_val, pos, p_name, String(rank.get("label", "")), planet_res, profile)
 		entry.node = node
 		spawned += 1
 	if spawned > 0:

@@ -24,6 +24,13 @@ var planet_resources: Array[String] = ["Stone", "Wood", "Copper"]
 # SpaceStation after spawning so chunks/props can vary visuals (e.g. only rare
 # A+ planets get glowing flora). Empty = unranked (default starter look).
 var planet_rank: String = ""
+# Combined per-mineral influence vector from MineralInfluence.combine().
+# Set by SpaceStation before add_child(). Empty = neutral (default starter look).
+# Fields: archetype, archetype_votes, terrain_mult, noise_freq_mult,
+# noise_octaves_delta, noise_gain_delta, sea_level_delta, hue_shift,
+# saturation_mult, value_delta, cloud_coverage_delta, cloud_alpha_delta,
+# biolum_boost, ring_boost, glow_boost, ingredients.
+var planet_profile: Dictionary = {}
 var sea_level: float = -120.0
 
 # ATMOSPHERIC IDENTITY
@@ -129,10 +136,19 @@ func _ready() -> void:
 	noise.noise_type = n_types[geo_rng.randi() % n_types.size()]
 	
 	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.frequency = 0.01 
+	noise.frequency = 0.01
 	noise.fractal_octaves = geo_rng.randi_range(3, 6)
 	noise.fractal_lacunarity = geo_rng.randf_range(1.8, 2.4)
 	noise.fractal_gain = geo_rng.randf_range(0.3, 0.6)
+
+	# MINERAL INFLUENCE — noise tweaks. Frequency multiplier shifts feature scale,
+	# octaves delta adds detail, gain delta changes roughness/persistence.
+	var p_noise_freq_mult: float = float(planet_profile.get("noise_freq_mult", 1.0))
+	var p_octaves_delta: int = int(planet_profile.get("noise_octaves_delta", 0))
+	var p_gain_delta: float = float(planet_profile.get("noise_gain_delta", 0.0))
+	noise.frequency = noise.frequency * p_noise_freq_mult
+	noise.fractal_octaves = clampi(noise.fractal_octaves + p_octaves_delta, 2, 9)
+	noise.fractal_gain = clampf(noise.fractal_gain + p_gain_delta, 0.2, 0.85)
 	
 	# PROCEDURAL ATMOSPHERE: Unique Sky per Planet!
 	# The user requested specific vivid colors: Blue, Red, Orange, Yellow, Green.
@@ -177,8 +193,13 @@ func _ready() -> void:
 	#   A/S/SS/★ = standout (lava, ice, iridescent, crystal, aurora, sky-isles)
 	# Unranked planets (legacy/starter) draw from a wide variety pool that
 	# excludes the deliberately-drab F/D archetypes and the rare SS+
-	# exclusives — so the starter system feels rich without giving away
-	# the legendary visuals before they're earned.
+	# exclusives.
+	#
+	# MINERAL INFLUENCE wins when a planet_profile supplies an archetype —
+	# the ingredient trio's weighted vote is the player's explicit intent,
+	# so respect it even if the tier pool doesn't list it.  Tier gating
+	# only applies when no profile-driven archetype is available (legacy
+	# / un-forged planets).
 	var TIER_POOLS := {
 		"F":           ["BARREN", "ASH", "MUDFLAT"],
 		"D":           ["DESERT", "RUST", "BARREN", "ASH"],
@@ -195,12 +216,18 @@ func _ready() -> void:
 	]
 	var pal_rng = RandomNumberGenerator.new()
 	pal_rng.seed = hash(str(name) + str(planet_radius) + str(planet_seed)) & 0x7FFFFFFF
-	var pool: Array
-	if planet_rank == "":
-		pool = UNRANKED_POOL
+	var theme: String
+	var profile_arch: String = String(planet_profile.get("archetype", "")) if planet_profile != null else ""
+	if profile_arch != "":
+		# Forged-with-minerals path: the trio's weighted vote wins.
+		theme = profile_arch
 	else:
-		pool = TIER_POOLS.get(planet_rank, UNRANKED_POOL)
-	var theme: String = pool[pal_rng.randi() % pool.size()]
+		var pool: Array
+		if planet_rank == "":
+			pool = UNRANKED_POOL
+		else:
+			pool = TIER_POOLS.get(planet_rank, UNRANKED_POOL)
+		theme = pool[pal_rng.randi() % pool.size()]
 	self.archetype = theme
 	
 	# SEA LEVEL RANDOMIZATION: The Hydrologist
@@ -208,6 +235,8 @@ func _ready() -> void:
 	hydro_rng.seed = planet_seed + 123
 	# Range from -250 (shallow/scattered) to -50 (deep/continental)
 	sea_level = hydro_rng.randf_range(-250.0, -50.0)
+	# MINERAL INFLUENCE — push sea level deeper or shallower. Negative delta = more water.
+	sea_level = clampf(sea_level + float(planet_profile.get("sea_level_delta", 0.0)), -330.0, 30.0)
 	
 	# TOPOGRAPHY DIVERSIFICATION: The Cartographer
 	# We randomize how 'aggressive' the terrain is based on a separate roll.
@@ -242,26 +271,37 @@ func _ready() -> void:
 	var scale_fix = planet_radius / 180000.0
 	var tier_drama: float = _tier_drama_scale(planet_rank)
 	terrain_strength = 2800.0 * scale_fix * terrain_multiplier * tier_drama
-	
+	# MINERAL INFLUENCE — bold trio (e.g. 3× Basalt Glass) can further push
+	# terrain past the rank-tier ceiling.
+	terrain_strength *= float(planet_profile.get("terrain_mult", 1.0))
+
 	# BIOLUMINESCENCE ROLL: The Exobiologist
-	# Glow is now archetype-driven so the player reads it as a tier signal:
+	# Glow is archetype-driven so the player reads it as a tier signal:
 	#   * S/SS exclusives glow always (CRYSTAL, AURORA, IRIDESCENT, SKY_ISLES, RADIATED)
 	#   * Vibrant C/B types glow ~30% (CANDY, JUNGLE, CORAL, SULFUR)
 	#   * Drab F/D worlds never glow (would muddle the "dead rock" read)
 	#   * Anything else gets a 5% easter-egg chance.
+	# MINERAL INFLUENCE adds biolum_boost on top of the archetype base, except
+	# for never-glow archetypes where the dead-rock read is intentional.
 	var always_bio := ["RADIATED", "CRYSTAL", "AURORA", "IRIDESCENT", "SKY_ISLES"]
 	var often_bio := ["CANDY", "JUNGLE", "CORAL", "SULFUR"]
 	var never_bio := ["BARREN", "ASH", "MUDFLAT", "DESERT", "RUST"]
+	var biolum_boost: float = float(planet_profile.get("biolum_boost", 0.0))
 	if archetype in always_bio:
 		has_bioluminescence = true
 	elif archetype in never_bio:
 		has_bioluminescence = false
 	elif archetype in often_bio:
-		has_bioluminescence = hydro_rng.randf() < 0.30
+		has_bioluminescence = hydro_rng.randf() < clampf(0.30 + biolum_boost, 0.0, 1.0)
 	else:
-		has_bioluminescence = hydro_rng.randf() < 0.05
+		has_bioluminescence = hydro_rng.randf() < clampf(0.05 + biolum_boost, 0.0, 1.0)
 
 	print("--- CARTOGRAPHER: Planet [%s] Type: [%s] Rank: [%s] Topo: [%s] Bio: [%s] ---" % [name, archetype, planet_rank, terrain_mode, str(has_bioluminescence)])
+
+	# INITIALIZE SHARED MATERIALS: at the end so trait rolls (Bio / Archetype)
+	# are baked in before shaders read them.
+	_init_shared_materials()
+
 
 	match theme:
 		"LUSH":
@@ -386,13 +426,24 @@ func _ready() -> void:
 			pal_water_base = Color.from_hsv(0.6, 0.4, 0.7)
 
 	# GENERATE SECONDARY COLOR PALETTE
-	# Using explicit derivations to ensure complementary colors 
+	# Using explicit derivations to ensure complementary colors
 	pal_forest_col = pal_grass_col.darkened(0.2)
 	pal_grass_secondary = pal_grass_col.lightened(0.12)
-	pal_beach_col = pal_grass_col.lightened(0.25).lerp(pal_mount_col, 0.4) 
-	pal_water_light = pal_water_base.lightened(0.15) 
+	pal_beach_col = pal_grass_col.lightened(0.25).lerp(pal_mount_col, 0.4)
+	pal_water_light = pal_water_base.lightened(0.15)
 	pal_water_shore = pal_water_base.lightened(0.3).lerp(pal_grass_col, 0.2)
-	
+
+	# MINERAL INFLUENCE — apply HSV shifts to every palette colour.
+	# hue_shift wraps; saturation_mult scales; value_delta brightens/darkens.
+	pal_grass_col       = _apply_palette_shift(pal_grass_col)
+	pal_mount_col       = _apply_palette_shift(pal_mount_col)
+	pal_water_base      = _apply_palette_shift(pal_water_base)
+	pal_forest_col      = _apply_palette_shift(pal_forest_col)
+	pal_grass_secondary = _apply_palette_shift(pal_grass_secondary)
+	pal_beach_col       = _apply_palette_shift(pal_beach_col)
+	pal_water_light     = _apply_palette_shift(pal_water_light)
+	pal_water_shore     = _apply_palette_shift(pal_water_shore)
+
 	base_hue = pal_grass_col.h
 	self.pal_forest_h = base_hue # Seed for tree variety
 
@@ -434,6 +485,19 @@ func _ready() -> void:
 	# the player can dock at.
 	# _spawn_poi_marker()
 	# print("--- ARCHITECT: PLANET [%s] SYNCHRONIZED (terrain_seed=%d) ---" % [name, noise.seed])
+
+# MINERAL INFLUENCE: apply hue/saturation/value shifts from the planet_profile.
+# Hue wraps, saturation multiplies, value adds — all clamped to legal [0,1].
+func _apply_palette_shift(c: Color) -> Color:
+	var hue_shift: float = float(planet_profile.get("hue_shift", 0.0))
+	var sat_mult: float = float(planet_profile.get("saturation_mult", 1.0))
+	var val_delta: float = float(planet_profile.get("value_delta", 0.0))
+	if is_equal_approx(hue_shift, 0.0) and is_equal_approx(sat_mult, 1.0) and is_equal_approx(val_delta, 0.0):
+		return c
+	var h: float = fposmod(c.h + hue_shift, 1.0)
+	var s: float = clampf(c.s * sat_mult, 0.0, 1.0)
+	var v: float = clampf(c.v + val_delta, 0.0, 1.0)
+	return Color.from_hsv(h, s, v, c.a)
 
 func get_terrain_height_at(pos: Vector3) -> float:
 	var sphere_norm: Vector3 = (pos - global_position).normalized()
@@ -744,6 +808,14 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 	# puffs overlap. Edge translucency in the shader handles the wispy
 	# silhouette feel — these uniforms control the core opacity.
 	var alpha_max: float  = lerpf(0.95, 0.85, smoothstep(0.42, 0.62, thresh_lo))
+	# MINERAL INFLUENCE — coverage_delta lowers both thresholds (more clouds);
+	# alpha_delta thickens cloud cores. Clamped to legal smoothstep/alpha ranges.
+	# Applied here so the per-layer stack below picks up the influenced values.
+	var p_cov_delta: float = float(planet_profile.get("cloud_coverage_delta", 0.0))
+	var p_alpha_delta: float = float(planet_profile.get("cloud_alpha_delta", 0.0))
+	thresh_lo = clampf(thresh_lo - p_cov_delta, 0.05, 0.90)
+	thresh_hi = clampf(thresh_hi - p_cov_delta, thresh_lo + 0.05, 0.99)
+	alpha_max = clampf(alpha_max + p_alpha_delta, 0.0, 1.0)
 
 	# CLOUD SHADOWS ON LAND — push the cloud-noise parameters onto the
 	# shared land_material so triplanar_local.gdshader can sample the same
@@ -824,9 +896,10 @@ func _spawn_majestic_clouds_and_rings(rng: RandomNumberGenerator, base_hue: floa
 		li.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 		add_child(li)
 	
-	# 2. PLANETARY RINGS (50% chance per planet)
-	var ring_chance: float = 0.5
-	if rng.randf() > ring_chance:
+	# 2. PLANETARY RINGS (50% chance per planet, boosted by mineral influence)
+	# MINERAL INFLUENCE — metallic/exotic tags push toward guaranteed rings.
+	var ring_chance: float = clampf(0.5 + float(planet_profile.get("ring_boost", 0.0)), 0.0, 1.0)
+	if rng.randf() < ring_chance:
 		var r_mesh = TorusMesh.new()
 		r_mesh.inner_radius = planet_radius * 1.5
 		r_mesh.outer_radius = planet_radius * 2.8
@@ -2143,6 +2216,12 @@ func _init_shared_materials() -> void:
 	land_material.set_shader_parameter("iridescence_strength", iridescence)
 	land_material.set_shader_parameter("snow_specular", snow_spec)
 	land_material.set_shader_parameter("crystal_emission", crystal_em)
+
+	# MINERAL INFLUENCE — metallic/exotic minerals add surface emission glow
+	# on top of the archetype FX above. Stacks with crystal_emission.
+	land_material.set_shader_parameter("mineral_glow",
+		float(planet_profile.get("glow_boost", 0.0)))
+
 
 	water_material = ShaderMaterial.new()
 	var w_shader = load("res://src/world/water.gdshader")

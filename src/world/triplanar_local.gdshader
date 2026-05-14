@@ -23,6 +23,12 @@ uniform float iridescence_strength : hint_range(0.0, 1.0) = 0.0;
 uniform float snow_specular        : hint_range(0.0, 1.0) = 0.0;
 uniform float crystal_emission     : hint_range(0.0, 2.0) = 0.0;
 
+// MINERAL INFLUENCE — emissive glow added to the surface when metallic/exotic
+// minerals (Gold, Platinum, Prismatic Alloy, Nebula Core, etc.) were used in
+// the forge. Stacks on top of crystal_emission. 0.0 = no glow (default),
+// 1.0+ = strongly luminous.
+uniform float mineral_glow = 0.0;
+
 // Cloud noise uniforms — duplicated from the cloud shader so the land
 // shader can sample the same cloud density and project shadows down onto
 // the surface. PlanetGen sets these on every chunk's land_material to
@@ -166,7 +172,12 @@ void fragment() {
 	}
 
 	ALBEDO = albedo;
-	EMISSION = emission_col;
+	// MINERAL INFLUENCE — emission scales with elevation so peaks (metal veins,
+	// exotic crystals) glow strongest while shorelines stay grounded. Tied to
+	// the rock band so it reads as ore/mineral, not "the whole planet glows".
+	// Stacks with the archetype-driven emission_col from CRYSTAL pulse above.
+	float glow_band = clamp((v_height - 800.0) / 3000.0, 0.0, 1.0);
+	EMISSION = emission_col + col_rock * mineral_glow * glow_band;
 	ROUGHNESS = mix(0.92, 0.45, snow_specular * snow_mass);
 	SPECULAR = mix(0.05, 0.6, snow_specular * snow_mass);
 }

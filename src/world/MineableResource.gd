@@ -409,6 +409,21 @@ func _on_mined() -> void:
 			"Diamond": per_val = 900
 		drops.append({type=resource_type, weight=1.0, val=per_val})
 
+	# LUCK: bias the roll toward rarer side-drops (index >= 1).
+	# Index 0 is the primary drop; everything else is rarer.
+	var luck_bias: float = 0.0
+	if Engine.has_meta("UpgradeManager"):
+		luck_bias = float(Engine.get_meta("UpgradeManager").get_luck_drop_bias())
+	if luck_bias > 0.0 and drops.size() > 1:
+		var total: float = 0.0
+		for i in range(drops.size()):
+			if i > 0:
+				drops[i].weight = float(drops[i].weight) + luck_bias
+			total += float(drops[i].weight)
+		if total > 0.0:
+			for d in drops:
+				d.weight = float(d.weight) / total
+
 	for i in range(count):
 		# Pick a drop type based on weights
 		var roll = rng.randf()

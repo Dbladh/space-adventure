@@ -78,6 +78,25 @@ var _resume_touch: int  = -1
 var _pgyro_touch: int   = -1
 var _psens_touch: int   = -1
 var _pdead_touch: int   = -1
+var _pdbg_touch: int    = -1
+
+# ---- GYRO DEBUG OVERLAY ----
+# Toggled via the DBG button in the pause menu.  Shows the live gyro
+# pipeline values on-screen so the bug can be diagnosed on iPhone without
+# needing Xcode console access.
+var _gyro_dbg_visible: bool   = false
+var _gyro_dbg_grav: Vector3   = Vector3.ZERO
+var _gyro_dbg_nx: float       = 0.0
+var _gyro_dbg_ny: float       = 0.0
+var _gyro_dbg_nz: float       = 0.0
+var _gyro_dbg_tx: float       = 0.0
+var _gyro_dbg_ty: float       = 0.0
+var _gyro_dbg_tz: float       = 0.0
+var _gyro_dbg_yaw: float      = 0.0
+var _gyro_dbg_pitch: float    = 0.0
+var _gyro_dbg_calib: bool     = false
+var _gyro_dbg_calib_n: int    = 0
+var _gyro_dbg_redraw_acc: float = 0.0
 
 # ---- OPTIONS ----
 var gyro_paused: bool = false
@@ -111,6 +130,7 @@ var _rect_resume:       Rect2
 var _rect_pgyro:        Rect2
 var _rect_psens:        Rect2
 var _rect_pdead:        Rect2
+var _rect_pdbg:         Rect2
 var _last_viewport_size: Vector2 = Vector2.ZERO
 
 # =====================================================================
@@ -121,6 +141,9 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS   # keep drawing while tree is paused
 	self.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	# Slight global transparency so the chrome doesn't fully block the game
+	# behind it.  Applied via Control.modulate so every draw call inherits it.
+	modulate.a = 0.85
 	_calculate_safe_area()
 	set_process(true)
 	queue_redraw()
@@ -153,10 +176,17 @@ func _update_layout() -> void:
 
 	# Top buttons (RECENTER only in play mode; pause menu has gyro/sens)
 	# 50px height was below Apple's 44pt minimum once safe-area scaling kicks
-	# in — bumped to 66 for comfortable thumb hits.
-	var tp = 36.0 + _safe_top
-	_rect_recenter = Rect2(36 + _safe_left, tp, 200, 66)
-	_rect_menu     = Rect2(sx - 200 - 36 - _safe_right, tp, 200, 66)
+	# in — bumped to 66, then again to 88 because the touch rect at the very
+	# screen edge is unreliable on iOS once safe-area / scale conspire (user
+	# reported the PAUSE button was only hittable in its right corner).  Wider
+	# rect + slight inset gives the OS some margin and makes the button a
+	# generous thumb target.
+	var top_btn_w := 260.0
+	var top_btn_h := 88.0
+	var top_inset := 24.0   # nudged inward from the screen edge for reliability
+	var tp = 24.0 + _safe_top
+	_rect_recenter = Rect2(top_inset + _safe_left, tp, top_btn_w, top_btn_h)
+	_rect_menu     = Rect2(sx - top_btn_w - top_inset - _safe_right, tp, top_btn_w, top_btn_h)
 
 	# Combat cluster (bottom-right). BRAKE bumped 60 → 76 px so it clears
 	# 44pt; FIRE/BOOST already comfortably above the floor.
@@ -187,6 +217,7 @@ func _update_layout() -> void:
 	_rect_pgyro  = Rect2(col_x - btn_w, base_y - pm_btn_h - gap - pm_sml_h, btn_w, pm_sml_h)
 	_rect_psens  = Rect2(col_x - btn_w, base_y - pm_btn_h - gap - pm_sml_h - gap - pm_sml_h, btn_w, pm_sml_h)
 	_rect_pdead  = Rect2(col_x - btn_w, base_y - pm_btn_h - gap - pm_sml_h - gap - pm_sml_h - gap - pm_sml_h, btn_w, pm_sml_h)
+	_rect_pdbg   = Rect2(col_x - btn_w, base_y - pm_btn_h - gap - pm_sml_h - gap - pm_sml_h - gap - pm_sml_h - gap - pm_sml_h, btn_w, pm_sml_h)
 
 func set_telemetry(speed: float, alt: float, warping: bool) -> void:
 	hud_speed = speed; hud_alt = alt; hud_warp = warping
@@ -194,11 +225,31 @@ func set_telemetry(speed: float, alt: float, warping: bool) -> void:
 		_last_hud_speed = speed; _last_hud_alt = alt; _last_hud_warp = warping
 		queue_redraw()
 
-func _process(_delta: float) -> void:
+# Player pushes its gyro pipeline values here once per frame so they can be
+# rendered on-screen.  Redraw is throttled to ~10 Hz via _process so this is
+# cheap to call every frame.
+func set_gyro_debug(grav: Vector3, nx: float, ny: float, nz: float,
+		tx: float, ty: float, tz: float,
+		yaw_s: float, pitch_s: float, is_calib: bool, calib_n: int) -> void:
+	_gyro_dbg_grav = grav
+	_gyro_dbg_nx = nx; _gyro_dbg_ny = ny; _gyro_dbg_nz = nz
+	_gyro_dbg_tx = tx; _gyro_dbg_ty = ty; _gyro_dbg_tz = tz
+	_gyro_dbg_yaw = yaw_s; _gyro_dbg_pitch = pitch_s
+	_gyro_dbg_calib = is_calib
+	_gyro_dbg_calib_n = calib_n
+
+func _process(delta: float) -> void:
 	_update_layout()
 	# Keep redrawing while paused so the pause menu stays fresh
 	if get_tree().paused:
 		queue_redraw()
+	# When the gyro debug overlay is on, refresh at ~10 Hz so the values are
+	# readable but we're not redrawing every frame.
+	elif _gyro_dbg_visible:
+		_gyro_dbg_redraw_acc += delta
+		if _gyro_dbg_redraw_acc >= 0.1:
+			_gyro_dbg_redraw_acc = 0.0
+			queue_redraw()
 
 # =====================================================================
 #  DRAW
@@ -264,16 +315,11 @@ func _draw() -> void:
 			"MOTION " + ("OK" if motion_ok else "WAIT"), HORIZONTAL_ALIGNMENT_LEFT, 180, HUDStyle.HUD_FONT_TINY,
 			Color.SPRING_GREEN if motion_ok else Color(1.0, 0.7, 0.2))
 
-	# ----- TELEMETRY HUD (always visible) — beveled chip in deep navy -----
-	var hud_box = Rect2(sx * 0.5 - 174, 36.0 + _safe_top, 348, 58)
-	HUDStyle.draw_beveled_rect(self, hud_box, HUDStyle.BG_DEEP_NAVY, false)
-	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 20),
-		"SPD %4d M/S" % int(hud_speed), HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_SMALL, C_CREAM)
-	draw_string(font, Vector2(hud_box.position.x + 14, hud_box.position.y + 42),
-		"ALT " + _format_alt(hud_alt).to_upper(), HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_TEAL)
-	if hud_warp:
-		draw_string(font, Vector2(hud_box.position.x + 240, hud_box.position.y + 32),
-			"WARP", HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_SMALL, C_ORANGE)
+	# ----- TELEMETRY HUD -----
+	# Hidden on mobile for now: the SPD/ALT chip was crowding the centred
+	# health bar above it and covering the chip from above.  Speed and warp
+	# state are already implied by the throttle slider and BOOST button; the
+	# alt readout can come back later as a smaller chip if needed.
 
 	if paused:
 		# ============================================================
@@ -285,7 +331,7 @@ func _draw() -> void:
 		var pm_col_x = sx - pm_pad - _safe_right
 		var pm_base  = sy - pm_pad
 		var pm_w     = 220.0
-		var pm_top   = _rect_pdead.position.y - 16.0
+		var pm_top   = _rect_pdbg.position.y - 16.0
 		var pm_bot   = pm_base + 16.0
 		var pm_panel = Rect2(pm_col_x - pm_w - 14, pm_top, pm_w + 28, pm_bot - pm_top)
 		HUDStyle.draw_beveled_rect(self, pm_panel, HUDStyle.BG_DEEP_NAVY, false)
@@ -309,6 +355,13 @@ func _draw() -> void:
 		_draw_space_button(_rect_pdead, "DEAD: %s" % DEAD_LABELS[dead_idx],
 			C_BG, C_TEAL, _pdead_touch != -1, 16)
 
+		# GYRO DEBUG toggle — when ON, render recessed (matches GYRO toggle
+		# style).  Toggles the live telemetry overlay used to diagnose
+		# device-side gyro behaviour without needing Xcode console access.
+		var dbg_lbl = "DBG ON" if _gyro_dbg_visible else "DBG OFF"
+		var dbg_fill: Color = C_GYRO_ON if _gyro_dbg_visible else C_GYRO_OFF
+		_draw_space_button(_rect_pdbg, dbg_lbl, dbg_fill, dbg_fill, _gyro_dbg_visible, 13)
+
 		# RESUME button (large green) — always raised, recesses while held.
 		_draw_space_button(_rect_resume, "RESUME",
 			C_RESUME, C_RESUME, _resume_touch != -1, 18)
@@ -326,6 +379,47 @@ func _draw() -> void:
 
 		_draw_space_button(_rect_rolll, "ROLL L", C_TEAL.darkened(0.35), C_TEAL, rolll_touch != -1, 14)
 		_draw_space_button(_rect_rollr, "ROLL R", C_TEAL.darkened(0.35), C_TEAL, rollr_touch != -1, 14)
+
+	# ----- GYRO DEBUG OVERLAY (visible in both play + pause modes) -----
+	# Anchored below the RECENTER button on the top-left.  Renders a small
+	# beveled chip with the raw gravity vector, calibration neutral, post-
+	# neutral deltas, final virtual-stick values, and calibration progress.
+	# This is the diagnostic surface for the iOS right-turn bug.
+	if _gyro_dbg_visible:
+		var dbg_x = _rect_recenter.position.x
+		var dbg_y = _rect_recenter.position.y + _rect_recenter.size.y + 10.0
+		var dbg_w = 360.0
+		var dbg_h = 168.0
+		var dbg_box = Rect2(dbg_x, dbg_y, dbg_w, dbg_h)
+		HUDStyle.draw_beveled_rect(self, dbg_box, HUDStyle.BG_DEEP_NAVY, false)
+		var tx_x = dbg_x + 12.0
+		var line_y = dbg_y + 18.0
+		var line_h = 18.0
+		draw_string(font, Vector2(tx_x, line_y), "GYRO DEBUG",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_TEAL)
+		line_y += line_h
+		draw_string(font, Vector2(tx_x, line_y),
+			"GRAV %+.2f %+.2f %+.2f" % [_gyro_dbg_grav.x, _gyro_dbg_grav.y, _gyro_dbg_grav.z],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_CREAM)
+		line_y += line_h
+		draw_string(font, Vector2(tx_x, line_y),
+			"NEUT %+.2f %+.2f %+.2f" % [_gyro_dbg_nx, _gyro_dbg_ny, _gyro_dbg_nz],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_CREAM)
+		line_y += line_h
+		# TY (yaw signal) coloured bright orange so it stands out from
+		# TX/TZ — it's the actual control input after the X→Y axis fix.
+		draw_string(font, Vector2(tx_x, line_y),
+			"DLT %+.2f %+.2f %+.2f" % [_gyro_dbg_tx, _gyro_dbg_ty, _gyro_dbg_tz],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_ORANGE)
+		line_y += line_h
+		draw_string(font, Vector2(tx_x, line_y),
+			"STK  YAW %+.2f  PIT %+.2f" % [_gyro_dbg_yaw, _gyro_dbg_pitch],
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_GREEN)
+		line_y += line_h
+		var calib_str = "OK" if _gyro_dbg_calib else ("%d/30" % _gyro_dbg_calib_n)
+		draw_string(font, Vector2(tx_x, line_y), "CALIB " + calib_str,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY,
+			C_GREEN if _gyro_dbg_calib else C_ORANGE)
 
 # =====================================================================
 #  DRAW HELPERS
@@ -440,6 +534,10 @@ func _on_press(pos: Vector2, index: int) -> void:
 			dead_idx = (dead_idx + 1) % DEAD_VALUES.size()
 			deadzone_changed.emit(DEAD_VALUES[dead_idx])
 			queue_redraw(); get_viewport().set_input_as_handled(); return
+		if _rect_pdbg.has_point(pos) and _pdbg_touch == -1:
+			_pdbg_touch = index
+			_gyro_dbg_visible = not _gyro_dbg_visible
+			queue_redraw(); get_viewport().set_input_as_handled(); return
 		# Swallow all other touches while paused so nothing fires accidentally
 		get_viewport().set_input_as_handled(); return
 
@@ -496,6 +594,8 @@ func _on_release(index: int) -> void:
 		_psens_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
 	if index == _pdead_touch:
 		_pdead_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
+	if index == _pdbg_touch:
+		_pdbg_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
 
 	if index == fire_touch:
 		fire_touch = -1; fire_pressed.emit(false)

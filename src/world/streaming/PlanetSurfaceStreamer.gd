@@ -96,6 +96,11 @@ var _stream_active: bool = false
 # Frames since the last successful cell activation.  Drives the safety hatch
 # that forces an activation through after a long throttled stretch.
 var _frames_since_activation: int = 0
+# Mirror of _frames_since_activation for the spawn-queue path.  Without this,
+# a chronic frame-time overrun (e.g. running in-editor with debugger overhead
+# on a desktop machine where frame_time_budget_ms=32ms is regularly exceeded)
+# leaves the spawn queue locked forever and no scatter ever appears.
+var _frames_since_spawn: int = 0
 
 func _ready() -> void:
 	# Find the parent planet.  PlanetGen instantiates this streamer as a child.
@@ -125,6 +130,23 @@ func _ready() -> void:
 		spawn_budget_per_frame = 1
 		max_stream_altitude_m = 15000.0
 		max_stream_altitude_exit_m = 20000.0
+	else:
+		# Desktop: extend the loaded cell window so scatter doesn't pop in
+		# at the 1-cell-radius edge (~7 km).  5x5 = 25 cells gives ~12 km
+		# of visible scatter before the boundary — well past the visible
+		# horizon at low altitude.  Mobile keeps 3x3 (9 cells) for draw-call
+		# budget.  Each cell adds ~3-4 MMI draws, so 25 cells ≈ 100 — fine
+		# on desktop GPUs.
+		t1_radius_cells = 2
+		spawn_budget_per_frame = 3  # drain the larger window faster
+		if OS.has_feature("editor"):
+			# In-editor on desktop: debugger + MCP overhead push frame time
+			# past the 32 ms soft limit, locking the spawn queue the way the
+			# mobile path used to.  Standalone desktop builds keep the tight
+			# thresholds — they don't need this.
+			frame_time_budget_ms = 60.0
+			frame_time_hard_limit_ms = 110.0
+			max_frames_between_activations = 20
 
 	set_process(true)
 
@@ -457,13 +479,22 @@ func _drain_pending_builds() -> void:
 	_pending_build = still_pending
 
 func _drain_spawn_queue(budget_override: int = -1) -> void:
+	_frames_since_spawn += 1
 	# Adaptive throttle: don't kick off NEW background tasks (which will
 	# eventually need main-thread activation) when the engine is already busy.
-	if _throttle_state() >= 1:
+	# Safety hatch: if we've been throttled long enough that the player would
+	# notice nothing is filling in, force ONE cell through regardless of frame
+	# budget.  Otherwise hardware (or in-editor debug overhead) that runs
+	# chronically over frame_time_budget_ms leaves the queue locked forever.
+	var force_through: bool = _frames_since_spawn >= max_frames_between_activations
+	if _throttle_state() >= 1 and not force_through:
 		if debug_log_throttles:
 			print("[streamer] spawn-queue skip: frame %.1fms" % _frame_time_ms())
 		return
 	var budget: int = budget_override if budget_override > 0 else spawn_budget_per_frame
+	if force_through:
+		# Trickle a single cell through during chronic throttle.
+		budget = max(budget, 1)
 	while budget > 0 and not _spawn_queue.is_empty():
 		var cid: int = _spawn_queue.pop_front()
 		if _cells.has(cid):
@@ -476,6 +507,9 @@ func _drain_spawn_queue(budget_override: int = -1) -> void:
 		cell.build_async()
 		_pending_build.append(cell)
 		budget -= 1
+		_frames_since_spawn = 0
+		if force_through:
+			break  # Only force ONE cell — don't blow the budget further.
 
 func _drain_despawn_queue(budget_override: int = -1) -> void:
 	# Despawns release resources — only paused by the HARD throttle.  Under

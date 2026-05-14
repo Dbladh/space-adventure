@@ -43,7 +43,7 @@ static func make_seed(r1: String, r2: String, r3: String) -> int:
 # ─── PLANET RANKING ──────────────────────────────────────────────────────────
 # Returns { label, color, score } where score is 0–100.
 # Rank tiers: F → D → C → B → A → S → SS → ★ LEGENDARY
-static func rank_planet(r1: String, r2: String, r3: String, seed_val: int) -> Dictionary:
+static func rank_planet(r1: String, r2: String, r3: String, seed_val: int, luck_variance: float = 0.0) -> Dictionary:
 	var t1 := ResourceRegistry.get_tier(r1)
 	var t2 := ResourceRegistry.get_tier(r2)
 	var t3 := ResourceRegistry.get_tier(r3)
@@ -70,6 +70,13 @@ static func rank_planet(r1: String, r2: String, r3: String, seed_val: int) -> Di
 	if seed_val % 5  == 0: cosmic += 3.0
 	if seed_val % 3  == 0: cosmic += 3.0
 	cosmic = minf(cosmic, 20.0)
+
+	# Luck-driven variance: deterministic per (seed, luck) so the same forge
+	# always produces the same rank — can't be save-scummed by undocking.
+	if luck_variance > 0.0:
+		var lrng := RandomNumberGenerator.new()
+		lrng.seed = seed_val
+		cosmic += lrng.randf_range(-luck_variance, luck_variance)
 
 	var score: float = resource_score + rarity_bonus + cosmic
 

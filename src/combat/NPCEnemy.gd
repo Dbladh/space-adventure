@@ -62,7 +62,7 @@ func _ready():
 	
 	# WORLD-SPACE SYNC: Starhawk High-Fidelity Geometry
 	var path = "res://assets/models/player/ship/Meshy_AI_Starhawk_01_0331051011_texture.glb"
-	if FileAccess.file_exists(path):
+	if ResourceLoader.exists(path):
 		var scene = load(path)
 		if scene:
 			var model = scene.instantiate()

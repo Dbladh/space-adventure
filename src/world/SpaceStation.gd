@@ -11,6 +11,25 @@ const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
 const DOCK_RANGE: float = 2000000.0   # 2000 km — Closer to the model surface
 const _DEFAULT_MAX_PLANETS: int = 1   # starting cap before any Forge Slot upgrades
 
+# Mobile UI sizing — panel margins, tap-target heights, column widths, fonts.
+# Desktop keeps the existing compact 560×680 layout; mobile expands the panel
+# to near-full-width and grows every button to a 44+ pt tap target.
+const _PANEL_MARGIN_MOBILE: int = 20
+const _BTN_H_MOBILE: int = 52
+const _BTN_MIN_W_MOBILE: int = 96
+const _NAME_COL_MIN_MOBILE: int = 140
+const _HELD_COL_MIN_MOBILE: int = 64
+const _TAB_H_MOBILE: int = 56
+const _BIGBTN_H_MOBILE: int = 56
+const _FORGE_BTN_H_MOBILE: int = 64
+const _FORGE_SLOT_W_MOBILE: int = 130
+const _FORGE_SLOT_H_MOBILE: int = 72
+const _FORGE_CARD_W_MOBILE: int = 150
+const _FORGE_CARD_H_MOBILE: int = 72
+const _UPGRADE_BTN_H_MOBILE: int = 52
+const _UPGRADE_RIGHT_W_MOBILE: int = 280
+var _is_mobile_ui: bool = MobilePerf.is_mobile()
+
 static func _max_planets() -> int:
 	if Engine.has_meta("UpgradeManager"):
 		return int(Engine.get_meta("UpgradeManager").get_forge_slots())
@@ -73,6 +92,9 @@ class ForgeSlot extends PanelContainer:
 	func _drop_data(_at_position: Vector2, data: Variant) -> void:
 		station_ref._on_card_pressed(data["res"])
 	func _get_drag_data(_at_position: Vector2) -> Variant:
+		# On mobile, drag-and-drop competes with ScrollContainer touch
+		# scrolling. Tap-to-remove (below) covers the same intent.
+		if station_ref and station_ref._is_mobile_ui: return null
 		if slot_index >= station_ref._forge_selected.size(): return null
 		var r: String = station_ref._forge_selected[slot_index]
 		var preview := PanelContainer.new()
@@ -92,6 +114,16 @@ class ForgeSlot extends PanelContainer:
 			if station_ref and slot_index < station_ref._forge_selected.size():
 				station_ref._on_remove_slot(slot_index)
 				accept_event()
+		# Mobile tap-to-remove. Fire on RELEASE, not press — so a swipe-to-
+		# scroll inside the panel gets stolen by ScrollContainer mid-drag and
+		# the release never reaches us. Only a clean tap fires.
+		elif station_ref and station_ref._is_mobile_ui \
+				and event is InputEventMouseButton \
+				and not event.pressed \
+				and event.button_index == MOUSE_BUTTON_LEFT:
+			if slot_index < station_ref._forge_selected.size():
+				station_ref._on_remove_slot(slot_index)
+				accept_event()
 
 class ResourceCard extends PanelContainer:
 	var resource_id: String = ""
@@ -102,6 +134,9 @@ class ResourceCard extends PanelContainer:
 		# triggers the same "add to forge" action that drag-in does.
 		focus_mode = Control.FOCUS_ALL
 	func _get_drag_data(_at_position: Vector2) -> Variant:
+		# On mobile, drag-and-drop competes with ScrollContainer touch
+		# scrolling. Tap-to-add (below) covers the same intent.
+		if station_ref and station_ref._is_mobile_ui: return null
 		if available_count <= 0 or station_ref._forge_selected.size() >= 3: return null
 		var preview := PanelContainer.new()
 		var sb := StyleBoxFlat.new()
@@ -117,6 +152,16 @@ class ResourceCard extends PanelContainer:
 	func _gui_input(event: InputEvent) -> void:
 		if event.is_action_pressed("ui_accept"):
 			if station_ref and available_count > 0 and station_ref._forge_selected.size() < 3:
+				station_ref._on_card_pressed(resource_id)
+				accept_event()
+		# Mobile tap-to-add. Fire on RELEASE, not press — so a swipe-to-scroll
+		# over a card gets stolen by the ScrollContainer mid-drag and the
+		# release never reaches us. Only a clean tap fires.
+		elif station_ref and station_ref._is_mobile_ui \
+				and event is InputEventMouseButton \
+				and not event.pressed \
+				and event.button_index == MOUSE_BUTTON_LEFT:
+			if available_count > 0 and station_ref._forge_selected.size() < 3:
 				station_ref._on_card_pressed(resource_id)
 				accept_event()
 
@@ -239,12 +284,20 @@ func _build_ui() -> void:
 	_market_scroll = ScrollContainer.new()
 	_market_scroll.process_mode = PROCESS_MODE_ALWAYS
 	_market_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
-	_market_scroll.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	_market_scroll.custom_minimum_size = Vector2(560, 680)
-	_market_scroll.offset_top    = -340
-	_market_scroll.offset_left   = -280
-	_market_scroll.offset_bottom =  340
-	_market_scroll.offset_right  =  280
+	if _is_mobile_ui:
+		_market_scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		_market_scroll.custom_minimum_size = Vector2.ZERO
+		_market_scroll.offset_left    =  _PANEL_MARGIN_MOBILE
+		_market_scroll.offset_right   = -_PANEL_MARGIN_MOBILE
+		_market_scroll.offset_top     =  _PANEL_MARGIN_MOBILE
+		_market_scroll.offset_bottom  = -_PANEL_MARGIN_MOBILE
+	else:
+		_market_scroll.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+		_market_scroll.custom_minimum_size = Vector2(560, 680)
+		_market_scroll.offset_top    = -340
+		_market_scroll.offset_left   = -280
+		_market_scroll.offset_bottom =  340
+		_market_scroll.offset_right  =  280
 	_market_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_ui_layer.add_child(_market_scroll)
 	_panel = _market_scroll
@@ -261,6 +314,7 @@ func _build_ui() -> void:
 	# ---- Title ----
 	var title := Label.new()
 	title.text = "[ STATION " + station_display_name.to_upper() + " ]"
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	title.add_theme_font_size_override("font_size", 34)
 	title.add_theme_color_override("font_color", Color.CYAN)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -269,6 +323,7 @@ func _build_ui() -> void:
 	# ---- Credits ----
 	_creds_label = Label.new()
 	_creds_label.text = "$0"
+	_creds_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_creds_label.add_theme_font_size_override("font_size", 26)
 	_creds_label.add_theme_color_override("font_color", Color.GOLD)
 	_creds_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -277,6 +332,7 @@ func _build_ui() -> void:
 	# ---- Inventory ----
 	_inv_label = Label.new()
 	_inv_label.text = "Inventory: (empty)"
+	_inv_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_inv_label.add_theme_font_size_override("font_size", 20)
 	_inv_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
 	_inv_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -293,8 +349,10 @@ func _build_ui() -> void:
 		var tab_lbl: String = ["  MARKET  ", "  FORGE  ", "  UPGRADES  "][tab_i]
 		var tb: Button = Button.new()
 		tb.text = tab_lbl
-		tb.add_theme_font_size_override("font_size", 20)
+		tb.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 20)
 		tb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		if _is_mobile_ui:
+			tb.custom_minimum_size = Vector2(0, _TAB_H_MOBILE)
 		var captured_i: int = tab_i
 		tb.pressed.connect(func() -> void: _switch_tab(captured_i))
 		tab_row.add_child(tb)
@@ -308,6 +366,7 @@ func _build_ui() -> void:
 
 	_market_status = Label.new()
 	_market_status.text = ""
+	_market_status.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_market_status.add_theme_font_size_override("font_size", 15)
 	_market_status.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
 	_market_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -316,25 +375,40 @@ func _build_ui() -> void:
 
 	# Column header row
 	var header_row := HBoxContainer.new()
-	header_row.add_theme_constant_override("separation", 4)
+	header_row.add_theme_constant_override("separation", 8 if _is_mobile_ui else 4)
 	_tab_market_panel.add_child(header_row)
 	for col_text in ["Resource", "Held", "Sell", "Buy"]:
 		var h := Label.new()
 		h.text = col_text
-		h.add_theme_font_size_override("font_size", 13)
+		h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		h.add_theme_font_size_override("font_size", 17 if _is_mobile_ui else 13)
 		h.add_theme_color_override("font_color", Color(0.5, 0.5, 0.55))
-		h.size_flags_horizontal = Control.SIZE_EXPAND_FILL if col_text == "Resource" else Control.SIZE_SHRINK_CENTER
-		h.custom_minimum_size.x = 90 if col_text == "Resource" else 58
+		if _is_mobile_ui:
+			# Resource label centers within its own column; Held/Sell/Buy stretch
+			# to consume horizontal space so the buttons below them grow with the
+			# screen width.
+			if col_text == "Resource":
+				h.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				h.custom_minimum_size.x = _NAME_COL_MIN_MOBILE
+			else:
+				h.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				h.custom_minimum_size.x = _HELD_COL_MIN_MOBILE if col_text == "Held" else _BTN_MIN_W_MOBILE
+				h.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		else:
+			h.size_flags_horizontal = Control.SIZE_EXPAND_FILL if col_text == "Resource" else Control.SIZE_SHRINK_CENTER
+			h.custom_minimum_size.x = 90 if col_text == "Resource" else 58
 		header_row.add_child(h)
 
 	_market_rows_vbox = VBoxContainer.new()
-	_market_rows_vbox.add_theme_constant_override("separation", 4)
+	_market_rows_vbox.add_theme_constant_override("separation", 8 if _is_mobile_ui else 4)
 	_tab_market_panel.add_child(_market_rows_vbox)
 
 	var sell_all_btn := Button.new()
 	sell_all_btn.text = "Sell ALL Resources"
-	sell_all_btn.add_theme_font_size_override("font_size", 20)
+	sell_all_btn.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 20)
 	sell_all_btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+	if _is_mobile_ui:
+		sell_all_btn.custom_minimum_size = Vector2(0, _BIGBTN_H_MOBILE)
 	sell_all_btn.pressed.connect(_on_sell_all)
 	_tab_market_panel.add_child(sell_all_btn)
 
@@ -345,7 +419,8 @@ func _build_ui() -> void:
 	vbox.add_child(_tab_forge_panel)
 
 	var forge_title := Label.new()
-	forge_title.text = "— FORGE PLANET —\nDrag 3 resources into the slots"
+	forge_title.text = "— FORGE PLANET —\n" + ("Tap 3 resources to fill the slots" if _is_mobile_ui else "Drag 3 resources into the slots")
+	forge_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	forge_title.add_theme_font_size_override("font_size", 20)
 	forge_title.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
 	forge_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -371,7 +446,7 @@ func _build_ui() -> void:
 		slot_sb.content_margin_left = 6; slot_sb.content_margin_right = 6
 		slot_sb.content_margin_top = 4;  slot_sb.content_margin_bottom = 4
 		slot_panel.add_theme_stylebox_override("panel", slot_sb)
-		slot_panel.custom_minimum_size = Vector2(90, 40)
+		slot_panel.custom_minimum_size = Vector2(_FORGE_SLOT_W_MOBILE, _FORGE_SLOT_H_MOBILE) if _is_mobile_ui else Vector2(90, 40)
 
 		var slot_vb := VBoxContainer.new()
 		slot_vb.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -379,7 +454,8 @@ func _build_ui() -> void:
 
 		var slot_lbl := Label.new()
 		slot_lbl.text = "[ SLOT " + str(i + 1) + " ]"
-		slot_lbl.add_theme_font_size_override("font_size", 14)
+		slot_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot_lbl.add_theme_font_size_override("font_size", 17 if _is_mobile_ui else 14)
 		slot_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
 		slot_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		slot_vb.add_child(slot_lbl)
@@ -394,6 +470,7 @@ func _build_ui() -> void:
 
 	_forge_status = Label.new()
 	_forge_status.text = ""
+	_forge_status.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_forge_status.add_theme_font_size_override("font_size", 15)
 	_forge_status.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
 	_forge_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -403,22 +480,39 @@ func _build_ui() -> void:
 	# ── Resource card grid (inside forge tab) ──────────────────────────
 	var card_title := Label.new()
 	card_title.text = "Available Resources:"
+	card_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	card_title.add_theme_font_size_override("font_size", 16)
 	card_title.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
 	_tab_forge_panel.add_child(card_title)
 
 	_forge_card_grid = GridContainer.new()
-	_forge_card_grid.columns = 3
-	_forge_card_grid.add_theme_constant_override("h_separation", 8)
-	_forge_card_grid.add_theme_constant_override("v_separation", 8)
+	_forge_card_grid.columns = 2 if _is_mobile_ui else 3
+	_forge_card_grid.add_theme_constant_override("h_separation", 10 if _is_mobile_ui else 8)
+	_forge_card_grid.add_theme_constant_override("v_separation", 10 if _is_mobile_ui else 8)
 	_tab_forge_panel.add_child(_forge_card_grid)
 
 	_forge_btn = Button.new()
 	_forge_btn.text = "FORGE PLANET"
-	_forge_btn.add_theme_font_size_override("font_size", 26)
+	_forge_btn.add_theme_font_size_override("font_size", 28 if _is_mobile_ui else 26)
 	_forge_btn.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
+	if _is_mobile_ui:
+		_forge_btn.custom_minimum_size = Vector2(0, _FORGE_BTN_H_MOBILE)
 	_forge_btn.pressed.connect(_on_forge_planet)
 	_tab_forge_panel.add_child(_forge_btn)
+
+	# ---- Active Worlds (forge tab only — your forged planets live here) ----
+	_tab_forge_panel.add_child(HSeparator.new())
+	_worlds_header = Label.new()
+	_worlds_header.text = "— ACTIVE WORLDS (0/" + str(_max_planets()) + ") —"
+	_worlds_header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_worlds_header.add_theme_font_size_override("font_size", 20)
+	_worlds_header.add_theme_color_override("font_color", Color(0.6, 1.0, 0.8))
+	_worlds_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_tab_forge_panel.add_child(_worlds_header)
+
+	_planets_container = VBoxContainer.new()
+	_planets_container.add_theme_constant_override("separation", 6)
+	_tab_forge_panel.add_child(_planets_container)
 
 	# ======================== UPGRADES TAB ========================
 	_tab_upgrades_panel = VBoxContainer.new()
@@ -427,23 +521,11 @@ func _build_ui() -> void:
 	vbox.add_child(_tab_upgrades_panel)
 	_build_upgrades_panel(_tab_upgrades_panel)
 
-	vbox.add_child(HSeparator.new())
-
-	# ---- Active Worlds (always visible below tabs) ----
-	_worlds_header = Label.new()
-	_worlds_header.text = "— ACTIVE WORLDS (0/" + str(_max_planets()) + ") —"
-	_worlds_header.add_theme_font_size_override("font_size", 20)
-	_worlds_header.add_theme_color_override("font_color", Color(0.6, 1.0, 0.8))
-	_worlds_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(_worlds_header)
-
-	_planets_container = VBoxContainer.new()
-	_planets_container.add_theme_constant_override("separation", 6)
-	vbox.add_child(_planets_container)
-
 	var close_btn := Button.new()
 	close_btn.text = "Close  [fly away]"
-	close_btn.add_theme_font_size_override("font_size", 18)
+	close_btn.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 18)
+	if _is_mobile_ui:
+		close_btn.custom_minimum_size = Vector2(0, _BIGBTN_H_MOBILE)
 	close_btn.pressed.connect(_hide_ui)
 	vbox.add_child(close_btn)
 
@@ -534,7 +616,11 @@ func _rebuild_forge_cards() -> void:
 		sb.content_margin_left = 6; sb.content_margin_right = 6
 		sb.content_margin_top = 4;  sb.content_margin_bottom = 4
 		card.add_theme_stylebox_override("panel", sb)
-		card.custom_minimum_size = Vector2(100, 46)
+		if _is_mobile_ui:
+			card.custom_minimum_size = Vector2(_FORGE_CARD_W_MOBILE, _FORGE_CARD_H_MOBILE)
+			card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		else:
+			card.custom_minimum_size = Vector2(100, 46)
 
 		var vb := VBoxContainer.new()
 		vb.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -544,7 +630,8 @@ func _rebuild_forge_cards() -> void:
 		# Resource name
 		var name_lbl := Label.new()
 		name_lbl.text = ResourceRegistry.get_abbrev(r)
-		name_lbl.add_theme_font_size_override("font_size", 15)
+		name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		name_lbl.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 15)
 		name_lbl.add_theme_color_override("font_color", rarity_col)
 		name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		vb.add_child(name_lbl)
@@ -556,9 +643,10 @@ func _rebuild_forge_cards() -> void:
 
 		var qty_lbl := Label.new()
 		qty_lbl.text = "x" + str(amt)
+		qty_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		if selected_count > 0:
 			qty_lbl.text += " (" + str(available) + " left)"
-		qty_lbl.add_theme_font_size_override("font_size", 12)
+		qty_lbl.add_theme_font_size_override("font_size", 15 if _is_mobile_ui else 12)
 		qty_lbl.add_theme_color_override("font_color", Color(0.8, 0.8, 0.8))
 		sub_row.add_child(qty_lbl)
 
@@ -658,31 +746,45 @@ func _refresh_planets_ui() -> void:
 
 	for entry in _active_planets:
 		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 10)
+		row.add_theme_constant_override("separation", 12)
 		_planets_container.add_child(row)
 
 		var combo: String = ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2) + "+" + ResourceRegistry.get_abbrev(entry.r3)
 		var seed_val: int = PlanetSeedKitchen.make_seed(entry.r1, entry.r2, entry.r3)
 		var rank: Dictionary = PlanetSeedKitchen.rank_planet(entry.r1, entry.r2, entry.r3, seed_val, float(entry.get("luck_variance", 0.0)))
 
-		# ── Planet thumbnail (32x32 procedural icon) ────────────────────
+		# ── Planet thumbnail (4× the old 40px, crisp nearest-neighbour) ──
 		var thumb := TextureRect.new()
 		thumb.texture = _planet_thumbnail_for(entry)
-		thumb.custom_minimum_size = Vector2(40, 40)
+		thumb.custom_minimum_size = Vector2(160, 160)
 		thumb.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		thumb.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST  # crisp pixel-art look
+		thumb.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		thumb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.add_child(thumb)
+
+		# Stack name + badge + combo vertically so the row stays compact next
+		# to the larger thumbnail.
+		var info_vb := VBoxContainer.new()
+		info_vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		info_vb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		info_vb.add_theme_constant_override("separation", 6)
+		row.add_child(info_vb)
 
 		# ── Planet name ────────────────────────────────────────────────
 		var name_lbl := Label.new()
 		name_lbl.text = _display_planet_name(entry)
-		name_lbl.add_theme_font_size_override("font_size", 18)
+		name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		name_lbl.add_theme_font_size_override("font_size", 20 if _is_mobile_ui else 18)
 		name_lbl.add_theme_color_override("font_color", Color(0.9, 0.92, 1.0))
-		name_lbl.custom_minimum_size.x = 180
-		row.add_child(name_lbl)
+		info_vb.add_child(name_lbl)
 
-		# ── Rank Badge ──────────────────────────────────────────────────
+		# ── Rank Badge + Combo on one line ──────────────────────────────
+		var sub_row := HBoxContainer.new()
+		sub_row.add_theme_constant_override("separation", 10)
+		info_vb.add_child(sub_row)
+
 		var badge_panel := PanelContainer.new()
+		badge_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var badge_sb := StyleBoxFlat.new()
 		badge_sb.bg_color = rank.color.darkened(0.55)
 		badge_sb.border_color = rank.color
@@ -694,23 +796,26 @@ func _refresh_planets_ui() -> void:
 
 		var badge_lbl := Label.new()
 		badge_lbl.text = rank.label
+		badge_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		badge_lbl.add_theme_font_size_override("font_size", 16)
 		badge_lbl.add_theme_color_override("font_color", rank.color)
 		badge_panel.add_child(badge_lbl)
-		row.add_child(badge_panel)
+		sub_row.add_child(badge_panel)
 
 		# ── Combo (resource recipe) ────────────────────────────────────
 		var lbl := Label.new()
 		lbl.text = combo
+		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		lbl.add_theme_font_size_override("font_size", 18)
 		lbl.add_theme_color_override("font_color", Color(0.8, 0.9, 0.8))
-		lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row.add_child(lbl)
+		sub_row.add_child(lbl)
 
 		var dis_btn := Button.new()
 		dis_btn.text = "Dismantle"
-		dis_btn.add_theme_font_size_override("font_size", 17)
+		dis_btn.add_theme_font_size_override("font_size", 20 if _is_mobile_ui else 17)
 		dis_btn.add_theme_color_override("font_color", Color(1.0, 0.4, 0.4))
+		dis_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		dis_btn.custom_minimum_size = Vector2(160, _BTN_H_MOBILE) if _is_mobile_ui else Vector2(110, 38)
 		# Capture entry by value with a local copy
 		var captured := entry
 		dis_btn.pressed.connect(func() -> void: _on_dismantle(captured))
@@ -818,20 +923,24 @@ func _show_ui() -> void:
 		elif "visible" in node and node.visible:
 			node.visible = false
 			_hud_was_visible.append(node)
-	# Freeze the player in place WITHOUT pausing the scene tree.
-	# get_tree().paused breaks Godot 4's Viewport GUI event routing,
-	# preventing all button clicks from registering.
+	# Freeze the whole world while docked. The station UI's CanvasLayer and
+	# its descendants are PROCESS_MODE_ALWAYS, so buttons keep receiving
+	# input even with the scene tree paused.
 	if _player:
 		_player.set_physics_process(false)
 		_player.set_process(false)
 		if _player.has_method("unlock_mouse"):
 			_player.unlock_mouse()
+	get_tree().paused = true
 
 func _hide_ui() -> void:
 	_ui_visible = false
 	_panel.hide()
 	if _in_range:
 		_prompt_btn.show()
+	# Unfreeze the world before restoring the player so the next physics tick
+	# sees the player active.
+	get_tree().paused = false
 	# Restore player movement and HUD.
 	if _player:
 		_player.set_physics_process(true)
@@ -988,24 +1097,32 @@ func _rebuild_market_rows() -> void:
 		var credits_val: int = econ_ref.credits if econ_ref else 0
 
 		var row: HBoxContainer = HBoxContainer.new()
-		row.add_theme_constant_override("separation", 4)
+		row.add_theme_constant_override("separation", 10 if _is_mobile_ui else 4)
 		_market_rows_vbox.add_child(row)
 
 		# ── Resource name badge ────────────────────────────────────────
 		var name_panel: PanelContainer = PanelContainer.new()
+		# IGNORE so touch-drags fall through to the ScrollContainer instead of
+		# being eaten by the panel's default MOUSE_FILTER_STOP.
+		name_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		var name_sb: StyleBoxFlat = StyleBoxFlat.new()
 		name_sb.bg_color = rarity_col.darkened(0.72)
 		name_sb.border_color = rarity_col.darkened(0.2)
 		name_sb.set_border_width_all(1)
 		name_sb.set_corner_radius_all(4)
-		name_sb.content_margin_left = 6; name_sb.content_margin_right = 6
-		name_sb.content_margin_top = 2;  name_sb.content_margin_bottom = 2
+		if _is_mobile_ui:
+			name_sb.content_margin_left = 10; name_sb.content_margin_right = 10
+			name_sb.content_margin_top = 6;   name_sb.content_margin_bottom = 6
+		else:
+			name_sb.content_margin_left = 6; name_sb.content_margin_right = 6
+			name_sb.content_margin_top = 2;  name_sb.content_margin_bottom = 2
 		name_panel.add_theme_stylebox_override("panel", name_sb)
-		name_panel.custom_minimum_size = Vector2(90, 30)
+		name_panel.custom_minimum_size = Vector2(_NAME_COL_MIN_MOBILE, _BTN_H_MOBILE) if _is_mobile_ui else Vector2(90, 30)
 		name_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var name_lbl := Label.new()
 		name_lbl.text = r
-		name_lbl.add_theme_font_size_override("font_size", 13)
+		name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		name_lbl.add_theme_font_size_override("font_size", 17 if _is_mobile_ui else 13)
 		name_lbl.add_theme_color_override("font_color", rarity_col)
 		name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		name_panel.add_child(name_lbl)
@@ -1014,9 +1131,10 @@ func _rebuild_market_rows() -> void:
 		# ── Held qty ──────────────────────────────────────────────────
 		var held_lbl := Label.new()
 		held_lbl.text = "x" + str(held)
-		held_lbl.add_theme_font_size_override("font_size", 14)
+		held_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		held_lbl.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 14)
 		held_lbl.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0) if held > 0 else Color(0.4, 0.4, 0.4))
-		held_lbl.custom_minimum_size = Vector2(46, 0)
+		held_lbl.custom_minimum_size = Vector2(_HELD_COL_MIN_MOBILE, _BTN_H_MOBILE) if _is_mobile_ui else Vector2(46, 0)
 		held_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		held_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		row.add_child(held_lbl)
@@ -1024,9 +1142,13 @@ func _rebuild_market_rows() -> void:
 		# ── Sell button ───────────────────────────────────────────────
 		var sell_btn: Button = Button.new()
 		sell_btn.text = "$" + str(sell_val)
-		sell_btn.add_theme_font_size_override("font_size", 13)
+		sell_btn.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 13)
 		sell_btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
-		sell_btn.custom_minimum_size = Vector2(58, 28)
+		if _is_mobile_ui:
+			sell_btn.custom_minimum_size = Vector2(_BTN_MIN_W_MOBILE, _BTN_H_MOBILE)
+			sell_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		else:
+			sell_btn.custom_minimum_size = Vector2(58, 28)
 		sell_btn.disabled = held <= 0
 		var sell_r: String = r  # capture
 		sell_btn.pressed.connect(func() -> void: _on_sell_one(sell_r))
@@ -1035,9 +1157,13 @@ func _rebuild_market_rows() -> void:
 		# ── Buy button ────────────────────────────────────────────────
 		var buy_btn: Button = Button.new()
 		buy_btn.text = "$" + str(buy_price)
-		buy_btn.add_theme_font_size_override("font_size", 13)
+		buy_btn.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 13)
 		buy_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
-		buy_btn.custom_minimum_size = Vector2(58, 28)
+		if _is_mobile_ui:
+			buy_btn.custom_minimum_size = Vector2(_BTN_MIN_W_MOBILE, _BTN_H_MOBILE)
+			buy_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		else:
+			buy_btn.custom_minimum_size = Vector2(58, 28)
 		buy_btn.disabled = credits_val < buy_price
 		var buy_r: String = r  # capture
 		buy_btn.pressed.connect(func() -> void: _on_buy_one(buy_r))
@@ -1406,6 +1532,9 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 	var affordable: bool = up.can_afford(track)
 
 	var panel := PanelContainer.new()
+	# IGNORE so scroll touches fall through to the ScrollContainer; the
+	# UPGRADE Button child still gets its own taps via STOP.
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.10, 0.10, 0.14, 0.85)
 	sb.border_color = Color(0.35, 0.35, 0.5)
@@ -1429,6 +1558,7 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 
 	var name_lbl := Label.new()
 	name_lbl.text = String(up.DISPLAY_NAME.get(track, track.to_upper()))
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	name_lbl.add_theme_font_size_override("font_size", 18)
 	name_lbl.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
 	left.add_child(name_lbl)
@@ -1439,12 +1569,13 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 	var pip_color: Color = _tier_color(int(ceilf(float(maxi(lvl, 1)) / float(maxi(max_lvl, 1)) * 4.0)))
 	for i in range(max_lvl):
 		var pip := ColorRect.new()
-		pip.custom_minimum_size = Vector2(16, 10)
+		pip.custom_minimum_size = Vector2(20, 14) if _is_mobile_ui else Vector2(16, 10)
 		pip.color = pip_color if i < lvl else Color(0.2, 0.2, 0.25)
 		pip_row.add_child(pip)
 
 	var lvl_lbl := Label.new()
 	lvl_lbl.text = "Lvl " + str(lvl) + " / " + str(max_lvl)
+	lvl_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	lvl_lbl.add_theme_font_size_override("font_size", 13)
 	lvl_lbl.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
 	left.add_child(lvl_lbl)
@@ -1452,12 +1583,13 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 	# RIGHT: cost + materials + button
 	var right := VBoxContainer.new()
 	right.add_theme_constant_override("separation", 4)
-	right.custom_minimum_size = Vector2(240, 0)
+	right.custom_minimum_size = Vector2(_UPGRADE_RIGHT_W_MOBILE if _is_mobile_ui else 240, 0)
 	row.add_child(right)
 
 	if maxed:
 		var maxed_lbl := Label.new()
 		maxed_lbl.text = "MAXED"
+		maxed_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		maxed_lbl.add_theme_font_size_override("font_size", 18)
 		maxed_lbl.add_theme_color_override("font_color", Color(1.0, 0.8, 0.2))
 		maxed_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -1469,6 +1601,7 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 
 		var cost_lbl := Label.new()
 		cost_lbl.text = "$" + str(cost_credits)
+		cost_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		cost_lbl.add_theme_font_size_override("font_size", 16)
 		cost_lbl.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2) if credits_ok else Color(1.0, 0.4, 0.4))
 		cost_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -1503,10 +1636,10 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 
 		var btn := Button.new()
 		btn.text = "UPGRADE"
-		btn.add_theme_font_size_override("font_size", 18)
+		btn.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 18)
 		btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.55) if affordable else Color(0.55, 0.55, 0.55))
 		btn.disabled = not affordable
-		btn.custom_minimum_size = Vector2(0, 38)
+		btn.custom_minimum_size = Vector2(0, _UPGRADE_BTN_H_MOBILE if _is_mobile_ui else 38)
 		var captured_track: String = track
 		btn.pressed.connect(func() -> void: _on_upgrade_purchase_pressed(captured_track))
 		right.add_child(btn)

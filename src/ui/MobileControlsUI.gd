@@ -538,8 +538,10 @@ func _on_press(pos: Vector2, index: int) -> void:
 			_pdbg_touch = index
 			_gyro_dbg_visible = not _gyro_dbg_visible
 			queue_redraw(); get_viewport().set_input_as_handled(); return
-		# Swallow all other touches while paused so nothing fires accidentally
-		get_viewport().set_input_as_handled(); return
+		# Don't consume — let unmatched paused clicks fall through to the
+		# centred PauseMenuUI overlay (and StationUI when docked). Both are
+		# PROCESS_MODE_ALWAYS so they still receive input while paused.
+		return
 
 	# ---- Combat buttons (play mode only) ----
 	if _rect_fire.has_point(pos) and fire_touch == -1:

@@ -71,6 +71,7 @@ func save_now() -> void:
 	if Engine.has_meta("UpgradeManager"):
 		data["upgrades"] = Engine.get_meta("UpgradeManager").levels.duplicate()
 	data["planets"] = SpaceStationGD.active_planets_for_save()
+	data["total_forges"] = SpaceStationGD.get_total_forges()
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f == null:
 		push_warning("SaveManager: failed to open " + SAVE_PATH + " for write")
@@ -123,8 +124,18 @@ func load_if_exists() -> bool:
 	# Main.gd calls SpaceStation._rehydrate_active_planets() once world_root
 	# is in the tree.
 	var planets_data = parsed.get("planets", [])
+	var planets_count: int = 0
 	if typeof(planets_data) == TYPE_ARRAY:
 		SpaceStationGD.load_active_planets_from_save(planets_data)
+		planets_count = planets_data.size()
+
+	# Restore lifetime forge count. Legacy saves without the key fall back to
+	# the current planet count so existing players don't get a second freebie.
+	var saved_forges = parsed.get("total_forges", null)
+	if saved_forges == null:
+		SpaceStationGD.set_total_forges(planets_count)
+	else:
+		SpaceStationGD.set_total_forges(int(saved_forges))
 
 	print("--- SAVE: loaded ", SAVE_PATH, " ---")
 	return true

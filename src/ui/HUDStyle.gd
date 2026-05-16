@@ -41,9 +41,11 @@ const TIER_COLOR_4: Color = Color(1.00, 0.55, 0.05)  # T4 legendary — orange-g
 const BG_DEEP_PURPLE:  Color = Color(0.32, 0.20, 0.92)  # menu canvas
 const BG_DEEP_NAVY:    Color = Color(0.06, 0.07, 0.12)  # outer frame
 const PANEL_BEVEL:     Color = Color(0.18, 0.20, 0.42)  # neutral beveled panel
-const CRT_GREEN_BG:    Color = Color(0.61, 0.95, 0.62)  # bright CRT data screen
-const CRT_GREEN_INK:   Color = Color(0.06, 0.20, 0.10)  # text drawn on CRT screens
-const CRT_GREEN_BORDER:Color = Color(0.18, 0.55, 0.22)  # CRT inner frame
+const CRT_GREEN_BG:      Color = Color(0.61, 0.95, 0.62)  # bright CRT data screen
+const CRT_GREEN_BG_DARK: Color = Color(0.06, 0.22, 0.12)  # authentic dark phosphor backdrop
+const CRT_GREEN_INK:     Color = Color(0.06, 0.20, 0.10)  # text drawn on CRT screens
+const CRT_GREEN_INK_LIT: Color = Color(0.45, 0.95, 0.55)  # bright phosphor lines on dark CRT
+const CRT_GREEN_BORDER:  Color = Color(0.18, 0.55, 0.22)  # CRT inner frame
 const BTN_BLUE:        Color = Color(0.20, 0.45, 1.00)
 const BTN_GREEN:       Color = Color(0.25, 0.78, 0.40)
 const BTN_YELLOW:      Color = Color(0.98, 0.78, 0.18)
@@ -280,6 +282,21 @@ static func draw_beveled_rect(ci: CanvasItem, rect: Rect2, base: Color, pressed:
 		var hi: Color = base.lightened(0.40)
 		ci.draw_rect(Rect2(rect.position.x, rect.position.y, rect.size.x, w), hi, true)
 		ci.draw_rect(Rect2(rect.position.x, rect.position.y, w, rect.size.y), hi, true)
+
+# Draw a CRT-screen backdrop: solid base fill + horizontal scanlines.  Mirrors
+# the dark-phosphor look of a CRT monitor — every other row is dimmed by `dim`
+# strength, so a base of CRT_GREEN_BG_DARK reads as alternating dark/black
+# stripes characteristic of the Designercize reference aesthetic.  `step`
+# controls the scanline pitch (2 = every other pixel — the classic look).
+static func draw_crt_screen(ci: CanvasItem, rect: Rect2,
+		base: Color = CRT_GREEN_BG_DARK,
+		step: int = 2, dim: float = 0.55) -> void:
+	ci.draw_rect(rect, base, true)
+	var stripe: Color = base.darkened(dim)
+	var y: float = rect.position.y
+	while y < rect.end.y:
+		ci.draw_rect(Rect2(rect.position.x, y, rect.size.x, 1), stripe, true)
+		y += step
 
 # Draw a bevel-recessed CRT-green screen — for code that wants to draw an
 # inset display area into a parent surface (galaxy map bezel, etc.).

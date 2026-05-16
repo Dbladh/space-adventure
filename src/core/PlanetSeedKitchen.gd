@@ -136,6 +136,20 @@ static func resources_for_planet(r1: String, r2: String, r3: String) -> Array[St
 	for i in range(min(count, shuffled.size())):
 		result.append(shuffled[i])
 
+	# Early-game safety: on Tier-1-only trios the natural pool can miss the
+	# specific Tier-1 minerals required by early upgrades. Guarantee at least
+	# one of {Carbon Fiber, Silica Dust, Neon Moss} alongside Stone+Wood.
+	if max_tier == 1:
+		var early_specifics: Array[String] = ["Carbon Fiber", "Silica Dust", "Neon Moss"]
+		var has_specific := false
+		for s in early_specifics:
+			if result.has(s):
+				has_specific = true
+				break
+		if not has_specific:
+			var pick: String = early_specifics[rng.randi_range(0, early_specifics.size() - 1)]
+			result.append(pick)
+
 	return result
 
 # Returns the cost dictionary for a given trio (e.g. ["Cu","Cu","Au"] → {"Copper":2,"Gold":1})
@@ -144,6 +158,17 @@ static func resource_cost(r1: String, r2: String, r3: String) -> Dictionary:
 	for r in [r1, r2, r3]:
 		cost[r] = cost.get(r, 0) + 1
 	return cost
+
+# Credit cost to forge a planet from this trio. Pure function of the minerals'
+# tiers — predictable for the player and stable across seed/luck variance.
+const FORGE_TIER_COST: Dictionary = {1: 1000, 2: 10000, 3: 80000, 4: 300000}
+
+static func forge_credit_cost(r1: String, r2: String, r3: String) -> int:
+	var total: int = 0
+	for r in [r1, r2, r3]:
+		var tier: int = ResourceRegistry.get_tier(r)
+		total += int(FORGE_TIER_COST.get(tier, 1000))
+	return total
 
 # All 3 minerals share a tag → +10. Exactly 2 share → +4. Otherwise 0.
 # Empty tags don't count as a match.

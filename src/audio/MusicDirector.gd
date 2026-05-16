@@ -616,7 +616,7 @@ func _ready() -> void:
 	# ── SFX players ─────────────────────────────────────────────────────
 	# Weapon fire — oneshot, quieter than music so it doesn't overpower
 	_sfx_ship_fire = AudioStreamPlayer.new()
-	_sfx_ship_fire.bus = "Master"
+	_sfx_ship_fire.bus = "SFX"
 	_sfx_ship_fire.stream = load("res://assets/resources/audio/ship_fire.wav")
 	_sfx_ship_fire.volume_db = -14.0
 	add_child(_sfx_ship_fire)
@@ -625,7 +625,7 @@ func _ready() -> void:
 	var idle_stream = load("res://assets/resources/audio/ship_idle.wav")
 	print("[SFX] ship_idle.wav loaded: ", idle_stream)
 	_sfx_ship_idle = AudioStreamPlayer.new()
-	_sfx_ship_idle.bus = "Master"
+	_sfx_ship_idle.bus = "SFX"
 	_sfx_ship_idle.stream = idle_stream
 	_sfx_ship_idle.volume_db = -28.0   # barely audible ambient hum
 	_sfx_ship_idle.stream_paused = false
@@ -637,7 +637,7 @@ func _ready() -> void:
 	# Thruster engine (normal movement) — uses ship_thrusters.wav, pitch+vol scale with speed
 	var thruster_stream = load("res://assets/resources/audio/ship_thrusters.wav")
 	_sfx_ship_thruster = AudioStreamPlayer.new()
-	_sfx_ship_thruster.bus = "Master"
+	_sfx_ship_thruster.bus = "SFX"
 	_sfx_ship_thruster.stream = thruster_stream
 	_sfx_ship_thruster.volume_db = -36.0
 	_sfx_ship_thruster.pitch_scale = 0.8
@@ -646,7 +646,7 @@ func _ready() -> void:
 	# Boost engine (warp mode) — uses ship_boost.wav, starts low and increases gradually with speed
 	var boost_stream = load("res://assets/resources/audio/ship_boost.wav")
 	_sfx_ship_boost = AudioStreamPlayer.new()
-	_sfx_ship_boost.bus = "Master"
+	_sfx_ship_boost.bus = "SFX"
 	_sfx_ship_boost.stream = boost_stream
 	_sfx_ship_boost.volume_db = -56.0
 	_sfx_ship_boost.pitch_scale = 0.4
@@ -655,20 +655,20 @@ func _ready() -> void:
 
 	# Explosions — proportionally louder than music to feel impactful
 	_sfx_explosion_small = AudioStreamPlayer.new()
-	_sfx_explosion_small.bus = "Master"
+	_sfx_explosion_small.bus = "SFX"
 	_sfx_explosion_small.stream = load("res://assets/resources/audio/explosion_small.wav")
 	_sfx_explosion_small.volume_db = -8.0
 	add_child(_sfx_explosion_small)
 
 	_sfx_explosion_big = AudioStreamPlayer.new()
-	_sfx_explosion_big.bus = "Master"
+	_sfx_explosion_big.bus = "SFX"
 	_sfx_explosion_big.stream = load("res://assets/resources/audio/explosion_big.mp3")
 	_sfx_explosion_big.volume_db = -4.0
 	add_child(_sfx_explosion_big)
 
 	# Item collection — shard pickup sound
 	_sfx_item_collect = AudioStreamPlayer.new()
-	_sfx_item_collect.bus = "Master"
+	_sfx_item_collect.bus = "SFX"
 	_sfx_item_collect.stream = load("res://assets/resources/audio/item_collect.wav")
 	_sfx_item_collect.volume_db = -10.0
 	add_child(_sfx_item_collect)

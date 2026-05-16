@@ -38,29 +38,29 @@ const SPEED_MULT: Array[float] = [1.0, 1.35, 1.8, 2.4]
 # level_index 0 is the cost to go from L0 -> L1, etc.
 const COSTS: Dictionary = {
 	"attack": [
-		{"credits": 500,   "mats": {"Copper": 10}},
-		{"credits": 2000,  "mats": {"Copper": 25, "Silver": 5}},
+		{"credits": 0,     "mats": {"Stone": 10, "Wood": 5}},
+		{"credits": 1000,  "mats": {"Copper": 15}},
 		{"credits": 8000,  "mats": {"Silver": 15, "Gold": 3}},
 		{"credits": 20000, "mats": {"Gold": 10, "Platinum": 3}},
 		{"credits": 50000, "mats": {"Platinum": 8, "Nebula Core": 1}},
 	],
 	"health": [
-		{"credits": 400,   "mats": {"Carbon Fiber": 15}},
-		{"credits": 1800,  "mats": {"Living Resin": 8, "Copper": 10}},
+		{"credits": 0,     "mats": {"Stone": 5, "Wood": 10}},
+		{"credits": 900,   "mats": {"Carbon Fiber": 10, "Copper": 5}},
 		{"credits": 7000,  "mats": {"Azure Sap": 12, "Silver": 6}},
 		{"credits": 18000, "mats": {"Primal Fruit": 5, "Gold": 8}},
 		{"credits": 45000, "mats": {"Platinum": 6, "Prismatic Alloy": 1}},
 	],
 	"luck": [
-		{"credits": 1000,  "mats": {"Neon Moss": 20}},
-		{"credits": 4000,  "mats": {"Basalt Glass": 10, "Silver": 5}},
+		{"credits": 0,     "mats": {"Wood": 15}},
+		{"credits": 2000,  "mats": {"Neon Moss": 15, "Silica Dust": 10}},
 		{"credits": 12000, "mats": {"Azure Sap": 15, "Gold": 5}},
 		{"credits": 30000, "mats": {"Aether Crystal": 3, "Platinum": 4}},
 		{"credits": 80000, "mats": {"Nebula Core": 2, "Prismatic Alloy": 1}},
 	],
 	"forge_slots": [
-		{"credits": 2500,   "mats": {"Stone": 40, "Silica Dust": 20}},
-		{"credits": 8000,   "mats": {"Copper": 30, "Basalt Glass": 15}},
+		{"credits": 0,      "mats": {"Stone": 20, "Wood": 10}},
+		{"credits": 4000,   "mats": {"Stone": 30, "Silica Dust": 15, "Copper": 5}},
 		{"credits": 20000,  "mats": {"Silver": 25, "Living Resin": 10}},
 		{"credits": 45000,  "mats": {"Gold": 15, "Platinum": 5}},
 		{"credits": 90000,  "mats": {"Platinum": 15, "Aether Crystal": 3}},
@@ -68,8 +68,8 @@ const COSTS: Dictionary = {
 		{"credits": 300000, "mats": {"Nebula Core": 3, "Prismatic Alloy": 3}},
 	],
 	"movement": [
-		{"credits": 5000,   "mats": {"Silica Dust": 30, "Copper": 15}},
-		{"credits": 25000,  "mats": {"Basalt Glass": 20, "Gold": 5}},
+		{"credits": 0,      "mats": {"Stone": 10, "Wood": 10}},
+		{"credits": 10000,  "mats": {"Silica Dust": 25, "Copper": 15}},
 		{"credits": 100000, "mats": {"Prismatic Alloy": 2, "Nebula Core": 1}},
 	],
 }

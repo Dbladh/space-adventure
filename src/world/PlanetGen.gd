@@ -19,7 +19,7 @@ var PlanetChunkScript = load("res://src/world/PlanetChunk.gd")
 var surface_streamer: Node = null
 # Resources available to mine on this planet. Set externally before chunks generate.
 # Stone and Wood are always present; extras are tier-gated by how the planet was forged.
-var planet_resources: Array[String] = ["Stone", "Wood", "Copper"]
+var planet_resources: Array[String] = ["Stone", "Wood", "Carbon Fiber", "Silica Dust"]
 # Forge-rank label (F / D / C / B / A / S / SS / ★ LEGENDARY). Set by
 # SpaceStation after spawning so chunks/props can vary visuals (e.g. only rare
 # A+ planets get glowing flora). Empty = unranked (default starter look).

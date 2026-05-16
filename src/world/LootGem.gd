@@ -124,7 +124,7 @@ func _ensure_whoosh_player() -> void:
 	if _shared_whoosh == null:
 		_shared_whoosh = load("res://assets/resources/audio/item_whoosh.wav")
 	_whoosh_player = AudioStreamPlayer3D.new()
-	_whoosh_player.bus = "Master"
+	_whoosh_player.bus = "SFX"
 	_whoosh_player.stream = _shared_whoosh
 	_whoosh_player.volume_db = -18.0
 	_whoosh_player.max_distance = 3000.0

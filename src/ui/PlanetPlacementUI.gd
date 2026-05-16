@@ -81,6 +81,13 @@ func _ready() -> void:
 	# global pause overlay — keeps the rule "one menu at a time".
 	add_to_group("PlacementUI")
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+	# Uniform menu pause: freeze the world while we're placing a planet, and
+	# suppress MobileControlsUI so its combat/pause columns don't render or
+	# intercept input over the placement plate.
+	get_tree().paused = true
+	_set_mobile_controls_modal(true)
+	tree_exiting.connect(_on_tree_exiting)
 	
 	# 1. Saturated arcade-purple background — matches Designercize canvas.
 	var bg = ColorRect.new()
@@ -88,52 +95,68 @@ func _ready() -> void:
 	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
 
-	# 2. Map Display — drawn into a CRT-green screen via _on_map_draw.
-	#    Wrapped in a beveled bezel that frames the screen.
+	# 2. Split-pane root — map on the left, header/name/buttons on the right.
+	#    Eliminates the header-overlapping-map issue and matches the
+	#    Designercize sidebar layout.
+	var split_root := HBoxContainer.new()
+	split_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	split_root.offset_left = 40
+	split_root.offset_right = -40
+	split_root.offset_top = 40
+	split_root.offset_bottom = -40
+	split_root.add_theme_constant_override("separation", 32)
+	add_child(split_root)
+
+	# 3. LEFT PANE — map bezel + CRT screen.
 	var map_bezel := PanelContainer.new()
 	map_bezel.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
-	map_bezel.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	map_bezel.offset_left = -312
-	map_bezel.offset_top = -312
-	map_bezel.offset_right = 312
-	map_bezel.offset_bottom = 312
-	add_child(map_bezel)
+	map_bezel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	map_bezel.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	split_root.add_child(map_bezel)
 
 	map_display = Control.new()
-	map_display.custom_minimum_size = Vector2(600, 600)
+	map_display.custom_minimum_size = Vector2(400, 400)
+	map_display.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	map_display.size_flags_vertical   = Control.SIZE_EXPAND_FILL
 	map_display.mouse_filter = Control.MOUSE_FILTER_STOP
 	map_display.draw.connect(_on_map_draw)
 	map_display.gui_input.connect(_on_map_input)
 	map_bezel.add_child(map_display)
 
-	# Title
+	# 4. RIGHT PANE — vertical stack: title, name row, buttons row, with
+	#    top/bottom spacers so the controls visually center.
+	var right_pane := VBoxContainer.new()
+	right_pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_pane.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	right_pane.add_theme_constant_override("separation", 24)
+	split_root.add_child(right_pane)
+
+	var top_spacer := Control.new()
+	top_spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_pane.add_child(top_spacer)
+
+	# Title — now lives inside the right pane, structurally can't overlap map.
 	var lbl = Label.new()
 	lbl.text = "SELECT PLANET ORBIT"
-	HUDStyle.style_label(lbl, HUDStyle.HUD_FONT_TITLE, HUDStyle.CRT_GREEN_BG)
+	HUDStyle.style_label(lbl, HUDStyle.HUD_FONT_TITLE, HUDStyle.CRT_GREEN_INK_LIT)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lbl.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	lbl.offset_top = 48
-	add_child(lbl)
-	# Name input row — LineEdit (auto-styled by theme as a CRT screen) +
-	# randomize button. Anchored at bottom-centre below the map.
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_pane.add_child(lbl)
+
+	# Name input row — LineEdit + RND button.
 	_name_rng.randomize()
 	var name_row := HBoxContainer.new()
-	name_row.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
-	name_row.custom_minimum_size = Vector2(540, 64)
-	name_row.offset_left = -300
-	name_row.offset_top = -200
-	name_row.offset_right = 300
-	name_row.offset_bottom = -136
+	name_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_row.add_theme_constant_override("separation", 10)
-	add_child(name_row)
+	right_pane.add_child(name_row)
 
 	name_input = LineEdit.new()
 	name_input.placeholder_text = "ENTER PLANET NAME..."
 	name_input.alignment = HORIZONTAL_ALIGNMENT_CENTER
 	HUDStyle.style_line_edit(name_input, HUDStyle.HUD_FONT_MED)
-	name_input.custom_minimum_size = Vector2(420, 64)
+	name_input.custom_minimum_size = Vector2(0, 64)
 	name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	# Initial name is also rolled from the pool so every Forge session starts
+	# Initial name is rolled from the pool so every Forge session starts
 	# with a fresh suggestion rather than always defaulting to "Nova Prime".
 	name_input.text = PLANET_NAMES[_name_rng.randi_range(0, PLANET_NAMES.size() - 1)]
 	name_row.add_child(name_input)
@@ -151,26 +174,28 @@ func _ready() -> void:
 	var hbox = HBoxContainer.new()
 	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
 	hbox.add_theme_constant_override("separation", 24)
-	hbox.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
-	hbox.offset_top = -110
-	hbox.offset_bottom = -40
-	hbox.offset_left = -320
-	hbox.offset_right = 320
-	add_child(hbox)
+	hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_pane.add_child(hbox)
 
 	var confirm_btn = Button.new()
 	confirm_btn.text = "FORGE PLANET"
 	HUDStyle.style_button(confirm_btn, HUDStyle.BTN_GREEN, HUDStyle.HUD_FONT_LRG)
-	confirm_btn.custom_minimum_size = Vector2(280, 64)
+	confirm_btn.custom_minimum_size = Vector2(0, 64)
+	confirm_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	confirm_btn.pressed.connect(_on_confirm)
 	hbox.add_child(confirm_btn)
 
 	var cancel_btn = Button.new()
 	cancel_btn.text = "CANCEL"
 	HUDStyle.style_button(cancel_btn, HUDStyle.BTN_RED, HUDStyle.HUD_FONT_LRG)
-	cancel_btn.custom_minimum_size = Vector2(220, 64)
+	cancel_btn.custom_minimum_size = Vector2(0, 64)
+	cancel_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	cancel_btn.pressed.connect(func(): placement_canceled.emit(); queue_free())
 	hbox.add_child(cancel_btn)
+
+	var bottom_spacer := Control.new()
+	bottom_spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_pane.add_child(bottom_spacer)
 
 	# Grab focus on Confirm so a gamepad user can press A immediately
 	# after picking a spot, and B / START / Esc to back out without
@@ -244,13 +269,12 @@ func _on_map_draw() -> void:
 	var map_cen = map_display.size / 2.0
 	var map_r = map_display.size.x / 2.0
 
-	# CRT-green screen background — fill the whole map area then draw the
-	# rest of the radar in dark "CRT ink" so it reads as a vintage tactical
-	# monitor.  Border colours are picked from HUDStyle.CRT_GREEN_BORDER /
-	# CRT_GREEN_INK so the radar feels of-a-piece with the surrounding chrome.
-	map_display.draw_rect(Rect2(Vector2.ZERO, map_display.size), HUDStyle.CRT_GREEN_BG)
+	# Dark CRT screen background — solid dark phosphor + alternating darker
+	# scanlines for that vintage tactical-monitor feel.  Grid + glyphs draw in
+	# bright phosphor ink so they read clearly against the dark base.
+	HUDStyle.draw_crt_screen(map_display, Rect2(Vector2.ZERO, map_display.size), HUDStyle.CRT_GREEN_BG_DARK)
 
-	var ink: Color = HUDStyle.CRT_GREEN_INK
+	var ink: Color = HUDStyle.CRT_GREEN_INK_LIT
 	var faint: Color = Color(ink.r, ink.g, ink.b, 0.35)
 
 	# Grid rings + crosshair drawn in dark green ink on the bright CRT.
@@ -310,14 +334,29 @@ func _on_map_draw() -> void:
 
 func _world_to_map(w_pos: Vector3) -> Vector2:
 	var rel = Vector2(w_pos.x, w_pos.z)
-	var scaled = rel / max_range * 300.0
-	return scaled
+	# Half-extent of the (now dynamic) map_display — keeps placement math
+	# consistent regardless of the panel's current size.
+	var half: float = map_display.size.x * 0.5
+	return rel / max_range * half
 
 func _map_to_world(ui_pos: Vector2) -> Vector3:
-	var centered = ui_pos - Vector2(300, 300)
-	var w_x = (centered.x / 300.0) * max_range
-	var w_z = (centered.y / 300.0) * max_range
+	var half: Vector2 = map_display.size * 0.5
+	var centered = ui_pos - half
+	var w_x = (centered.x / half.x) * max_range
+	var w_z = (centered.y / half.y) * max_range
 	return Vector3(w_x, 0.0, w_z)
 
 func _process(_delta: float) -> void:
 	map_display.queue_redraw()
+
+# Safety net: unpause + restore MobileControlsUI no matter how this UI exits
+# (queue_free, scene-change, parent-removed).  Beats sprinkling unpause across
+# every code path.
+func _on_tree_exiting() -> void:
+	get_tree().paused = false
+	_set_mobile_controls_modal(false)
+
+func _set_mobile_controls_modal(open: bool) -> void:
+	var mc = get_tree().get_first_node_in_group("mobile_controls_ui")
+	if mc and mc.has_method("set_modal_ui_open"):
+		mc.set_modal_ui_open(open)

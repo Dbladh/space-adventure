@@ -1,6 +1,7 @@
 extends Node3D
 
 const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
+const HUDStyle = preload("res://src/ui/HUDStyle.gd")
 
 # SpaceStation.gd
 # Dockable station. Fly within DOCK_RANGE for the UI to auto-open.
@@ -40,6 +41,19 @@ var _ring_node: Node3D = null                # rotated each frame
 var _player: Node3D = null
 var _ui_layer: CanvasLayer = null
 var _panel: Control = null
+# Modal redesign — _panel is now a full-rect Control hosting a dim ColorRect
+# behind a centered PanelContainer "plate".  The existing ScrollContainer +
+# VBoxContainer move inside the plate so the scroll is contained, the close
+# X stays fixed top-right, and a dimmed backdrop signals modality.
+var _modal_dim: ColorRect = null
+var _modal_plate: PanelContainer = null
+var _close_btn: Button = null
+# Safe-area insets (notch / Dynamic Island / home-indicator).  Mirrors the
+# pattern in MobileControlsUI._calculate_safe_area().
+var _safe_left: float   = 0.0
+var _safe_right: float  = 0.0
+var _safe_top: float    = 0.0
+var _safe_bottom: float = 0.0
 var _inv_label: Label = null
 var _creds_label: Label = null
 var _forge_slots: Array = []          # Array[OptionButton] (legacy, unused)
@@ -47,6 +61,7 @@ var _forge_selected: Array[String] = []  # Up to 3 chosen resource names
 var _forge_card_grid: GridContainer = null
 var _forge_slot_labels: Array = []    # 3 Label nodes showing chosen slots
 var _forge_btn: Button = null
+var _forge_cost_label: Label = null
 var _forge_status: Label = null
 var _planets_container: VBoxContainer = null
 var _worlds_header: Label = null
@@ -62,7 +77,6 @@ signal planet_forged(count: int)
 var _market_scroll: ScrollContainer = null
 var _market_rows_vbox: VBoxContainer = null
 var _market_status: Label = null
-const BUY_MARKUP: float = 1.8
 
 # Tab references
 var _tab_btns: Array = []  # [market_btn, forge_btn, upgrades_btn]
@@ -79,6 +93,16 @@ var _last_mouse_pos: Vector2 = Vector2.ZERO
 
 # Each entry: { node: Node3D, r1: String, r2: String, r3: String }
 static var _active_planets: Array[Dictionary] = []
+
+# Lifetime forge count — used to grant the first forge for free as an on-ramp
+# and to scale subsequent forge credit costs. Persisted via SaveManager.
+static var _total_forges: int = 0
+
+static func get_total_forges() -> int:
+	return _total_forges
+
+static func set_total_forges(n: int) -> void:
+	_total_forges = max(0, int(n))
 
 class ForgeSlot extends PanelContainer:
 	var slot_index: int = 0
@@ -269,8 +293,7 @@ func _build_ui() -> void:
 
 	_prompt_btn = Button.new()
 	_prompt_btn.text = "DOCK STATION [E]"
-	_prompt_btn.add_theme_font_size_override("font_size", 24)
-	_prompt_btn.add_theme_color_override("font_color", Color(0.3, 1.0, 0.5))
+	HUDStyle.style_button(_prompt_btn, HUDStyle.BTN_GREEN, 24)
 	_prompt_btn.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
 	_prompt_btn.offset_top = -140
 	_prompt_btn.offset_bottom = -90
@@ -280,36 +303,89 @@ func _build_ui() -> void:
 	_prompt_btn.hide()
 	_ui_layer.add_child(_prompt_btn)
 
-	# Use a ScrollContainer so the panel adapts to variable planet list height
-	_market_scroll = ScrollContainer.new()
-	_market_scroll.process_mode = PROCESS_MODE_ALWAYS
-	_market_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
-	if _is_mobile_ui:
-		_market_scroll.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		_market_scroll.custom_minimum_size = Vector2.ZERO
-		_market_scroll.offset_left    =  _PANEL_MARGIN_MOBILE
-		_market_scroll.offset_right   = -_PANEL_MARGIN_MOBILE
-		_market_scroll.offset_top     =  _PANEL_MARGIN_MOBILE
-		_market_scroll.offset_bottom  = -_PANEL_MARGIN_MOBILE
-	else:
-		_market_scroll.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-		_market_scroll.custom_minimum_size = Vector2(560, 680)
-		_market_scroll.offset_top    = -340
-		_market_scroll.offset_left   = -280
-		_market_scroll.offset_bottom =  340
-		_market_scroll.offset_right  =  280
-	_market_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_ui_layer.add_child(_market_scroll)
-	_panel = _market_scroll
+	# ── MODAL ROOT ─────────────────────────────────────────────────────────
+	# Full-rect Control with STOP filter — owns input and signals modality.
+	_calculate_safe_area()
+	var modal_root := Control.new()
+	modal_root.process_mode = PROCESS_MODE_ALWAYS
+	modal_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	modal_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	_ui_layer.add_child(modal_root)
+	_panel = modal_root
 
+	# ── DIM BACKDROP ───────────────────────────────────────────────────────
+	_modal_dim = ColorRect.new()
+	_modal_dim.color = Color(HUDStyle.BG_DEEP_PURPLE.r, HUDStyle.BG_DEEP_PURPLE.g, HUDStyle.BG_DEEP_PURPLE.b, 0.72)
+	_modal_dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_modal_dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	modal_root.add_child(_modal_dim)
+
+	# ── PLATE ──────────────────────────────────────────────────────────────
+	# Always full-rect minus margin so the modal can never exceed the viewport.
+	# Mobile: pulls in by safe-area + 20px chrome.
+	# Desktop: generous 80px border so the dim backdrop frames the modal.
+	_modal_plate = PanelContainer.new()
+	_modal_plate.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
+	_modal_plate.mouse_filter = Control.MOUSE_FILTER_STOP
+	_modal_plate.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	if _is_mobile_ui:
+		_modal_plate.offset_left   =  _PANEL_MARGIN_MOBILE + _safe_left
+		_modal_plate.offset_right  = -_PANEL_MARGIN_MOBILE - _safe_right
+		_modal_plate.offset_top    =  _PANEL_MARGIN_MOBILE + _safe_top
+		_modal_plate.offset_bottom = -_PANEL_MARGIN_MOBILE - _safe_bottom
+	else:
+		var dm := 80  # desktop margin
+		_modal_plate.offset_left   =  dm
+		_modal_plate.offset_right  = -dm
+		_modal_plate.offset_top    =  dm
+		_modal_plate.offset_bottom = -dm
+	modal_root.add_child(_modal_plate)
+
+	# ── PLATE INNER ────────────────────────────────────────────────────────
+	# PanelContainer hosts one child; this Control wraps both the sticky-
+	# header VBox (layout) and the corner-anchored close X (free-positioned).
+	var plate_inner := Control.new()
+	plate_inner.mouse_filter = Control.MOUSE_FILTER_PASS
+	plate_inner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	plate_inner.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	_modal_plate.add_child(plate_inner)
+
+	# ── OUTER VBOX (sticky header + scroll) ────────────────────────────────
+	# Fills plate_inner.  Title / credits / inventory / tabs go here and stay
+	# pinned; the ScrollContainer below takes the remaining height so only
+	# per-tab content scrolls.
+	#
+	# IMPORTANT: vbox is added BEFORE _close_btn so the close X renders on
+	# top (siblings render in document order).  Otherwise the vbox's full-
+	# rect anchors would cover the close button and swallow its taps.
 	var vbox := VBoxContainer.new()
 	vbox.process_mode = PROCESS_MODE_ALWAYS
 	vbox.mouse_filter = Control.MOUSE_FILTER_PASS
-	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_theme_constant_override("separation", 10)
-	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_theme_constant_override("separation", 10)
-	_market_scroll.add_child(vbox)
+	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	# Inner padding so content doesn't kiss the bezel / close X.
+	var pad_top: int = 12 if _is_mobile_ui else 12
+	var pad_side: int = 16 if _is_mobile_ui else 24
+	vbox.offset_left   =  pad_side
+	vbox.offset_right  = -pad_side
+	vbox.offset_top    =  pad_top
+	vbox.offset_bottom = -pad_top
+	plate_inner.add_child(vbox)
+
+	# ── CLOSE X (fixed top-right of plate, on top of vbox) ─────────────────
+	# Added LAST so it renders above vbox and receives taps cleanly.
+	_close_btn = Button.new()
+	_close_btn.text = "✕"
+	HUDStyle.style_button(_close_btn, HUDStyle.BTN_RED, 28 if _is_mobile_ui else 22)
+	var x_size: int = 52 if _is_mobile_ui else 40
+	_close_btn.custom_minimum_size = Vector2(x_size, x_size)
+	_close_btn.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_close_btn.offset_left   = -(x_size + 6)
+	_close_btn.offset_top    = 6
+	_close_btn.offset_right  = -6
+	_close_btn.offset_bottom = 6 + x_size
+	_close_btn.pressed.connect(_hide_ui)
+	plate_inner.add_child(_close_btn)
 
 	# ---- Title ----
 	var title := Label.new()
@@ -349,20 +425,41 @@ func _build_ui() -> void:
 		var tab_lbl: String = ["  MARKET  ", "  FORGE  ", "  UPGRADES  "][tab_i]
 		var tb: Button = Button.new()
 		tb.text = tab_lbl
-		tb.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 20)
+		# toggle_mode + style_button gives us recessed-when-pressed behavior;
+		# _switch_tab() swaps the active tab's stylebox to BTN_PINK and toggles
+		# button_pressed so it renders pink + visually pushed in.
+		tb.toggle_mode = true
 		tb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		if _is_mobile_ui:
 			tb.custom_minimum_size = Vector2(0, _TAB_H_MOBILE)
+		_apply_tab_color(tb, false)  # initial: all inactive (blue, raised)
 		var captured_i: int = tab_i
 		tb.pressed.connect(func() -> void: _switch_tab(captured_i))
 		tab_row.add_child(tb)
 		_tab_btns.append(tb)
 
+	# ── SCROLL CONTAINER (takes remaining height under the sticky header) ──
+	# Only per-tab content scrolls; title/credits/inventory/tabs stay pinned.
+	_market_scroll = ScrollContainer.new()
+	_market_scroll.process_mode = PROCESS_MODE_ALWAYS
+	_market_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	_market_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_market_scroll.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	_market_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vbox.add_child(_market_scroll)
+
+	var inner_vbox := VBoxContainer.new()
+	inner_vbox.process_mode = PROCESS_MODE_ALWAYS
+	inner_vbox.mouse_filter = Control.MOUSE_FILTER_PASS
+	inner_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inner_vbox.add_theme_constant_override("separation", 10)
+	_market_scroll.add_child(inner_vbox)
+
 	# ======================== MARKET TAB ========================
 	_tab_market_panel = VBoxContainer.new()
 	_tab_market_panel.add_theme_constant_override("separation", 8)
 	_tab_market_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_child(_tab_market_panel)
+	inner_vbox.add_child(_tab_market_panel)
 
 	_market_status = Label.new()
 	_market_status.text = ""
@@ -405,8 +502,7 @@ func _build_ui() -> void:
 
 	var sell_all_btn := Button.new()
 	sell_all_btn.text = "Sell ALL Resources"
-	sell_all_btn.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 20)
-	sell_all_btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+	HUDStyle.style_button(sell_all_btn, HUDStyle.BTN_GREEN, 22 if _is_mobile_ui else 20)
 	if _is_mobile_ui:
 		sell_all_btn.custom_minimum_size = Vector2(0, _BIGBTN_H_MOBILE)
 	sell_all_btn.pressed.connect(_on_sell_all)
@@ -416,7 +512,7 @@ func _build_ui() -> void:
 	_tab_forge_panel = VBoxContainer.new()
 	_tab_forge_panel.add_theme_constant_override("separation", 8)
 	_tab_forge_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_child(_tab_forge_panel)
+	inner_vbox.add_child(_tab_forge_panel)
 
 	var forge_title := Label.new()
 	forge_title.text = "— FORGE PLANET —\n" + ("Tap 3 resources to fill the slots" if _is_mobile_ui else "Drag 3 resources into the slots")
@@ -491,10 +587,17 @@ func _build_ui() -> void:
 	_forge_card_grid.add_theme_constant_override("v_separation", 10 if _is_mobile_ui else 8)
 	_tab_forge_panel.add_child(_forge_card_grid)
 
+	_forge_cost_label = Label.new()
+	_forge_cost_label.text = ""
+	_forge_cost_label.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 18)
+	_forge_cost_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.6))
+	_forge_cost_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_forge_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tab_forge_panel.add_child(_forge_cost_label)
+
 	_forge_btn = Button.new()
 	_forge_btn.text = "FORGE PLANET"
-	_forge_btn.add_theme_font_size_override("font_size", 28 if _is_mobile_ui else 26)
-	_forge_btn.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
+	HUDStyle.style_button(_forge_btn, HUDStyle.BTN_PINK, 28 if _is_mobile_ui else 26)
 	if _is_mobile_ui:
 		_forge_btn.custom_minimum_size = Vector2(0, _FORGE_BTN_H_MOBILE)
 	_forge_btn.pressed.connect(_on_forge_planet)
@@ -518,16 +621,16 @@ func _build_ui() -> void:
 	_tab_upgrades_panel = VBoxContainer.new()
 	_tab_upgrades_panel.add_theme_constant_override("separation", 8)
 	_tab_upgrades_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vbox.add_child(_tab_upgrades_panel)
+	inner_vbox.add_child(_tab_upgrades_panel)
 	_build_upgrades_panel(_tab_upgrades_panel)
 
 	var close_btn := Button.new()
 	close_btn.text = "Close  [fly away]"
-	close_btn.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 18)
+	HUDStyle.style_button(close_btn, HUDStyle.BTN_RED, 22 if _is_mobile_ui else 18)
 	if _is_mobile_ui:
 		close_btn.custom_minimum_size = Vector2(0, _BIGBTN_H_MOBILE)
 	close_btn.pressed.connect(_hide_ui)
-	vbox.add_child(close_btn)
+	inner_vbox.add_child(close_btn)
 
 	# Wire signals
 	if Engine.has_meta("EconomyManager"):
@@ -725,9 +828,30 @@ func _update_slot_display() -> void:
 		else:
 			lbl.text = "[ SLOT " + str(i + 1) + " ]"
 			lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
-	# Enable forge button only when all 3 slots filled
+
+	var slots_full := _forge_selected.size() >= 3
+	var credit_cost := 0
+	var can_afford_credits := true
+	if slots_full:
+		credit_cost = 0 if _total_forges == 0 else PlanetSeedKitchen.forge_credit_cost(
+			_forge_selected[0], _forge_selected[1], _forge_selected[2])
+		if credit_cost > 0 and Engine.has_meta("EconomyManager"):
+			can_afford_credits = int(Engine.get_meta("EconomyManager").credits) >= credit_cost
+
+	if _forge_cost_label:
+		if not slots_full:
+			_forge_cost_label.text = ""
+		elif _total_forges == 0:
+			_forge_cost_label.text = "FREE — FIRST FORGE"
+			_forge_cost_label.add_theme_color_override("font_color", Color(0.4, 1.0, 0.6))
+		else:
+			_forge_cost_label.text = "FORGE COST: $" + str(credit_cost)
+			var ok_col := Color(0.85, 0.85, 0.6) if can_afford_credits else Color(1.0, 0.5, 0.3)
+			_forge_cost_label.add_theme_color_override("font_color", ok_col)
+
+	# Enable forge button only when all 3 slots filled AND credits sufficient
 	if _forge_btn:
-		_forge_btn.disabled = _forge_selected.size() < 3
+		_forge_btn.disabled = not slots_full or not can_afford_credits
 
 func _refresh_planets_ui() -> void:
 	for child in _planets_container.get_children():
@@ -812,8 +936,7 @@ func _refresh_planets_ui() -> void:
 
 		var dis_btn := Button.new()
 		dis_btn.text = "Dismantle"
-		dis_btn.add_theme_font_size_override("font_size", 20 if _is_mobile_ui else 17)
-		dis_btn.add_theme_color_override("font_color", Color(1.0, 0.4, 0.4))
+		HUDStyle.style_button(dis_btn, HUDStyle.BTN_RED, 20 if _is_mobile_ui else 17)
 		dis_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		dis_btn.custom_minimum_size = Vector2(160, _BTN_H_MOBILE) if _is_mobile_ui else Vector2(110, 38)
 		# Capture entry by value with a local copy
@@ -894,10 +1017,29 @@ func _on_dock_pressed() -> void:
 	_prompt_btn.hide()
 	_show_ui()
 
+# Compute hardware safe-area insets (notch, Dynamic Island, home indicator).
+# Mirrors the pattern in MobileControlsUI._calculate_safe_area().
+func _calculate_safe_area() -> void:
+	var safe_rect = DisplayServer.screen_get_usable_rect()
+	var screen_sz = Vector2(DisplayServer.screen_get_size())
+	_safe_left   = max(0.0, float(safe_rect.position.x))
+	_safe_top    = max(0.0, float(safe_rect.position.y))
+	_safe_right  = max(0.0, screen_sz.x - float(safe_rect.position.x + safe_rect.size.x))
+	_safe_bottom = max(0.0, screen_sz.y - float(safe_rect.position.y + safe_rect.size.y))
+
+# Suppress MobileControlsUI input + drawing while the modal is up so its
+# combat / pause-mode columns can't intercept swipes meant for the
+# ScrollContainer or render over the modal plate.
+func _notify_mobile_controls(open: bool) -> void:
+	var mc = get_tree().get_first_node_in_group("mobile_controls_ui")
+	if mc and mc.has_method("set_modal_ui_open"):
+		mc.set_modal_ui_open(open)
+
 var _hud_was_visible: Array = []   # snapshot of HUD nodes hidden by _show_ui
 
 func _show_ui() -> void:
 	_ui_visible = true
+	_notify_mobile_controls(true)
 	_panel.show()
 	_refresh_inv_display()
 	_rebuild_market_rows()
@@ -935,6 +1077,7 @@ func _show_ui() -> void:
 
 func _hide_ui() -> void:
 	_ui_visible = false
+	_notify_mobile_controls(false)
 	_panel.hide()
 	if _in_range:
 		_prompt_btn.show()
@@ -959,15 +1102,10 @@ func _switch_tab(idx: int) -> void:
 	if _tab_upgrades_panel: _tab_upgrades_panel.visible = (idx == 2)
 	if idx == 2:
 		_rebuild_all_upgrade_rows()
-	# Style active tab btn brighter, inactive dimmed
+	# Active tab: pink + recessed.  Inactive tabs: blue + raised.  Mirrors the
+	# EASY-button "selected = pushed-in pink" look from the Designercize ref.
 	for i in _tab_btns.size():
-		var btn: Button = _tab_btns[i]
-		if i == idx:
-			btn.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
-			btn.add_theme_stylebox_override("normal", _tab_active_style())
-		else:
-			btn.add_theme_color_override("font_color", Color(0.5, 0.5, 0.55))
-			btn.remove_theme_stylebox_override("normal")
+		_apply_tab_color(_tab_btns[i], i == idx)
 	# Gamepad: move focus into the newly-visible tab so the next A press
 	# acts on real content rather than re-firing the tab button.
 	# Only re-grab if focus is currently on a tab button (i.e. the user
@@ -999,15 +1137,11 @@ func _find_first_focusable(n: Node) -> Control:
 		if found: return found
 	return null
 
-func _tab_active_style() -> StyleBoxFlat:
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.12, 0.14, 0.25)
-	sb.border_color = Color(0.4, 0.8, 1.0)
-	sb.set_border_width_all(2)
-	sb.set_corner_radius_all(4)
-	sb.content_margin_left = 8; sb.content_margin_right = 8
-	sb.content_margin_top = 6;  sb.content_margin_bottom = 6
-	return sb
+func _apply_tab_color(btn: Button, active: bool) -> void:
+	var fs: int = 22 if _is_mobile_ui else 20
+	var base_col: Color = HUDStyle.BTN_PINK if active else HUDStyle.BTN_BLUE
+	HUDStyle.style_button(btn, base_col, fs)
+	btn.button_pressed = active
 
 func _handle_gamepad_cursor(delta: float) -> void:
 	# Right stick scrolls the menu — no warp_mouse (that breaks hover detection)
@@ -1066,7 +1200,7 @@ func _on_buy_one(resource_type: String) -> void:
 	if not Engine.has_meta("InventoryManager") or not Engine.has_meta("EconomyManager"): return
 	var inv = Engine.get_meta("InventoryManager")
 	var econ = Engine.get_meta("EconomyManager")
-	var buy_price: int = int(ResourceRegistry.get_value(resource_type) * BUY_MARKUP)
+	var buy_price: int = ResourceRegistry.get_buy_price(resource_type)
 	if econ.credits < buy_price:
 		_set_market_status("Need $" + str(buy_price) + " to buy " + resource_type, Color(1.0, 0.5, 0.3))
 		return
@@ -1092,7 +1226,7 @@ func _rebuild_market_rows() -> void:
 		var tier: int = ResourceRegistry.get_tier(r)
 		var rarity_col: Color = _tier_color(tier)
 		var sell_val: int = ResourceRegistry.get_value(r)
-		var buy_price: int = int(sell_val * BUY_MARKUP)
+		var buy_price: int = ResourceRegistry.get_buy_price(r)
 		var held: int = inv_ref.get_amount(r) if inv_ref else 0
 		var credits_val: int = econ_ref.credits if econ_ref else 0
 
@@ -1142,8 +1276,7 @@ func _rebuild_market_rows() -> void:
 		# ── Sell button ───────────────────────────────────────────────
 		var sell_btn: Button = Button.new()
 		sell_btn.text = "$" + str(sell_val)
-		sell_btn.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 13)
-		sell_btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
+		HUDStyle.style_button(sell_btn, HUDStyle.BTN_GREEN, 18 if _is_mobile_ui else 13)
 		if _is_mobile_ui:
 			sell_btn.custom_minimum_size = Vector2(_BTN_MIN_W_MOBILE, _BTN_H_MOBILE)
 			sell_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1157,8 +1290,7 @@ func _rebuild_market_rows() -> void:
 		# ── Buy button ────────────────────────────────────────────────
 		var buy_btn: Button = Button.new()
 		buy_btn.text = "$" + str(buy_price)
-		buy_btn.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 13)
-		buy_btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
+		HUDStyle.style_button(buy_btn, HUDStyle.BTN_YELLOW, 18 if _is_mobile_ui else 13)
 		if _is_mobile_ui:
 			buy_btn.custom_minimum_size = Vector2(_BTN_MIN_W_MOBILE, _BTN_H_MOBILE)
 			buy_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1201,6 +1333,15 @@ func _on_forge_planet() -> void:
 			_set_status("Need: " + _format_cost(cost) + "\nNot enough resources.", Color(1.0, 0.5, 0.3))
 			return
 
+	# Credit cost: first forge in this save is free, subsequent forges scale
+	# with the tiers of the chosen minerals.
+	var credit_cost: int = 0 if _total_forges == 0 else PlanetSeedKitchen.forge_credit_cost(r1, r2, r3)
+	var econ_ref = Engine.get_meta("EconomyManager") if Engine.has_meta("EconomyManager") else null
+	if credit_cost > 0 and (econ_ref == null or int(econ_ref.credits) < credit_cost):
+		var have: int = int(econ_ref.credits) if econ_ref else 0
+		_set_status("Need $" + str(credit_cost) + " to forge\n(have $" + str(have) + ")", Color(1.0, 0.5, 0.3))
+		return
+
 	# Launch Placement UI
 	var p_ui = load("res://src/ui/PlanetPlacementUI.gd").new()
 	_ui_layer.add_child(p_ui)
@@ -1215,9 +1356,13 @@ func _on_forge_planet() -> void:
 		_cinematic_active = true
 		_prompt_btn.hide()
 
-		# 1. Consume resources
+		# 1. Consume resources + credits
 		for res in cost:
 			inv.consume(res, cost[res])
+		if credit_cost > 0 and econ_ref != null:
+			econ_ref.credits = int(econ_ref.credits) - credit_cost
+			econ_ref.emit_signal("currency_changed", econ_ref.credits)
+		_total_forges += 1
 
 		# 2. Spawn planet immediately (it will start generating in background)
 		# Rank + resources are computed FIRST and passed into _spawn_planet_node
@@ -1636,8 +1781,7 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 
 		var btn := Button.new()
 		btn.text = "UPGRADE"
-		btn.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 18)
-		btn.add_theme_color_override("font_color", Color(0.4, 1.0, 0.55) if affordable else Color(0.55, 0.55, 0.55))
+		HUDStyle.style_button(btn, HUDStyle.BTN_GREEN, 22 if _is_mobile_ui else 18)
 		btn.disabled = not affordable
 		btn.custom_minimum_size = Vector2(0, _UPGRADE_BTN_H_MOBILE if _is_mobile_ui else 38)
 		var captured_track: String = track

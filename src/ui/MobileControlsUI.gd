@@ -57,6 +57,18 @@ var _safe_right: float = 0.0
 var _safe_top: float = 0.0
 var _safe_bottom: float = 0.0
 
+# ---- MODAL SUPPRESSION ----
+# Set true by any full-screen menu (station, planet placement, galaxy map) so
+# this overlay stops swallowing swipes and stops drawing its play / pause
+# columns over the modal plate.  Toggled via the "mobile_controls_ui" group.
+var modal_ui_open: bool = false
+
+func set_modal_ui_open(open: bool) -> void:
+	modal_ui_open = open
+	# Drop mouse filter so swipes pass through to the modal's ScrollContainer.
+	mouse_filter = Control.MOUSE_FILTER_IGNORE if open else Control.MOUSE_FILTER_STOP
+	queue_redraw()
+
 # ---- THROTTLE ----
 var _throttle_bar_x: float = 144.0
 const _THROTTLE_BAR_H_RATIO         := 0.40
@@ -139,6 +151,7 @@ var _last_viewport_size: Vector2 = Vector2.ZERO
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS   # keep drawing while tree is paused
+	add_to_group("mobile_controls_ui")        # so menus can call set_modal_ui_open
 	self.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	# Slight global transparency so the chrome doesn't fully block the game
@@ -256,6 +269,7 @@ func _process(delta: float) -> void:
 # =====================================================================
 
 func _draw() -> void:
+	if modal_ui_open: return  # menu plate sits above us; don't render any controls
 	var v_size = get_viewport_rect().size
 	var font   = HUDStyle.PIXEL_FONT
 	var sx     = v_size.x
@@ -322,50 +336,10 @@ func _draw() -> void:
 	# alt readout can come back later as a smaller chip if needed.
 
 	if paused:
-		# ============================================================
-		#  PAUSE MENU (right side, replaces combat cluster)
-		# ============================================================
-		# Settings panel background — beveled deep-navy plate framing the
-		# RESUME / GYRO / SENS column.
-		var pm_pad  = 36.0 + _safe_bottom
-		var pm_col_x = sx - pm_pad - _safe_right
-		var pm_base  = sy - pm_pad
-		var pm_w     = 220.0
-		var pm_top   = _rect_pdbg.position.y - 16.0
-		var pm_bot   = pm_base + 16.0
-		var pm_panel = Rect2(pm_col_x - pm_w - 14, pm_top, pm_w + 28, pm_bot - pm_top)
-		HUDStyle.draw_beveled_rect(self, pm_panel, HUDStyle.BG_DEEP_NAVY, false)
-
-		# SETTINGS label inside panel
-		draw_string(font, Vector2(pm_col_x - pm_w, pm_top + 14), "SETTINGS",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_TEAL)
-
-		# GYRO toggle — toggle_mode style: when ON, render permanently
-		# recessed so it matches the EASY-style selected look.  Active fill
-		# is teal; inactive fill is muted grey.
-		var g_lbl = "GYRO ON" if not gyro_paused else "GYRO OFF"
-		var g_fill: Color = C_GYRO_ON if not gyro_paused else C_GYRO_OFF
-		_draw_space_button(_rect_pgyro, g_lbl, g_fill, g_fill, not gyro_paused, 13)
-
-		# SENSITIVITY cycle — momentary press feedback, not a persistent toggle
-		_draw_space_button(_rect_psens, "SENS %s" % SENS_LABELS[sens_idx],
-			C_TEAL, C_TEAL, _psens_touch != -1, 13)
-
-		# DEADZONE cycle (gyro tilt that does nothing)
-		_draw_space_button(_rect_pdead, "DEAD: %s" % DEAD_LABELS[dead_idx],
-			C_BG, C_TEAL, _pdead_touch != -1, 16)
-
-		# GYRO DEBUG toggle — when ON, render recessed (matches GYRO toggle
-		# style).  Toggles the live telemetry overlay used to diagnose
-		# device-side gyro behaviour without needing Xcode console access.
-		var dbg_lbl = "DBG ON" if _gyro_dbg_visible else "DBG OFF"
-		var dbg_fill: Color = C_GYRO_ON if _gyro_dbg_visible else C_GYRO_OFF
-		_draw_space_button(_rect_pdbg, dbg_lbl, dbg_fill, dbg_fill, _gyro_dbg_visible, 13)
-
-		# RESUME button (large green) — always raised, recesses while held.
-		_draw_space_button(_rect_resume, "RESUME",
-			C_RESUME, C_RESUME, _resume_touch != -1, 18)
-
+		# Pause-mode now owned entirely by PauseMenuUI (centered modal).
+		# MobileControlsUI stops rendering everything except the corner
+		# RECENTER + PAUSE/RESUME toggle button (drawn above).
+		pass
 	else:
 		# ============================================================
 		#  PLAY MODE — combat buttons + roll buttons
@@ -477,6 +451,7 @@ func _format_alt(alt: float) -> String:
 
 func _input(event: InputEvent) -> void:
 	if not visible: return
+	if modal_ui_open: return   # any open menu owns input; don't fight its ScrollContainer
 	if event is InputEventScreenTouch or event is InputEventMouseButton:
 		var pressed := false
 		var pos     := Vector2.ZERO
@@ -515,32 +490,10 @@ func _on_press(pos: Vector2, index: int) -> void:
 		menu_pressed.emit(); get_viewport().set_input_as_handled(); return
 
 	if paused:
-		# ---- Pause menu buttons ----
-		if _rect_resume.has_point(pos) and _resume_touch == -1:
-			_resume_touch = index
-			queue_redraw(); get_viewport().set_input_as_handled(); return
-		if _rect_pgyro.has_point(pos) and _pgyro_touch == -1:
-			_pgyro_touch = index
-			gyro_paused = not gyro_paused
-			gyro_paused_changed.emit(gyro_paused)
-			queue_redraw(); get_viewport().set_input_as_handled(); return
-		if _rect_psens.has_point(pos) and _psens_touch == -1:
-			_psens_touch = index
-			sens_idx = (sens_idx + 1) % SENS_VALUES.size()
-			sensitivity_changed.emit(SENS_VALUES[sens_idx])
-			queue_redraw(); get_viewport().set_input_as_handled(); return
-		if _rect_pdead.has_point(pos) and _pdead_touch == -1:
-			_pdead_touch = index
-			dead_idx = (dead_idx + 1) % DEAD_VALUES.size()
-			deadzone_changed.emit(DEAD_VALUES[dead_idx])
-			queue_redraw(); get_viewport().set_input_as_handled(); return
-		if _rect_pdbg.has_point(pos) and _pdbg_touch == -1:
-			_pdbg_touch = index
-			_gyro_dbg_visible = not _gyro_dbg_visible
-			queue_redraw(); get_viewport().set_input_as_handled(); return
-		# Don't consume — let unmatched paused clicks fall through to the
-		# centred PauseMenuUI overlay (and StationUI when docked). Both are
-		# PROCESS_MODE_ALWAYS so they still receive input while paused.
+		# Pause-mode settings now owned entirely by PauseMenuUI's centered
+		# modal (GYRO / SENS / DEAD / volume / save / new-game).  Don't
+		# consume here — let touches fall through to the modal (which is
+		# PROCESS_MODE_ALWAYS and receives input while the tree is paused).
 		return
 
 	# ---- Combat buttons (play mode only) ----
@@ -584,20 +537,9 @@ func _on_release(index: int) -> void:
 		l_touch_idx = -1; _set_throttle_dragging(false)
 		get_viewport().set_input_as_handled(); return
 
-	# Pause menu releases
-	if index == _resume_touch:
-		_resume_touch = -1
-		# Trigger resume via the same menu_pressed signal so Main.gd calls toggle_pause()
-		menu_pressed.emit()
-		queue_redraw(); get_viewport().set_input_as_handled(); return
-	if index == _pgyro_touch:
-		_pgyro_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
-	if index == _psens_touch:
-		_psens_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
-	if index == _pdead_touch:
-		_pdead_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
-	if index == _pdbg_touch:
-		_pdbg_touch = -1; queue_redraw(); get_viewport().set_input_as_handled(); return
+	# Pause-mode releases are no longer handled here — PauseMenuUI owns the
+	# modal and its buttons.  The corner PAUSE/RESUME toggle is still handled
+	# by _rect_menu in _on_press (synchronous toggle, no release tracking).
 
 	if index == fire_touch:
 		fire_touch = -1; fire_pressed.emit(false)

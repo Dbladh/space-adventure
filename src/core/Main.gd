@@ -90,6 +90,16 @@ func _ready() -> void:
 		Engine.set_meta("SaveManager", sm)
 		sm.load_if_exists()
 
+	# SETTINGS GENESIS: ConfigFile-backed user preferences (user://settings.cfg)
+	# Loaded BEFORE the audio buses are first used so saved volume levels apply
+	# immediately.  Survives NEW GAME (which only wipes save.json).
+	var settings_script = load("res://src/core/SettingsManager.gd")
+	if settings_script:
+		var sm2 = settings_script.new()
+		sm2.name = "SettingsManager"
+		add_child(sm2)
+		Engine.set_meta("SettingsManager", sm2)
+
 	# 1. ATOMIC PURGE
 	_purge_ghost_entities()
 	
@@ -580,6 +590,14 @@ func _setup_hardened_diag_hud() -> void:
 	pause_node.resume_requested.connect(toggle_pause)
 	pause_node.rebind_requested.connect(_on_open_rebind)
 	pause_node.quit_requested.connect(func() -> void: get_tree().quit())
+	# New unified-pause signals: volume / control prefs / save / new-game.
+	pause_node.music_volume_changed.connect(_on_music_volume_changed)
+	pause_node.sfx_volume_changed.connect(_on_sfx_volume_changed)
+	pause_node.gyro_toggled.connect(_on_pause_gyro_toggled)
+	pause_node.sens_changed.connect(_on_pause_sens_changed)
+	pause_node.dead_changed.connect(_on_pause_dead_changed)
+	pause_node.save_requested.connect(_on_pause_save_requested)
+	pause_node.new_game_confirmed.connect(_on_pause_new_game_confirmed)
 	_pause_overlay = pause_node
 
 	add_child(hud_layer)
@@ -813,6 +831,52 @@ func _unhandled_input(event: InputEvent) -> void:
 			if not get_tree().paused or _pause_overlay.visible:
 				toggle_pause()
 
+# ── Unified pause-menu signal handlers ────────────────────────────────────
+
+func _on_music_volume_changed(level: int) -> void:
+	if Engine.has_meta("SettingsManager"):
+		Engine.get_meta("SettingsManager").set_music_volume(level)
+
+func _on_sfx_volume_changed(level: int) -> void:
+	if Engine.has_meta("SettingsManager"):
+		Engine.get_meta("SettingsManager").set_sfx_volume(level)
+
+func _on_pause_gyro_toggled(paused: bool) -> void:
+	# Bridge to MobileControlsUI's runtime state + persist.
+	var mc = get_tree().get_first_node_in_group("mobile_controls_ui")
+	if mc:
+		mc.gyro_paused = paused
+		mc.gyro_paused_changed.emit(paused)
+	if Engine.has_meta("SettingsManager"):
+		Engine.get_meta("SettingsManager").set_gyro_paused(paused)
+
+func _on_pause_sens_changed(idx: int) -> void:
+	var mc = get_tree().get_first_node_in_group("mobile_controls_ui")
+	if mc:
+		mc.sens_idx = clampi(idx, 0, mc.SENS_VALUES.size() - 1)
+		mc.sensitivity_changed.emit(mc.SENS_VALUES[mc.sens_idx])
+	if Engine.has_meta("SettingsManager"):
+		Engine.get_meta("SettingsManager").set_sens_idx(idx)
+
+func _on_pause_dead_changed(idx: int) -> void:
+	var mc = get_tree().get_first_node_in_group("mobile_controls_ui")
+	if mc:
+		mc.dead_idx = clampi(idx, 0, mc.DEAD_VALUES.size() - 1)
+		mc.deadzone_changed.emit(mc.DEAD_VALUES[mc.dead_idx])
+	if Engine.has_meta("SettingsManager"):
+		Engine.get_meta("SettingsManager").set_dead_idx(idx)
+
+func _on_pause_save_requested() -> void:
+	if Engine.has_meta("SaveManager"):
+		Engine.get_meta("SaveManager").save_now()
+
+func _on_pause_new_game_confirmed() -> void:
+	# Destructive: nuke save.json then reload Main so all managers re-init
+	# from a blank slate.  settings.cfg is left alone — user prefs survive.
+	DirAccess.remove_absolute("user://save.json")
+	get_tree().paused = false   # safety
+	get_tree().reload_current_scene()
+
 func _on_open_rebind() -> void:
 	# Hide the pause menu, show the rebind submenu.  Game stays paused so
 	# nothing moves while the user is rebinding.  RebindUI's `closed`
@@ -872,6 +936,12 @@ func toggle_pause() -> void:
 		_toggle_map_fullscreen_to(false)
 		map_node.hide()
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+	# Suppress MobileControlsUI input + draw while the pause modal is up so
+	# its combat cluster / throttle don't fight the centered pause plate.
+	var mc = get_tree().get_first_node_in_group("mobile_controls_ui")
+	if mc and mc.has_method("set_modal_ui_open"):
+		mc.set_modal_ui_open(get_tree().paused)
 
 func _toggle_map_fullscreen_to(active: bool) -> void:
 	if not map_node: return

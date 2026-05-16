@@ -249,7 +249,7 @@ func setup(target_pos: Vector3, player_node: Node3D, planet_node: Node3D, _ignor
 		_build_player.stream = rumble
 		_build_player.volume_db = -8.0
 		_build_player.pitch_scale = 0.7
-		_build_player.bus = "Master"
+		_build_player.bus = "SFX"
 		_build_player.process_mode = Node.PROCESS_MODE_ALWAYS
 		add_child(_build_player)
 		_build_player.play()
@@ -261,7 +261,7 @@ func setup(target_pos: Vector3, player_node: Node3D, planet_node: Node3D, _ignor
 		_impact_player.stream = boom
 		_impact_player.volume_db = 0.0
 		_impact_player.pitch_scale = 0.85  # slightly lower for weight
-		_impact_player.bus = "Master"
+		_impact_player.bus = "SFX"
 		_impact_player.process_mode = Node.PROCESS_MODE_ALWAYS
 		add_child(_impact_player)
 

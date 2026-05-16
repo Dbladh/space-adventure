@@ -229,7 +229,7 @@ func _ready() -> void:
 	# in the cloud-band crossing block so it fires on both descent and ascent.
 	_atmo_enter_sfx = AudioStreamPlayer.new()
 	_atmo_enter_sfx.stream = load("res://assets/resources/audio/ship_enter_atmosphere.mp3")
-	_atmo_enter_sfx.bus = "Master"
+	_atmo_enter_sfx.bus = "SFX"
 	add_child(_atmo_enter_sfx)
 	# ACE TITAN SYNC: Block player until Universe is Ready
 	set_physics_process(false)

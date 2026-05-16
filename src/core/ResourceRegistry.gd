@@ -48,6 +48,17 @@ static func get_tier(res_name: String) -> int:
 static func get_value(res_name: String) -> int:
 	return get_data(res_name).get("value", 5)
 
+# Per-tier buy markup applied on top of sell value. Sell prices stay low so the
+# player can't easily farm credits by re-buying; buy prices are an expensive
+# emergency safety valve for missing minerals.
+const TIER_BUY_MARKUP: Dictionary = {1: 150, 2: 100, 3: 80, 4: 100}
+
+static func get_buy_price(res_name: String) -> int:
+	var data := get_data(res_name)
+	var tier: int = int(data.get("tier", 1))
+	var value: int = int(data.get("value", 5))
+	return value * int(TIER_BUY_MARKUP.get(tier, 100))
+
 static func get_color(res_name: String) -> Color:
 	return get_data(res_name).get("color", Color.WHITE)
 

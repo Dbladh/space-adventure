@@ -17,6 +17,7 @@ signal quit_requested()
 const HUDStyle = preload("res://src/ui/HUDStyle.gd")
 
 var _resume_btn: Button = null
+var _is_mobile_ui: bool = MobilePerf.is_mobile()
 
 func _ready() -> void:
 	process_mode = PROCESS_MODE_ALWAYS
@@ -36,8 +37,10 @@ func _ready() -> void:
 	var plate := PanelContainer.new()
 	plate.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
 	plate.set_anchors_preset(Control.PRESET_CENTER)
-	plate.offset_left = -220; plate.offset_right = 220
-	plate.offset_top = -220;  plate.offset_bottom = 220
+	var plate_half_w: int = 320 if _is_mobile_ui else 220
+	var plate_half_h: int = 280 if _is_mobile_ui else 220
+	plate.offset_left = -plate_half_w; plate.offset_right = plate_half_w
+	plate.offset_top  = -plate_half_h; plate.offset_bottom = plate_half_h
 	add_child(plate)
 
 	var vb := VBoxContainer.new()
@@ -82,7 +85,7 @@ func _make_btn(text: String, color: Color = HUDStyle.BTN_BLUE) -> Button:
 	var b := Button.new()
 	b.text = text
 	HUDStyle.style_button(b, color, HUDStyle.HUD_FONT_LRG)
-	b.custom_minimum_size = Vector2(340, 56)
+	b.custom_minimum_size = Vector2(520, 76) if _is_mobile_ui else Vector2(340, 56)
 	return b
 
 

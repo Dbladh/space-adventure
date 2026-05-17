@@ -32,9 +32,10 @@ const HUD_FONT_TITLE: int = 40
 # miniatures of the forge-menu resource cards — same palette, same rarity
 # bucket per tier.  Any change here should be mirrored there.
 const TIER_COLOR_1: Color = Color(0.75, 0.75, 0.75)  # T1 common — grey
-const TIER_COLOR_2: Color = Color(0.35, 0.85, 1.00)  # T2 uncommon — cyan
-const TIER_COLOR_3: Color = Color(0.60, 0.30, 1.00)  # T3 rare — purple
-const TIER_COLOR_4: Color = Color(1.00, 0.55, 0.05)  # T4 legendary — orange-gold
+const TIER_COLOR_2: Color = Color(0.45, 0.95, 0.45)  # T2 uncommon — green
+const TIER_COLOR_3: Color = Color(0.35, 0.85, 1.00)  # T3 rare — blue/cyan
+const TIER_COLOR_4: Color = Color(0.60, 0.30, 1.00)  # T4 epic — purple
+const TIER_COLOR_5: Color = Color(1.00, 0.55, 0.05)  # T5 legendary — orange-gold
 
 # ── Arcade-chrome palette (NEW — for menus / dialogs / chrome) ────────────────
 # Borrowed from the Designercize reference but kept distinct from tier palette.
@@ -74,6 +75,7 @@ static func tier_color(tier: int) -> Color:
 		2: return TIER_COLOR_2
 		3: return TIER_COLOR_3
 		4: return TIER_COLOR_4
+		5: return TIER_COLOR_5
 		_: return TIER_COLOR_1
 
 # Flat, sharp-cornered panel with optional pixel border.  Used by chips and

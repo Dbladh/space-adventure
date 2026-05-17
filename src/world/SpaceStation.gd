@@ -1223,12 +1223,7 @@ func _refresh_inv_display() -> void:
 	_rebuild_market_rows()
 
 func _tier_color(tier: int) -> Color:
-	match tier:
-		1: return Color(0.75, 0.75, 0.75)   # Common — grey
-		2: return Color(0.35, 0.85, 1.0)    # Uncommon — blue
-		3: return Color(0.6,  0.3,  1.0)    # Rare — purple
-		4: return Color(1.0,  0.55, 0.05)   # Legendary — gold
-		_: return Color(0.55, 0.55, 0.55)
+	return HUDStyle.tier_color(tier)
 
 # Push a sampled palette colour toward the brightness/saturation the player
 # actually perceives on the rendered planet (which benefits from emission,
@@ -2701,6 +2696,9 @@ func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String,
 	planet.set("planet_rank", rank_label)
 	if not planet_res.is_empty():
 		planet.set("planet_resources", planet_res)
+	# One-shot diagnostic — confirms green/etc. are in the spawn pool. Remove
+	# once the rarity rework is bedded in.
+	print("--- FORGE: Planet [%s] rank=%s resources=%s ---" % [custom_name, rank_label, str(planet_res)])
 	planet.set("planet_profile", profile)
 	planet.add_to_group("Planet")
 	planet.add_to_group("ForgedPlanet")
@@ -2798,7 +2796,7 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 	var pip_row := HBoxContainer.new()
 	pip_row.add_theme_constant_override("separation", 3)
 	left.add_child(pip_row)
-	var pip_color: Color = _tier_color(int(ceilf(float(maxi(lvl, 1)) / float(maxi(max_lvl, 1)) * 4.0)))
+	var pip_color: Color = _tier_color(int(ceilf(float(maxi(lvl, 1)) / float(maxi(max_lvl, 1)) * 5.0)))
 	for i in range(max_lvl):
 		var pip := ColorRect.new()
 		pip.custom_minimum_size = Vector2(20, 14) if _is_mobile_ui else Vector2(16, 10)

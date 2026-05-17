@@ -27,7 +27,7 @@ const VALID_ARCHETYPES: Array[String] = [
 ]
 
 const INFLUENCES: Dictionary = {
-	# ─── Tier 1 (Common) ─────────────────────────────────────────────
+	# ─── Tier 1 (Common — Grey) ──────────────────────────────────────
 	"Stone": {
 		"archetype_votes": {"DESERT": 0.4, "ALPINE": 0.4},
 		"terrain_mult": 1.2,
@@ -74,7 +74,31 @@ const INFLUENCES: Dictionary = {
 		"hue_shift": -0.08,
 		"rank_synergy_tag": "organic",
 	},
-	# ─── Tier 2 (Uncommon) ───────────────────────────────────────────
+	# ─── Tier 2 (Uncommon — Green) ───────────────────────────────────
+	"Verdant Spore": {
+		"archetype_votes": {"LUSH": 1.5, "CANDY": 0.5},
+		"biolum_boost": 0.20,
+		"cloud_coverage_delta": 0.05,
+		"saturation_mult": 1.10,
+		"hue_shift": 0.06,
+		"rank_synergy_tag": "organic",
+	},
+	"Chloro Crystal": {
+		"archetype_votes": {"CANDY": 1.2, "LUSH": 0.8},
+		"biolum_boost": 0.30,
+		"saturation_mult": 1.25,
+		"value_delta": 0.10,
+		"glow_boost": 0.10,
+		"rank_synergy_tag": "luminous",
+	},
+	"Bloomstone": {
+		"archetype_votes": {"ALPINE": 0.8, "LUSH": 0.8},
+		"terrain_mult": 1.1,
+		"saturation_mult": 1.05,
+		"noise_octaves_delta": 1,
+		"rank_synergy_tag": "mineral",
+	},
+	# ─── Tier 3 (Rare — Blue) ────────────────────────────────────────
 	"Copper": {
 		"archetype_votes": {"DESERT": 1.0, "VOLCANIC": 1.0},
 		"hue_shift": 0.05,
@@ -119,7 +143,7 @@ const INFLUENCES: Dictionary = {
 		"glow_boost": 0.15,
 		"rank_synergy_tag": "luminous",
 	},
-	# ─── Tier 3 (Rare) ───────────────────────────────────────────────
+	# ─── Tier 4 (Epic — Purple) ──────────────────────────────────────
 	"Gold": {
 		"archetype_votes": {"DESERT": 1.5, "VOLCANIC": 1.0},
 		"hue_shift": 0.08,
@@ -147,7 +171,7 @@ const INFLUENCES: Dictionary = {
 		"glow_boost": 0.20,
 		"rank_synergy_tag": "luminous",
 	},
-	# ─── Tier 4 (Crafted-only, extreme) ──────────────────────────────
+	# ─── Tier 5 (Legendary — Orange, mineable on S/SS) ───────────────
 	"Prismatic Alloy": {
 		"archetype_votes": {
 			"LUSH": 1.0, "DESERT": 1.0, "FROZEN": 1.0, "ALPINE": 1.0,

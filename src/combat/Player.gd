@@ -1759,8 +1759,11 @@ func _process(delta: float) -> void:
 
 				for pool_idx in range(candidate_pools.size()):
 					var pool = candidate_pools[pool_idx]
-					# Wider cone for passive mineable/destructible targets
-					var pool_dot_thresh = highest_dot if pool_idx < 2 else 0.82
+					# Wider cone for passive mineable/destructible targets.
+					# 0.70 ≈ 45° half-cone — generous enough that a glance toward
+					# a mineral counts as aim, so the player doesn't have to
+					# manually lock-on to land mining bolts.
+					var pool_dot_thresh = highest_dot if pool_idx < 2 else 0.70
 					for t in pool:
 						if not is_instance_valid(t) or t.is_queued_for_deletion(): continue
 						# Use target center for aim calculation if available

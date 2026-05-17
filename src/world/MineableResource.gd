@@ -34,8 +34,16 @@ static var _destroyed_positions: Dictionary = {}
 # Cylinder shapes are quantized into 5m buckets so a planet's ~80 minerals
 # share ~15-30 unique Shape3D resources rather than one each.
 static var _shared_meshes: Dictionary = {}    # resource_type → ArrayMesh
-static var _shared_shapes: Dictionary = {}    # size_bucket(int) → CylinderShape3D
+static var _shared_shapes: Dictionary = {}    # type+bucket key → CylinderShape3D
+static var _shared_materials: Dictionary = {} # tier_key (e.g. "t4", "t5_mobile", "flora") → Material
+static var _aabb_cache: Dictionary = {}       # resource_type → AABB of its unit mesh
 const _MESH_UNIT_SIZE: float = 1.0            # unit-scale octahedron geometry
+const _PREMIUM_SHADER = preload("res://src/shaders/mineral_premium.gdshader")
+
+# Per-instance visual centre (set in _generate_low_poly_node from the mesh AABB).
+# Used by get_target_center() so lock-on / bolt homing aims at the actual model
+# instead of an old hard-coded y=size*2.5 above it.
+var _target_local_offset: Vector3 = Vector3(0, 1.0, 0)
 
 func _ready() -> void:
 	# ACE: Robustly resolve the planetary root node by traversing parents until we find the PlanetGen node
@@ -61,9 +69,10 @@ func _ready() -> void:
 	var tier := ResourceRegistry.get_tier(resource_type)
 	match tier:
 		1: health = 2.0
-		2: health = 4.0
-		3: health = 7.0
-		4: health = 12.0
+		2: health = 3.0
+		3: health = 4.5
+		4: health = 7.0
+		5: health = 12.0
 		_: health = 3.0
 	max_health = health
 	
@@ -79,9 +88,10 @@ func _ready() -> void:
 	#     _setup_tactical_hud()
 
 func _generate_low_poly_node() -> void:
-	# ACE GEOMETRY: Procedural 'Rupee' Octahedron (Anchored at Tip)
-	# ASYNC PERF: Shared cached mesh + scale-per-instance, no SurfaceTool work
-	# in the hot path on mobile.  See _get_or_build_mesh() for the unit geometry.
+	# Shared mesh per resource type + shared material per tier — no per-instance
+	# allocation, and the premium shader uses world-position to phase-shift each
+	# mineral's pulse independently. See MineralShapes for shape catalog and
+	# mineral_premium.gdshader for the T2-T5 visual treatment.
 	var rng = RandomNumberGenerator.new()
 	rng.seed = hash(str(global_position) + resource_type)
 
@@ -100,22 +110,13 @@ func _generate_low_poly_node() -> void:
 	mesh_inst.mesh = _get_or_build_mesh(resource_type)
 	mesh_inst.scale = Vector3.ONE * size
 
-	# ACE MATERIAL: per-instance so each mineral's glint phase varies independently.
-	# (Sharing the material would synchronise every mineral's pulse — distracting.)
-	var mat = StandardMaterial3D.new()
-	mat.albedo_color = col
-	mat.metallic = 1.0 if glows else 0.3
-	mat.roughness = 0.02 if glows else 0.85
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	# Non-glowing flora props read as natural surface scenery — no emission, no
-	# point light. Only "real" mineral deposits keep the gem-like glint behaviour.
-	mat.emission_enabled = glows
-	if glows:
-		mat.emission = col * 1.0
-		mat.emission_energy_multiplier = 0.25
-	mesh_inst.material_override = mat
+	# Shared per-tier material. Vertex colors in the mesh carry the resource hue.
+	var tier := ResourceRegistry.get_tier(resource_type)
+	mesh_inst.material_override = _get_or_build_material(tier, glows, _mobile_perf)
 
-	if glows and not _mobile_perf:
+	if glows and not _mobile_perf and tier >= 3:
+		# Only Blue+ minerals get a point light — keeps grey/green deposits
+		# from over-lighting the scene and capped on mobile.
 		var light = OmniLight3D.new()
 		light.light_color = col
 		light.light_energy = 0.4
@@ -125,11 +126,19 @@ func _generate_low_poly_node() -> void:
 	add_child(mesh_inst)
 	set_process(true)
 
-	# Collision shape — flora gets a larger radius for easier shooting.
+	# Build the collision shape from the actual visual mesh AABB so the hitbox
+	# wraps what the player sees. The old fixed `y = size * 3.5` cylinder was
+	# tuned to the original octahedron and sat way above the new shorter shapes
+	# — bolts would whiff and lock-on aimed at empty space.
+	var aabb := _get_or_build_aabb(resource_type)
+	var visual_center_local := aabb.position + aabb.size * 0.5    # unit space
+	var visual_half_h: float = max(aabb.size.y * 0.5, 0.5)
+	var visual_half_w: float = max(max(aabb.size.x, aabb.size.z) * 0.5, 0.5)
+	_target_local_offset = visual_center_local * size
+
 	var shape = CollisionShape3D.new()
-	shape.shape = _get_or_build_shape(size, is_flora)
-	# Center the cylinder at object midpoint — Shifted UP to ensure visibility above terrain
-	shape.position = Vector3(0, size * 3.5, 0)
+	shape.shape = _get_or_build_shape_aabb(resource_type, size, is_flora, visual_half_h, visual_half_w)
+	shape.position = Vector3(0, visual_center_local.y * size, 0)
 	add_child(shape)
 
 # -------------------------------------------------------------------
@@ -137,8 +146,10 @@ func _generate_low_poly_node() -> void:
 # -------------------------------------------------------------------
 
 func get_target_center() -> Vector3:
-	# Returns the visual centre of this resource for aiming reticle snapping.
-	return global_transform * Vector3(0, size * 2.5, 0)
+	# Returns the visual centre of this resource for aiming reticle snapping
+	# and bolt homing. Sourced from the actual mesh AABB so lock-on targets
+	# the model the player sees, not a phantom point above it.
+	return global_transform * _target_local_offset
 
 # -------------------------------------------------------------------
 #  STATIC SHARED-RESOURCE BUILDERS
@@ -150,122 +161,112 @@ func get_target_center() -> Vector3:
 static func _get_or_build_mesh(type: String) -> ArrayMesh:
 	if _shared_meshes.has(type):
 		return _shared_meshes[type]
-
-	var mesh: ArrayMesh
-	if type == "Silver" or type == "Basalt Glass":
-		mesh = _build_blocky_mesh()
-	elif type == "Wood" or type == "Carbon Fiber" or type == "Living Resin":
-		mesh = _build_flora_mesh(type)
-	else:
-		mesh = _build_octahedron_mesh(type)
+	var mesh: ArrayMesh = MineralShapes.build(type)
 	_shared_meshes[type] = mesh
 	return mesh
 
-static func _build_flora_mesh(type: String) -> ArrayMesh:
-	var col := _color_for_type(type)
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var s := _MESH_UNIT_SIZE
-	
-	if type == "Carbon Fiber":
-		# Grass clump mesh
-		for i in range(5):
-			var ang = i * TAU / 5.0
-			var v1 = Vector3(cos(ang)*s, 0, sin(ang)*s)
-			var v2 = Vector3(cos(ang+0.5)*s, 0, sin(ang+0.5)*s)
-			var v3 = Vector3(0, s * 4.0, 0)
-			st.set_normal(Vector3.UP); st.set_color(col); st.add_vertex(v1)
-			st.set_normal(Vector3.UP); st.set_color(col); st.add_vertex(v2)
-			st.set_normal(Vector3.UP); st.set_color(col); st.add_vertex(v3)
+# ── Shared per-tier materials ────────────────────────────────────────────────
+# A planet's worth of minerals share these 6 materials instead of allocating
+# one StandardMaterial3D per instance. Vertex colors in each mesh carry the
+# resource hue, so a single material can colour every Copper / Silver / Gold
+# nugget correctly.  T2–T5 use the premium shader for emission + pulse +
+# iridescence (mobile path falls back to plain StandardMaterial3D variants).
+static func _get_or_build_material(tier: int, p_glows: bool, mobile: bool) -> Material:
+	var key: String
+	if not p_glows:
+		key = "flora"
+	elif mobile and tier >= 4:
+		key = "t%d_mobile" % tier
 	else:
-		# Tree-like trunk segment
-		var sides = 6
-		for i in range(sides):
-			var a1 = i * TAU / sides; var a2 = (i + 1) * TAU / sides
-			var b1 = Vector3(cos(a1)*s, 0, sin(a1)*s)
-			var b2 = Vector3(cos(a2)*s, 0, sin(a2)*s)
-			var t1 = Vector3(cos(a1)*s*0.7, s*5.0, sin(a1)*s*0.7)
-			var t2 = Vector3(cos(a2)*s*0.7, s*5.0, sin(a2)*s*0.7)
-			st.set_normal(b1.normalized()); st.set_color(col); st.add_vertex(b1)
-			st.set_normal(b2.normalized()); st.set_color(col); st.add_vertex(b2)
-			st.set_normal(t1.normalized()); st.set_color(col); st.add_vertex(t1)
-			st.set_normal(b2.normalized()); st.set_color(col); st.add_vertex(b2)
-			st.set_normal(t2.normalized()); st.set_color(col); st.add_vertex(t2)
-			st.set_normal(t1.normalized()); st.set_color(col); st.add_vertex(t1)
-			
-	return st.commit()
+		key = "t%d" % tier
+	if _shared_materials.has(key):
+		return _shared_materials[key]
+	var mat: Material = _build_material(tier, p_glows, mobile)
+	_shared_materials[key] = mat
+	return mat
 
-static func _build_octahedron_mesh(type: String) -> ArrayMesh:
-	var col := _color_for_type(type)
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var s := _MESH_UNIT_SIZE
-	var v_top := Vector3(0, s * 5.0, 0)
-	var v_bot := Vector3(0, 0, 0)
-	var v_mid := [
-		Vector3(s, s * 2.5, 0),
-		Vector3(0, s * 2.5, s),
-		Vector3(-s, s * 2.5, 0),
-		Vector3(0, s * 2.5, -s)
-	]
-	for i in range(4):
-		var m1: Vector3 = v_mid[i]
-		var m2: Vector3 = v_mid[(i + 1) % 4]
-		var n_up := (m1 - v_top).cross(m2 - v_top).normalized()
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(v_top)
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(m1)
-		st.set_normal(n_up); st.set_color(col); st.add_vertex(m2)
-		var n_down := (m2 - v_bot).cross(m1 - v_bot).normalized()
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(v_bot)
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(m2)
-		st.set_normal(n_down); st.set_color(col); st.add_vertex(m1)
-	return st.commit()
+static func _build_material(tier: int, p_glows: bool, mobile: bool) -> Material:
+	if not p_glows:
+		# Flora / non-glow props: matte, surface-rough, vertex-coloured.
+		var fm := StandardMaterial3D.new()
+		fm.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		fm.vertex_color_use_as_albedo = true
+		fm.metallic = 0.0
+		fm.roughness = 0.85
+		fm.emission_enabled = false
+		return fm
 
-static func _build_blocky_mesh() -> ArrayMesh:
-	# Silver: squat rectangular prism with a tapered top — more "ore chunk" than crystal spike.
-	var col := _color_for_type("Silver")
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var s := _MESH_UNIT_SIZE
-	var w := s * 1.3   # base half-width
-	var h := s * 3.5   # total height
-	var tw := s * 0.8  # top half-width (slight taper)
-	# Base corners (y=0), top corners (y=h)
-	var b: Array[Vector3] = [Vector3(-w, 0, -w), Vector3(w, 0, -w), Vector3(w, 0, w), Vector3(-w, 0, w)]
-	var t: Array[Vector3] = [Vector3(-tw, h, -tw), Vector3(tw, h, -tw), Vector3(tw, h, tw), Vector3(-tw, h, tw)]
-	# 4 side faces
-	for i in range(4):
-		var j := (i + 1) % 4
-		var n: Vector3 = (b[j] - b[i]).cross(t[i] - b[i]).normalized()
-		st.set_normal(n); st.set_color(col); st.add_vertex(b[i])
-		st.set_normal(n); st.set_color(col); st.add_vertex(b[j])
-		st.set_normal(n); st.set_color(col); st.add_vertex(t[i])
-		st.set_normal(n); st.set_color(col); st.add_vertex(b[j])
-		st.set_normal(n); st.set_color(col); st.add_vertex(t[j])
-		st.set_normal(n); st.set_color(col); st.add_vertex(t[i])
-	# Top face
-	st.set_normal(Vector3.UP); st.set_color(col)
-	st.add_vertex(t[0]); st.add_vertex(t[2]); st.add_vertex(t[1])
-	st.add_vertex(t[0]); st.add_vertex(t[3]); st.add_vertex(t[2])
-	# Bottom face
-	st.set_normal(Vector3.DOWN); st.set_color(col)
-	st.add_vertex(b[0]); st.add_vertex(b[1]); st.add_vertex(b[2])
-	st.add_vertex(b[0]); st.add_vertex(b[2]); st.add_vertex(b[3])
-	return st.commit()
+	# Tier 1: plain gem material, minimal emission. No shader cost.
+	if tier == 1:
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		m.vertex_color_use_as_albedo = true
+		m.metallic = 0.3
+		m.roughness = 0.55
+		m.emission_enabled = false
+		return m
 
-static func _color_for_type(type: String) -> Color:
-	return ResourceRegistry.get_color(type)
+	# Mobile fallback for T4/T5: stronger emission via StandardMaterial3D,
+	# no shader — keeps the GPU budget tight on Apple/Android tiles.
+	if mobile and tier >= 4:
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		m.vertex_color_use_as_albedo = true
+		m.metallic = 0.85
+		m.roughness = 0.18
+		m.emission_enabled = true
+		# Emission picked up from vertex color via the special operator-mul.
+		m.emission = Color(1, 1, 1, 1)
+		m.emission_energy_multiplier = (0.55 if tier == 4 else 0.85)
+		return m
+
+	# Tier 2-5 on desktop: premium shader with tier-tuned uniforms.
+	var sm := ShaderMaterial.new()
+	sm.shader = _PREMIUM_SHADER
+	match tier:
+		2:
+			sm.set_shader_parameter("emission_strength", 0.12)
+			sm.set_shader_parameter("pulse_amount", 0.05)
+			sm.set_shader_parameter("iridescence", 0.0)
+			sm.set_shader_parameter("sparkle_amount", 0.0)
+			sm.set_shader_parameter("metallic_amount", 0.35)
+			sm.set_shader_parameter("roughness_amount", 0.40)
+		3:
+			sm.set_shader_parameter("emission_strength", 0.22)
+			sm.set_shader_parameter("pulse_amount", 0.10)
+			sm.set_shader_parameter("iridescence", 0.0)
+			sm.set_shader_parameter("sparkle_amount", 0.0)
+			sm.set_shader_parameter("metallic_amount", 0.65)
+			sm.set_shader_parameter("roughness_amount", 0.25)
+		4:
+			sm.set_shader_parameter("emission_strength", 0.38)
+			sm.set_shader_parameter("pulse_amount", 0.25)
+			sm.set_shader_parameter("iridescence", 0.10)
+			sm.set_shader_parameter("sparkle_amount", 0.08)
+			sm.set_shader_parameter("metallic_amount", 0.85)
+			sm.set_shader_parameter("roughness_amount", 0.18)
+		5:
+			sm.set_shader_parameter("emission_strength", 0.55)
+			sm.set_shader_parameter("pulse_amount", 0.22)
+			sm.set_shader_parameter("iridescence", 0.45)
+			sm.set_shader_parameter("sparkle_amount", 0.25)
+			sm.set_shader_parameter("metallic_amount", 0.95)
+			sm.set_shader_parameter("roughness_amount", 0.12)
+		_:
+			sm.set_shader_parameter("emission_strength", 0.30)
+			sm.set_shader_parameter("metallic_amount", 0.4)
+			sm.set_shader_parameter("roughness_amount", 0.4)
+	return sm
 
 static func _get_or_build_shape(size: float, is_flora: bool = false) -> CylinderShape3D:
-	# Quantize to 5m buckets so nearby sizes share the same shape.
+	# Legacy uniform-cylinder builder. Kept for any caller that doesn't have an
+	# AABB handy. New mineral spawns prefer _get_or_build_shape_aabb below.
 	var bucket := int(size / 5.0) * 5
 	var key := str(bucket) + ("_flora" if is_flora else "")
 	if _shared_shapes.has(key):
 		return _shared_shapes[key]
 	var cyl := CylinderShape3D.new()
 	if is_flora:
-		# Flora (trees, rocks) need a large hit cylinder so they're easy to shoot.
-		# Height spans the full object; radius is generous for reliable collision.
 		cyl.height = float(bucket) * 8.0
 		cyl.radius = float(bucket) * 4.0
 	else:
@@ -273,6 +274,34 @@ static func _get_or_build_shape(size: float, is_flora: bool = false) -> Cylinder
 		cyl.radius = float(bucket) * 2.2
 	_shared_shapes[key] = cyl
 	return cyl
+
+# AABB-aware shape builder. Wraps the actual visual extents with a generous
+# margin so the bolt's swept raycast can't slip past a thin gem. Cached per
+# (type, size-bucket) so a planet's ~80 instances share ~3-5 shapes.
+static func _get_or_build_shape_aabb(type: String, size: float, is_flora: bool, half_h_unit: float, half_w_unit: float) -> CylinderShape3D:
+	var bucket := int(size / 5.0) * 5
+	var key := type + "_" + str(bucket)
+	if _shared_shapes.has(key):
+		return _shared_shapes[key]
+	# Convert unit half-extents to world units, then expand for forgiving aim.
+	var half_h: float = max(half_h_unit * size * 1.4, 30.0)
+	var radius_mult: float = 2.4 if is_flora else 1.8
+	var radius: float = max(half_w_unit * size * radius_mult, 30.0)
+	var cyl := CylinderShape3D.new()
+	cyl.height = half_h * 2.0
+	cyl.radius = radius
+	_shared_shapes[key] = cyl
+	return cyl
+
+# Cache the unit-space AABB of each resource's mesh — used to position the
+# collision shape and the target-centre at the actual visible center.
+static func _get_or_build_aabb(type: String) -> AABB:
+	if _aabb_cache.has(type):
+		return _aabb_cache[type]
+	var mesh := _get_or_build_mesh(type)
+	var aabb: AABB = mesh.get_aabb() if mesh else AABB(Vector3.ZERO, Vector3(1, 1, 1))
+	_aabb_cache[type] = aabb
+	return aabb
 
 func _get_resource_color() -> Color:
 	return ResourceRegistry.get_color(resource_type)
@@ -312,19 +341,13 @@ func _process(_delta: float) -> void:
 		rotate_object_local(Vector3.UP, _delta * (0.4 + beat_pulse * 1.2))
 		return
 
-	# ACE: Extreme Glint for high-contrast 'Discovery'
-	var pulse = sin(Time.get_ticks_msec() * 0.0035)
-	var glint = pow(max(0.0, pulse), 50.0) # Even Sharper
-
-	if mesh_inst and mesh_inst.material_override:
-		if flash_timer > 0.0:
-			# ACE: Damage flash takes priority — keep loud so hits read clearly
-			mesh_inst.material_override.emission_energy_multiplier = 12.0
-		elif glows:
-			# Subtle gem-like shimmer + beat-synced shine. Kick adds the biggest
-			# pop (pulse multiplied by 4x); regular beats add a smaller bump.
-			var beat_glow: float = kick_pulse * 4.0 + beat_pulse * 1.2
-			mesh_inst.material_override.emission_energy_multiplier = 0.15 + (glint * 6.0) + beat_glow
+	# Damage flash + beat-sync glow are now driven via per-instance shader
+	# parameters on the shared material. Cost is one StringName lookup per
+	# mineral per quarter-frame — fine even with hundreds alive.
+	if mesh_inst and glows and mesh_inst.material_override is ShaderMaterial:
+		var beat: float = kick_pulse * 1.2 + beat_pulse * 0.35
+		mesh_inst.set_instance_shader_parameter(&"flash_strength", flash_timer)
+		mesh_inst.set_instance_shader_parameter(&"beat_glow", beat)
 
 	if hud_sprite:
 		var cam = get_viewport().get_camera_3d()

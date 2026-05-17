@@ -9,7 +9,7 @@ extends PanelContainer
 #
 # Animations on inventory_changed:
 #   delta > 0: scale pulse + circle flash + "+N" floater
-#   delta > 0 and tier >= 3: extra glow-burst behind the chip
+#   delta > 0 and tier >= 4: extra glow-burst behind the chip (Purple+)
 #   delta == 0 or < 0: silent count update
 #   first appearance (count was 0, now > 0): fade-in + scale-from-0.7
 
@@ -130,7 +130,7 @@ func set_count(new_amount: int) -> void:
 			_play_pulse()
 			_play_flash()
 			_queue_floater(delta)
-			if tier >= 3:
+			if tier >= 4:
 				_play_glow_burst()
 		return
 
@@ -138,7 +138,7 @@ func set_count(new_amount: int) -> void:
 		_play_pulse()
 		_play_flash()
 		_queue_floater(delta)
-		if tier >= 3:
+		if tier >= 4:
 			_play_glow_burst()
 
 func _render_count(n: int) -> void:
@@ -248,7 +248,7 @@ func _emit_floater() -> void:
 var _last_burst_ms: int = -10000
 
 func _play_glow_burst() -> void:
-	# Tier-3+ bonus — a soft duplicate panel scales 1.0 → 1.7 and fades
+	# Tier-4+ bonus — a soft duplicate panel scales 1.0 → 1.7 and fades
 	# behind the chip.  top_level so it doesn't reflow the FlowContainer.
 	# Throttled the same way as the pulse: rapid mining of an Aether
 	# deposit shouldn't spawn 15 duplicate panels in 0.5s.

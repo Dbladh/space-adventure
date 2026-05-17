@@ -521,8 +521,9 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	# them.  Without this, a pool of [Carbon Fiber, Copper, Gold] would spawn
 	# each equally — the player would meet rare Gold before common CF.
 	#
-	# Weights by tier: t1=8, t2=4, t3=2, t4=1.  So a tier-1 mineral is 8x
-	# more likely to spawn than a tier-4 one in the same pool.
+	# Weights by tier: t1=8, t2=7, t3=4, t4=2, t5=1.  T2 (green) is bumped to
+	# match T1 closely so players reliably see at least a few green deposits
+	# on any C+ planet — they were too sparse at the old weight of 5.
 	var _mineable: Array[String] = []
 	if is_instance_valid(planet) and "planet_resources" in planet:
 		for r in planet.get("planet_resources"):
@@ -531,9 +532,10 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			var weight: int = 8
 			match ResourceRegistry.get_tier(String(r)):
 				1: weight = 8
-				2: weight = 4
-				3: weight = 2
-				4: weight = 1
+				2: weight = 7
+				3: weight = 4
+				4: weight = 2
+				5: weight = 1
 				_: weight = 4
 			for _i in range(weight):
 				_mineable.append(String(r))

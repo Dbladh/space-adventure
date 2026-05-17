@@ -15,10 +15,11 @@ var _health: int = 4
 var destroyed: bool = false
 
 const DROP_WEIGHTS: Dictionary = {
-	1: 0.60,
-	2: 0.25,
-	3: 0.12,
-	4: 0.03,
+	1: 0.50,
+	2: 0.27,
+	3: 0.15,
+	4: 0.06,
+	5: 0.02,
 }
 
 func _ready() -> void:
@@ -71,18 +72,33 @@ func _on_destroyed() -> void:
 	asteroid_destroyed.emit(asteroid_parent)
 
 func _pick_weighted_resource(rng: RandomNumberGenerator) -> String:
-	var tiers = [1, 2, 3]
+	# Luck-bias scales high-tier drop weights so upgraded players see more
+	# purple/orange from asteroid grinding.
+	var luck_bias: float = 0.0
+	if Engine.has_meta("UpgradeManager"):
+		luck_bias = float(Engine.get_meta("UpgradeManager").get_luck_drop_bias())
+
+	var tiers = [1, 2, 3, 4, 5]
 	var tier_pools: Dictionary = {}
 	var total_weight: float = 0.0
 
 	for tier in tiers:
-		var t_pool = ResourceRegistry.natural_pool(tier)
-		if not t_pool.is_empty():
-			var weight = DROP_WEIGHTS.get(tier, 0.1)
-			tier_pools[tier] = {"pool": t_pool, "weight": weight}
-			total_weight += weight
+		var t_pool: Array[String] = []
+		for r in ResourceRegistry.RESOURCES:
+			if int(r.tier) != tier: continue
+			if r.get("sky_only", false): continue
+			if r.name == "Stone" or r.name == "Wood": continue
+			t_pool.append(r.name)
+		if t_pool.is_empty():
+			continue
+		var weight: float = float(DROP_WEIGHTS.get(tier, 0.0))
+		# Luck adds a bonus to T4 and T5 weights — higher tier → bigger boost.
+		if luck_bias > 0.0 and tier >= 4:
+			weight += luck_bias * (1.0 if tier == 4 else 1.5)
+		tier_pools[tier] = {"pool": t_pool, "weight": weight}
+		total_weight += weight
 
-	if tier_pools.is_empty():
+	if tier_pools.is_empty() or total_weight <= 0.0:
 		return "Stone"
 
 	var rand_val = rng.randf() * total_weight

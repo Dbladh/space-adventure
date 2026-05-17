@@ -7,10 +7,10 @@ const ResourceRegistry = preload("res://src/core/ResourceRegistry.gd")
 # Deterministic planet seed + resource list derivation from three forge ingredients.
 #
 # SEED: product of three primes (one per resource). Same combo → same seed → same planet.
-# RESOURCES: determined by the average tier of the three inputs.
-#   Higher tier inputs → higher tier natural resources on the resulting planet.
-#   Tier 4 resources are crafted-only and never appear naturally.
-#   All planets always have Stone and Wood as base resources.
+# RESOURCES: pinned to the planet's rank tier (F..SS). Each rank guarantees
+#   a minimum count of each rarity (Green / Blue / Purple / Orange) and fills
+#   remaining slots from a layered weighted pool that de-emphasises low tiers
+#   on higher-rank planets. Stone + Wood are always guaranteed.
 
 const RESOURCE_PRIMES: Dictionary = {
 	"Stone":            2,
@@ -32,6 +32,52 @@ const RESOURCE_PRIMES: Dictionary = {
 	"Diamond":          59,
 	"Iron":             61,
 	"Titanium":         67,
+	"Verdant Spore":    71,
+	"Chloro Crystal":   73,
+	"Bloomstone":       79,
+}
+
+# ─── Per-rank guaranteed minimums (non-Stone/Wood) ───────────────────────────
+# tier index → minimum count of that tier on the planet.
+const GUARANTEES: Dictionary = {
+	"F":           {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+	"D":           {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+	"C":           {1: 0, 2: 1, 3: 0, 4: 0, 5: 0},
+	"B":           {1: 0, 2: 1, 3: 1, 4: 0, 5: 0},
+	"A":           {1: 0, 2: 1, 3: 1, 4: 1, 5: 0},
+	"S":           {1: 0, 2: 1, 3: 1, 4: 1, 5: 1},
+	"SS":          {1: 0, 2: 1, 3: 1, 4: 2, 5: 2},
+	"★ LEGENDARY": {1: 0, 2: 1, 3: 1, 4: 2, 5: 3},
+}
+
+# Weights for filling remaining slots after guarantees are met. The slot
+# picks a tier first (weighted), then a name from that tier's pool.
+const FILL_WEIGHTS: Dictionary = {
+	"F":           {1: 1.0,  2: 0.0,  3: 0.0,  4: 0.0,  5: 0.0},
+	"D":           {1: 1.0,  2: 0.0,  3: 0.0,  4: 0.0,  5: 0.0},
+	"C":           {1: 0.7,  2: 0.6,  3: 0.0,  4: 0.0,  5: 0.0},
+	"B":           {1: 0.5,  2: 0.6,  3: 0.5,  4: 0.0,  5: 0.0},
+	"A":           {1: 0.3,  2: 0.5,  3: 0.6,  4: 0.4,  5: 0.0},
+	"S":           {1: 0.2,  2: 0.4,  3: 0.5,  4: 0.5,  5: 0.3},
+	"SS":          {1: 0.1,  2: 0.3,  3: 0.4,  4: 0.6,  5: 0.5},
+	"★ LEGENDARY": {1: 0.05, 2: 0.2,  3: 0.3,  4: 0.7,  5: 0.7},
+}
+
+# Anchors the rank-score formula to the highest input tier — picking the rank
+# tier from the *headline* rarity of the trio rather than the average. Spending
+# even one Purple/Orange input pushes you firmly into A/S territory.
+const _RANK_TIER_BASE: Dictionary = {1: 0, 2: 26, 3: 42, 4: 58, 5: 74}
+
+# Total non-Stone/Wood extras targeted per planet rank.
+const TARGET_EXTRAS: Dictionary = {
+	"F":           2,
+	"D":           3,
+	"C":           4,
+	"B":           5,
+	"A":           6,
+	"S":           7,
+	"SS":          8,
+	"★ LEGENDARY": 9,
 }
 
 static func make_seed(r1: String, r2: String, r3: String) -> int:
@@ -49,16 +95,18 @@ static func rank_planet(r1: String, r2: String, r3: String, seed_val: int, luck_
 	var t2 := ResourceRegistry.get_tier(r2)
 	var t3 := ResourceRegistry.get_tier(r3)
 
-	# 1. Resource score  (0–60): average tier × 20 capped at 60
-	var avg_tier: float = (t1 + t2 + t3) / 3.0
-	var resource_score: float = clampf(avg_tier * 20.0, 0.0, 60.0)
+	# 1. Resource score (0–74): driven by the HIGHEST input tier. A single
+	#    high-tier input "carries" the planet's headline rarity — so spending
+	#    a Purple or Orange in the forge guarantees you reach A/S rank.
+	var max_tier: int = maxi(maxi(t1, t2), t3)
+	var resource_score: float = float(_RANK_TIER_BASE.get(max_tier, 0))
 
-	# 2. Rarity bonus (0–20): extra points for having Tier 4 or Tier 3 inputs
-	var rarity_bonus: float = 0.0
+	# 2. Rarity bonus (0–10): extra points for stacking multiple inputs at the
+	#    max tier — three-of-a-kind trios get the full bonus.
+	var count_at_max: int = 0
 	for t in [t1, t2, t3]:
-		if t == 4: rarity_bonus += 7.0
-		elif t == 3: rarity_bonus += 3.0
-	rarity_bonus = minf(rarity_bonus, 20.0)
+		if t == max_tier: count_at_max += 1
+	var rarity_bonus: float = float((count_at_max - 1) * 5)
 
 	# 3. Cosmic variance bonus (0–10): seed-derived exotic properties
 	#    Oversized planet (seed % 11 == 0) = +4
@@ -106,40 +154,30 @@ static func rank_planet(r1: String, r2: String, r3: String, seed_val: int, luck_
 
 	return { "label": label, "color": color, "score": int(score) }
 
-# Returns the full resource list for a forged planet — always Stone+Wood plus
-# 2-4 extras drawn deterministically from the pool unlocked by the forge tier.
+# Returns the full resource list for a forged planet — Stone+Wood plus
+# rank-driven extras. Higher-rank planets are guaranteed minimums of higher
+# rarities (Green/Blue/Purple/Orange) and bias the remaining slots toward
+# top tiers. Luck adds bonus rolls of the planet's top rarity.
 static func resources_for_planet(r1: String, r2: String, r3: String) -> Array[String]:
 	var result: Array[String] = ["Stone", "Wood"]
 
-	var t1 := ResourceRegistry.get_tier(r1)
-	var t2 := ResourceRegistry.get_tier(r2)
-	var t3 := ResourceRegistry.get_tier(r3)
-	# Ceiling of average — generous: one Tier 3 in a Tier 1 mix unlocks Tier 2 pool
-	var max_tier: int = ceili((t1 + t2 + t3) / 3.0)
-
-	var pool: Array[String] = ResourceRegistry.natural_pool(max_tier)
-	if pool.is_empty():
-		return result
-
-	# Deterministic shuffle using planet seed
 	var seed_val := make_seed(r1, r2, r3)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = seed_val
+	var rank_dict := rank_planet(r1, r2, r3, seed_val, 0.0)
+	var rank_label: String = String(rank_dict.get("label", "F"))
 
-	var shuffled := pool.duplicate()
-	for i in range(shuffled.size() - 1, 0, -1):
-		var j := rng.randi_range(0, i)
-		var tmp = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = tmp
+	var luck_bias: float = 0.0
+	if Engine.has_meta("UpgradeManager"):
+		luck_bias = float(Engine.get_meta("UpgradeManager").get_luck_drop_bias())
 
-	# Number of extras scales with max_tier: T1→2, T2→3, T3→4
-	var count := 1 + max_tier
-	for i in range(min(count, shuffled.size())):
-		result.append(shuffled[i])
+	var extras := natural_pool_for_rank(rank_label, seed_val, luck_bias)
+	for e in extras:
+		if not result.has(e):
+			result.append(e)
 
-	# Early-game safety: on Tier-1-only trios the natural pool can miss the
+	# Early-game safety: on F/D planets the natural pool can miss the
 	# specific Tier-1 minerals required by early upgrades. Guarantee at least
 	# one of {Carbon Fiber, Silica Dust, Neon Moss} alongside Stone+Wood.
-	if max_tier == 1:
+	if rank_label == "F" or rank_label == "D":
 		var early_specifics: Array[String] = ["Carbon Fiber", "Silica Dust", "Neon Moss"]
 		var has_specific := false
 		for s in early_specifics:
@@ -147,10 +185,115 @@ static func resources_for_planet(r1: String, r2: String, r3: String) -> Array[St
 				has_specific = true
 				break
 		if not has_specific:
+			var rng := RandomNumberGenerator.new()
+			rng.seed = seed_val
 			var pick: String = early_specifics[rng.randi_range(0, early_specifics.size() - 1)]
 			result.append(pick)
 
 	return result
+
+# Build the extras list (non-Stone/Wood) for a planet of the given rank.
+# Deterministic per seed; luck adds bonus rolls and biases the top tier on A+.
+static func natural_pool_for_rank(rank: String, seed_val: int, luck_bias: float) -> Array[String]:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val
+
+	var guarantees: Dictionary = GUARANTEES.get(rank, GUARANTEES["F"])
+	var weights: Dictionary = FILL_WEIGHTS.get(rank, FILL_WEIGHTS["F"])
+	var target: int = int(TARGET_EXTRAS.get(rank, 2))
+
+	var result: Array[String] = []
+	var used: Dictionary = {}
+
+	# 1. Honour guaranteed minimums per tier — seeded-shuffle within tier pool.
+	for tier in [2, 3, 4, 5]:
+		var min_n: int = int(guarantees.get(tier, 0))
+		if min_n <= 0:
+			continue
+		var tier_pool := _pool_of_tier(tier)
+		_seeded_shuffle(tier_pool, rng)
+		var added: int = 0
+		for n in tier_pool:
+			if added >= min_n:
+				break
+			if not used.has(n):
+				result.append(n); used[n] = true
+				added += 1
+
+	# 2. Luck-driven bonus roll: on A+ planets, each luck step rolls a chance
+	#    for one bonus draw of the planet's top tier(s).
+	if luck_bias > 0.0 and (rank == "A" or rank == "S" or rank == "SS" or rank == "★ LEGENDARY"):
+		var top_tier: int = 5
+		if rank == "A":
+			top_tier = 4
+		if rng.randf() < luck_bias:
+			var bonus_pool := _pool_of_tier(top_tier)
+			_seeded_shuffle(bonus_pool, rng)
+			for n in bonus_pool:
+				if not used.has(n):
+					result.append(n); used[n] = true
+					break
+
+	# 3. Fill remaining slots from the layered weighted pool until target is hit.
+	#    Luck bias multiplies the top non-zero tier's weight by (1 + luck_bias).
+	var top_present: int = 0
+	for t in [5, 4, 3, 2, 1]:
+		if float(weights.get(t, 0.0)) > 0.0:
+			top_present = t
+			break
+	var biased_weights: Dictionary = weights.duplicate(true)
+	if top_present > 0 and luck_bias > 0.0:
+		biased_weights[top_present] = float(weights.get(top_present, 0.0)) * (1.0 + luck_bias)
+
+	var safety: int = 32
+	while result.size() < target and safety > 0:
+		safety -= 1
+		var t := _weighted_tier_pick(biased_weights, rng)
+		if t <= 0:
+			break
+		var candidates := _pool_of_tier(t)
+		var remaining: Array[String] = []
+		for n in candidates:
+			if not used.has(n):
+				remaining.append(n)
+		if remaining.is_empty():
+			# Exhausted this tier — zero its weight and retry.
+			biased_weights[t] = 0.0
+			continue
+		var pick: String = remaining[rng.randi() % remaining.size()]
+		result.append(pick); used[pick] = true
+
+	return result
+
+# All non-Stone/Wood resources of the given tier, excluding sky-only entries.
+static func _pool_of_tier(tier: int) -> Array[String]:
+	var out: Array[String] = []
+	for r in ResourceRegistry.RESOURCES:
+		if int(r.tier) != tier: continue
+		if r.get("sky_only", false): continue
+		if r.name == "Stone" or r.name == "Wood": continue
+		out.append(r.name)
+	return out
+
+# Pick a tier from weights {tier_int: weight_float}. Returns 0 if all zero.
+static func _weighted_tier_pick(weights: Dictionary, rng: RandomNumberGenerator) -> int:
+	var total: float = 0.0
+	for k in weights.keys():
+		total += float(weights[k])
+	if total <= 0.0:
+		return 0
+	var roll: float = rng.randf() * total
+	var cum: float = 0.0
+	for k in weights.keys():
+		cum += float(weights[k])
+		if roll <= cum:
+			return int(k)
+	return int(weights.keys()[weights.size() - 1])
+
+static func _seeded_shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
+	for i in range(arr.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp
 
 # Returns the cost dictionary for a given trio (e.g. ["Cu","Cu","Au"] → {"Copper":2,"Gold":1})
 static func resource_cost(r1: String, r2: String, r3: String) -> Dictionary:
@@ -161,7 +304,7 @@ static func resource_cost(r1: String, r2: String, r3: String) -> Dictionary:
 
 # Credit cost to forge a planet from this trio. Pure function of the minerals'
 # tiers — predictable for the player and stable across seed/luck variance.
-const FORGE_TIER_COST: Dictionary = {1: 1000, 2: 10000, 3: 80000, 4: 300000}
+const FORGE_TIER_COST: Dictionary = {1: 1000, 2: 5000, 3: 25000, 4: 80000, 5: 300000}
 
 static func forge_credit_cost(r1: String, r2: String, r3: String) -> int:
 	var total: int = 0

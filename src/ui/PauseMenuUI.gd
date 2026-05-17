@@ -20,6 +20,7 @@ signal sens_changed(idx: int)
 signal dead_changed(idx: int)
 signal save_requested()
 signal new_game_confirmed()
+signal hud_visibility_toggled(hidden: bool)
 
 const HUDStyle = preload("res://src/ui/HUDStyle.gd")
 
@@ -41,6 +42,8 @@ var _sfx_btn:   Button = null
 var _gyro_btn:  Button = null
 var _sens_btn:  Button = null
 var _dead_btn:  Button = null
+var _hud_btn:   Button = null
+var _hud_hidden: bool = false
 
 # Persisted-state mirror (kept in-memory so cycler labels stay correct without
 # round-tripping through SettingsManager every tap).
@@ -214,7 +217,22 @@ func _build_settings_screen() -> VBoxContainer:
 		rebind_btn.pressed.connect(func() -> void: rebind_requested.emit())
 		vb.add_child(rebind_btn)
 
+	# Hide HUD — true cinematic mode.  Pause button stays reachable, so the
+	# only path back is via this same setting (toggle to SHOW HUD).
+	_hud_btn = _make_cycler_btn(_format_hud(_hud_hidden), HUDStyle.BTN_BLUE)
+	_hud_btn.pressed.connect(_on_hud_pressed)
+	vb.add_child(_hud_btn)
+
 	return vb
+
+func _format_hud(is_hidden: bool) -> String:
+	return "HUD: " + ("HIDDEN" if is_hidden else "SHOWN")
+
+func _on_hud_pressed() -> void:
+	_hud_hidden = not _hud_hidden
+	if is_instance_valid(_hud_btn):
+		_hud_btn.text = _format_hud(_hud_hidden)
+	hud_visibility_toggled.emit(_hud_hidden)
 
 
 # ─── Screen navigation ────────────────────────────────────────────────────

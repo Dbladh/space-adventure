@@ -135,6 +135,14 @@ static func get_total_forges() -> int:
 static func set_total_forges(n: int) -> void:
 	_total_forges = max(0, int(n))
 
+# Cinematic / hide-HUD flag — when set by the pause-menu toggle, every
+# SpaceStation suppresses its DOCK prompt (auto-shows it on proximity by
+# default).  Static so a single setting drives every station in the world.
+static var _hud_hidden: bool = false
+
+static func set_hud_hidden(v: bool) -> void:
+	_hud_hidden = bool(v)
+
 # Called by LootGem on collection so we can mark resources discovered on
 # the planet they came from.  No-op if the planet isn't a forged one
 # (e.g., legacy/natural worlds we don't track).  Notifies a live
@@ -167,9 +175,97 @@ static func _emit_discovery_refresh() -> void:
 		if visible and on_planets_tab and station.has_method("_refresh_planets_ui"):
 			station.call_deferred("_refresh_planets_ui")
 
+# Slop-guarded tap radius — if the finger moves more than this between
+# press and release (or during press), the tap is canceled so the parent
+# ScrollContainer can take over.  Standard mobile UX pattern.
+const _TAP_SLOP_DESKTOP: float = 15.0
+const _TAP_SLOP_MOBILE: float = 12.0
+
+# Drop-in replacement for Button that emits a custom `tapped` signal only
+# when the press → release happened without the finger drifting past the
+# slop radius.  Built so the player can scroll past a button inside a
+# ScrollContainer without accidentally firing it.
+#
+# Wire it like a Button: instantiate, set text/style/disabled/etc., then
+# connect to .tapped instead of .pressed.  Do NOT also connect to .pressed
+# — we don't suppress the built-in signal, so a redundant connection
+# would fire twice.  In practice, prefer .tapped only.
+class _TapButton extends Button:
+	signal tapped
+	var slop_sq: float = _TAP_SLOP_DESKTOP * _TAP_SLOP_DESKTOP
+	var _press_pos: Vector2 = Vector2.ZERO
+	var _press_active: bool = false
+	# Set true the moment the finger drifts past slop.  From then on, this
+	# button forwards motion deltas to the parent ScrollContainer instead
+	# of doing anything tap-like.  Required because Godot 4 captures the
+	# touch on the deepest Control and never hands it off to the
+	# ScrollContainer on its own — without explicit forwarding, swiping
+	# over a button area is dead input.
+	var _scrolling: bool = false
+	# Cached on first use via _get_scroll_parent().
+	var _scroll_parent: ScrollContainer = null
+
+	func _get_scroll_parent() -> ScrollContainer:
+		if _scroll_parent != null and is_instance_valid(_scroll_parent):
+			return _scroll_parent
+		var n: Node = get_parent()
+		while n != null:
+			if n is ScrollContainer:
+				_scroll_parent = n
+				return n
+			n = n.get_parent()
+		return null
+
+	func _gui_input(event: InputEvent) -> void:
+		if disabled:
+			return
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+			if event.pressed:
+				_press_pos = event.position
+				_press_active = true
+				_scrolling = false
+				button_pressed = true
+			else:
+				# Release.  If we never scrolled and the finger stayed within
+				# slop, this is a clean tap.  Otherwise swallow the release.
+				var was_scrolling: bool = _scrolling
+				_press_active = false
+				_scrolling = false
+				button_pressed = false
+				if not was_scrolling:
+					var d_sq: float = _press_pos.distance_squared_to(event.position)
+					if d_sq <= slop_sq:
+						tapped.emit()
+						# Consume so Button's internal handling doesn't also
+						# fire its built-in pressed signal.
+						accept_event()
+		elif event is InputEventMouseMotion and _press_active:
+			# Always forward motion to the parent ScrollContainer the moment
+			# the finger moves — even sub-slop motion scrolls 1:1.  Slop
+			# only gates whether the release fires a tap (any drift past
+			# slop suppresses the tap on release).  This keeps scroll
+			# buttery-smooth without a "stick then jump" feel at slop boundary.
+			var sp: ScrollContainer = _get_scroll_parent()
+			if sp != null and event.relative.y != 0.0:
+				sp.scroll_vertical -= int(event.relative.y)
+			if not _scrolling:
+				var d_sq: float = _press_pos.distance_squared_to(event.position)
+				if d_sq > slop_sq:
+					_scrolling = true
+					button_pressed = false
+			if _scrolling:
+				accept_event()
+
+
 class ForgeSlot extends PanelContainer:
 	var slot_index: int = 0
 	var station_ref: Node = null
+	# Track press position so tap-to-remove only fires on clean taps —
+	# release without significant finger drift.  Without this a press-drag-
+	# release within the slot would still fire even if the player meant to
+	# swipe past.
+	var _tap_press_pos: Vector2 = Vector2.ZERO
+	var _tap_active: bool = false
 	func _init() -> void:
 		# Gamepad navigation: focusable so ui_accept (Enter / gamepad A)
 		# triggers the same "remove this slot" action that drag-out does.
@@ -191,16 +287,28 @@ class ForgeSlot extends PanelContainer:
 			if station_ref and slot_index < station_ref._forge_selected.size():
 				station_ref._on_remove_slot(slot_index)
 				accept_event()
-		# Mobile tap-to-remove. Fire on RELEASE, not press — so a swipe-to-
-		# scroll inside the panel gets stolen by ScrollContainer mid-drag and
-		# the release never reaches us. Only a clean tap fires.
-		elif station_ref and station_ref._is_mobile_ui \
-				and event is InputEventMouseButton \
-				and not event.pressed \
-				and event.button_index == MOUSE_BUTTON_LEFT:
-			if slot_index < station_ref._forge_selected.size():
-				station_ref._on_remove_slot(slot_index)
-				accept_event()
+			return
+		# Mobile tap-to-remove with slop guarding.  Only fires if the finger
+		# stayed within the tap-slop radius between press and release.
+		if not (station_ref and station_ref._is_mobile_ui): return
+		if not (event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT) \
+				and not event is InputEventMouseMotion:
+			return
+		if event is InputEventMouseButton:
+			if event.pressed:
+				_tap_press_pos = event.position
+				_tap_active = true
+			else:
+				if _tap_active and slot_index < station_ref._forge_selected.size():
+					_tap_active = false
+					var slop: float = _TAP_SLOP_MOBILE if station_ref._is_mobile_ui else _TAP_SLOP_DESKTOP
+					if _tap_press_pos.distance_squared_to(event.position) <= slop * slop:
+						station_ref._on_remove_slot(slot_index)
+						accept_event()
+		elif event is InputEventMouseMotion and _tap_active:
+			var slop_m: float = _TAP_SLOP_MOBILE if station_ref._is_mobile_ui else _TAP_SLOP_DESKTOP
+			if _tap_press_pos.distance_squared_to(event.position) > slop_m * slop_m:
+				_tap_active = false
 
 class ResourceCard extends PanelContainer:
 	var resource_id: String = ""
@@ -211,13 +319,17 @@ class ResourceCard extends PanelContainer:
 	# armed:   mobile press-and-hold threshold reached (bright tint + floating
 	#          ghost preview) — drag is now permitted.
 	var _press_time_ms: int = 0
+	var _press_pos: Vector2 = Vector2.ZERO   # for slop-guarded tap detection
 	var _pressed: bool = false
 	var _armed: bool = false
+	var _scrolling: bool = false     # finger drifted past slop → forwarding scroll
 	var _drag_ghost: Control = null
+	var _scroll_parent: ScrollContainer = null
 	# How long the finger must stay down on mobile before a drag is permitted.
-	# Below this, a motion gesture falls through to the ScrollContainer so the
-	# user can scroll the resource list without accidentally dragging.
-	const _DRAG_ARM_MS: int = 220
+	# Set deliberately long (~½ sec) so a brief "where is my finger" pause
+	# before swiping doesn't arm a drag.  Below this, motion forwards to the
+	# parent ScrollContainer for scroll.
+	const _DRAG_ARM_MS: int = 500
 	func _init() -> void:
 		# Gamepad navigation: focusable so ui_accept (Enter / gamepad A)
 		# triggers the same "add to forge" action that drag-in does.
@@ -227,8 +339,9 @@ class ResourceCard extends PanelContainer:
 	func _process(_delta: float) -> void:
 		# Mobile hold-to-arm: once the threshold passes without motion, swap
 		# to the "drag is ready" visuals and surface a floating ghost preview
-		# so the user knows they can now drag.
-		if _pressed and not _armed:
+		# so the user knows they can now drag.  But if the finger has been
+		# scrolling the list, never arm — the player meant to scroll, not drag.
+		if _pressed and not _armed and not _scrolling:
 			var elapsed: int = Time.get_ticks_msec() - _press_time_ms
 			if elapsed >= _DRAG_ARM_MS:
 				_set_armed(true)
@@ -269,10 +382,21 @@ class ResourceCard extends PanelContainer:
 		_hide_drag_ghost()
 		_pressed = false
 		_armed = false
+		_scrolling = false
 		_press_time_ms = 0
 		set_process(false)
 		modulate = Color(1, 1, 1)
 		scale = Vector2.ONE
+	func _get_scroll_parent() -> ScrollContainer:
+		if _scroll_parent != null and is_instance_valid(_scroll_parent):
+			return _scroll_parent
+		var n: Node = get_parent()
+		while n != null:
+			if n is ScrollContainer:
+				_scroll_parent = n
+				return n
+			n = n.get_parent()
+		return null
 	func _get_drag_data(_at_position: Vector2) -> Variant:
 		# Drag works on mobile too — the new forge layout isolates the
 		# scrollable area to the left column so a horizontal drag toward the
@@ -296,21 +420,49 @@ class ResourceCard extends PanelContainer:
 		elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
 				_press_time_ms = Time.get_ticks_msec()
+				_press_pos = event.position
 				_pressed = true
+				_scrolling = false
 				_set_pressed_visual(true)
 				# _process drives the mobile arm-after-hold visual swap.
 				# Desktop drag is immediate on motion, no timer needed.
 				if station_ref and station_ref._is_mobile_ui:
 					set_process(true)
 			else:
-				# Release.  If we were armed (hold completed) but never
-				# moved, treat as "changed my mind" — just clear state.
-				# Otherwise on mobile a quick tap fires tap-to-add.
+				# Release.  Order matters here: snapshot state, reset, decide.
 				var was_armed := _armed
+				var was_scrolling := _scrolling
+				var release_pos: Vector2 = event.position
 				_reset_press_state()
+				# If we were scrolling (finger drifted past slop), suppress
+				# the tap entirely — the gesture was a swipe-scroll, not a tap.
+				if was_scrolling:
+					return
+				# Tap-to-add fires only if we never armed AND release was
+				# within slop of the press (clean tap).
 				if not was_armed and station_ref and station_ref._is_mobile_ui \
 						and available_count > 0 and station_ref._forge_selected.size() < 3:
-					station_ref._on_card_pressed(resource_id)
+					var slop: float = _TAP_SLOP_MOBILE if station_ref._is_mobile_ui else _TAP_SLOP_DESKTOP
+					if _press_pos.distance_squared_to(release_pos) <= slop * slop:
+						station_ref._on_card_pressed(resource_id)
+						accept_event()
+		elif event is InputEventMouseMotion and _pressed:
+			# Before the hold window completes, ALL motion forwards to the
+			# parent ScrollContainer 1:1 — no slop gate, so scrolling tracks
+			# the finger from the first pixel.  Slop only decides whether
+			# the release fires a tap (any drift past slop suppresses it).
+			# Once the player drifts past slop we also flag _scrolling so
+			# the arm timer (_process) refuses to arm a drag.
+			if not _armed:
+				var sp: ScrollContainer = _get_scroll_parent()
+				if sp != null and event.relative.y != 0.0:
+					sp.scroll_vertical -= int(event.relative.y)
+				if not _scrolling:
+					var slop_m: float = _TAP_SLOP_MOBILE if station_ref and station_ref._is_mobile_ui else _TAP_SLOP_DESKTOP
+					if _press_pos.distance_squared_to(event.position) > slop_m * slop_m:
+						_scrolling = true
+						_set_pressed_visual(false)
+				if _scrolling:
 					accept_event()
 
 func _ready() -> void:
@@ -416,13 +568,30 @@ func _build_ui() -> void:
 	add_child(_ui_layer)
 
 	_prompt_btn = Button.new()
-	_prompt_btn.text = "DOCK STATION [E]"
-	HUDStyle.style_button(_prompt_btn, HUDStyle.BTN_GREEN, 24)
+	# Drop the "[E]" keyboard hint on mobile — there's no E key, and the
+	# bracketed shortcut just looks broken next to thumb-only controls.
+	_prompt_btn.text = "DOCK STATION" if _is_mobile_ui else "DOCK STATION [E]"
+	HUDStyle.style_button(_prompt_btn, HUDStyle.BTN_GREEN, 28 if _is_mobile_ui else 24)
 	_prompt_btn.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM)
-	_prompt_btn.offset_top = -140
-	_prompt_btn.offset_bottom = -90
-	_prompt_btn.offset_left = -160
-	_prompt_btn.offset_right = 160
+	# Mobile: tuck the button down at the bottom of the screen so it sits
+	# vertically aligned with the ROLL L / ROLL R thumb-buttons (which live
+	# 36 + safe_bottom from the bottom and are 88px tall, vertically centred
+	# at screen_h - 80 - safe_bottom).  Make the dock button match.
+	# Desktop: keep the original position 90–140 px above the bottom.
+	if _is_mobile_ui:
+		_calculate_safe_area()
+		var dock_h: int = 100
+		var dock_w: int = 360
+		# Centred at screen_h - 80 - safe_bottom: top = centre - h/2.
+		_prompt_btn.offset_top    = -80 - _safe_bottom - dock_h / 2
+		_prompt_btn.offset_bottom = -80 - _safe_bottom + dock_h / 2
+		_prompt_btn.offset_left   = -dock_w / 2
+		_prompt_btn.offset_right  =  dock_w / 2
+	else:
+		_prompt_btn.offset_top = -140
+		_prompt_btn.offset_bottom = -90
+		_prompt_btn.offset_left = -160
+		_prompt_btn.offset_right = 160
 	_prompt_btn.pressed.connect(_on_dock_pressed)
 	_prompt_btn.hide()
 	_ui_layer.add_child(_prompt_btn)
@@ -600,7 +769,8 @@ func _build_ui() -> void:
 	var presets: Array = ["1", "10", "100", "max"]
 	for p_i in range(presets.size()):
 		var preset: String = presets[p_i]
-		var btn := Button.new()
+		var btn := _TapButton.new()
+		btn.slop_sq = pow(_TAP_SLOP_MOBILE if _is_mobile_ui else _TAP_SLOP_DESKTOP, 2)
 		btn.text = ("×" + preset) if preset != "max" else "MAX"
 		btn.toggle_mode = true
 		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -610,7 +780,7 @@ func _build_ui() -> void:
 			btn.custom_minimum_size = Vector2(0, 32)
 		_apply_qty_btn_color(btn, preset == _market_qty_mode)
 		var captured_preset: String = preset
-		btn.pressed.connect(func() -> void: _on_market_qty_pressed(captured_preset))
+		btn.tapped.connect(func() -> void: _on_market_qty_pressed(captured_preset))
 		qty_row.add_child(btn)
 		_market_qty_btns.append(btn)
 
@@ -644,12 +814,13 @@ func _build_ui() -> void:
 	_market_rows_vbox.add_theme_constant_override("separation", 8 if _is_mobile_ui else 4)
 	_tab_market_panel.add_child(_market_rows_vbox)
 
-	var sell_all_btn := Button.new()
+	var sell_all_btn := _TapButton.new()
+	sell_all_btn.slop_sq = pow(_TAP_SLOP_MOBILE if _is_mobile_ui else _TAP_SLOP_DESKTOP, 2)
 	sell_all_btn.text = "Sell ALL Resources"
 	HUDStyle.style_button(sell_all_btn, HUDStyle.BTN_GREEN, 22 if _is_mobile_ui else 20)
 	if _is_mobile_ui:
 		sell_all_btn.custom_minimum_size = Vector2(0, _BIGBTN_H_MOBILE)
-	sell_all_btn.pressed.connect(_on_sell_all)
+	sell_all_btn.tapped.connect(_on_sell_all)
 	_tab_market_panel.add_child(sell_all_btn)
 
 	# ======================== FORGE TAB ========================
@@ -1582,7 +1753,7 @@ func _process(delta: float) -> void:
 	if dist < DOCK_RANGE:
 		if not _in_range:
 			_in_range = true
-			if not _ui_visible and not _cinematic_active:
+			if not _ui_visible and not _cinematic_active and not _hud_hidden:
 				_prompt_btn.show()
 	else:
 		if _in_range:
@@ -1594,10 +1765,10 @@ func _process(delta: float) -> void:
 	# Hide the DOCK prompt while the pause menu is up so the prompt
 	# button can't steal focus from the pause-menu Resume button.
 	# (process_mode = ALWAYS means this node still ticks during pause.)
-	if _prompt_btn.visible and get_tree().paused:
+	if _prompt_btn.visible and (get_tree().paused or _hud_hidden):
 		_prompt_btn.hide()
 	elif not _prompt_btn.visible and _in_range and not _ui_visible \
-			and not _cinematic_active and not get_tree().paused:
+			and not _cinematic_active and not _hud_hidden and not get_tree().paused:
 		_prompt_btn.show()
 
 func _input(event: InputEvent) -> void:
@@ -1918,6 +2089,7 @@ func _rebuild_market_rows() -> void:
 		var buy_price: int = ResourceRegistry.get_buy_price(r)
 		var held: int = inv_ref.get_amount(r) if inv_ref else 0
 		var credits_val: int = econ_ref.credits if econ_ref else 0
+		var abbrev: String = ResourceRegistry.get_abbrev(r)
 
 		var row: HBoxContainer = HBoxContainer.new()
 		row.add_theme_constant_override("separation", 10 if _is_mobile_ui else 4)
@@ -1943,7 +2115,7 @@ func _rebuild_market_rows() -> void:
 		name_panel.custom_minimum_size = Vector2(_NAME_COL_MIN_MOBILE, _BTN_H_MOBILE) if _is_mobile_ui else Vector2(90, 30)
 		name_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var name_lbl := Label.new()
-		name_lbl.text = r
+		name_lbl.text = r + " (" + abbrev + ")"
 		name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		name_lbl.add_theme_font_size_override("font_size", 17 if _is_mobile_ui else 13)
 		name_lbl.add_theme_color_override("font_color", rarity_col)
@@ -1964,7 +2136,8 @@ func _rebuild_market_rows() -> void:
 
 		# ── Sell button (quantity from global _market_qty_mode) ────────
 		var sell_qty: int = _market_qty_for_sell(held)
-		var sell_btn: Button = Button.new()
+		var sell_btn := _TapButton.new()
+		sell_btn.slop_sq = pow(_TAP_SLOP_MOBILE if _is_mobile_ui else _TAP_SLOP_DESKTOP, 2)
 		sell_btn.text = _market_btn_label(sell_qty * sell_val, sell_qty)
 		HUDStyle.style_button(sell_btn, HUDStyle.BTN_GREEN, 18 if _is_mobile_ui else 13)
 		if _is_mobile_ui:
@@ -1974,12 +2147,13 @@ func _rebuild_market_rows() -> void:
 			sell_btn.custom_minimum_size = Vector2(58, 28)
 		sell_btn.disabled = sell_qty <= 0 or held < sell_qty
 		var sell_r: String = r  # capture
-		sell_btn.pressed.connect(func() -> void: _on_sell_resource(sell_r))
+		sell_btn.tapped.connect(func() -> void: _on_sell_resource(sell_r))
 		row.add_child(sell_btn)
 
 		# ── Buy button (quantity from global _market_qty_mode) ─────────
 		var buy_qty: int = _market_qty_for_buy(buy_price, credits_val)
-		var buy_btn: Button = Button.new()
+		var buy_btn := _TapButton.new()
+		buy_btn.slop_sq = pow(_TAP_SLOP_MOBILE if _is_mobile_ui else _TAP_SLOP_DESKTOP, 2)
 		buy_btn.text = _market_btn_label(buy_qty * buy_price, buy_qty)
 		HUDStyle.style_button(buy_btn, HUDStyle.BTN_YELLOW, 18 if _is_mobile_ui else 13)
 		if _is_mobile_ui:
@@ -1989,7 +2163,7 @@ func _rebuild_market_rows() -> void:
 			buy_btn.custom_minimum_size = Vector2(58, 28)
 		buy_btn.disabled = buy_qty <= 0 or credits_val < buy_qty * buy_price
 		var buy_r: String = r  # capture
-		buy_btn.pressed.connect(func() -> void: _on_buy_resource(buy_r))
+		buy_btn.tapped.connect(func() -> void: _on_buy_resource(buy_r))
 		row.add_child(buy_btn)
 
 
@@ -2692,13 +2866,14 @@ func _build_upgrade_row(track: String) -> PanelContainer:
 			chip.add_child(chip_lbl)
 			mat_row.add_child(chip)
 
-		var btn := Button.new()
+		var btn := _TapButton.new()
+		btn.slop_sq = pow(_TAP_SLOP_MOBILE if _is_mobile_ui else _TAP_SLOP_DESKTOP, 2)
 		btn.text = "UPGRADE"
 		HUDStyle.style_button(btn, HUDStyle.BTN_GREEN, 22 if _is_mobile_ui else 18)
 		btn.disabled = not affordable
 		btn.custom_minimum_size = Vector2(0, _UPGRADE_BTN_H_MOBILE if _is_mobile_ui else 38)
 		var captured_track: String = track
-		btn.pressed.connect(func() -> void: _on_upgrade_purchase_pressed(captured_track))
+		btn.tapped.connect(func() -> void: _on_upgrade_purchase_pressed(captured_track))
 		right.add_child(btn)
 
 	return panel

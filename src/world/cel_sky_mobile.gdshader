@@ -13,7 +13,11 @@ uniform vec3 sun_color : source_color = vec3(1.0, 0.95, 0.8);
 uniform float sun_size : hint_range(0.0, 0.2) = 0.04;
 uniform float sun_blur : hint_range(0.0, 0.2) = 0.01;
 
-uniform sampler2D star_noise;
+// filter_nearest preserves the crisp 1-pixel noise peaks at mobile's low
+// render scale (~240x135).  With the default LINEAR filter, bilinear
+// interpolation softens those peaks below the step() threshold and stars
+// vanish entirely.  repeat_enable matches the sky_uv * 8.0 tile pattern.
+uniform sampler2D star_noise : filter_nearest, repeat_enable;
 uniform sampler2D nebula_noise;
 uniform sampler2D cloud_noise;
 
@@ -31,9 +35,11 @@ void sky() {
 	// pole distortion is invisible at mobile scale.
 	vec2 sky_uv = EYEDIR.xz * 0.5 + 0.5;
 
-	// Stars: single lookup, single threshold.
+	// Stars: single lookup, single threshold.  Threshold lowered (0.85 → 0.78)
+	// for a denser starfield, and brightness bumped (1.35 → 2.5) so single-pixel
+	// stars actually read at the small mobile screen size.
 	float raw_stars = texture(star_noise, sky_uv * 8.0).r;
-	vec3 stars = vec3(step(0.85, raw_stars) * 1.35);
+	vec3 stars = vec3(step(0.78, raw_stars) * 2.5);
 
 	// Nebula: single lookup, fixed iconic purple-red tint (no sin/cos phase).
 	float dust = texture(nebula_noise, sky_uv * 2.0).r;

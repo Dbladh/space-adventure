@@ -63,10 +63,20 @@ var _safe_bottom: float = 0.0
 # columns over the modal plate.  Toggled via the "mobile_controls_ui" group.
 var modal_ui_open: bool = false
 
+# Cinematic mode — hides ALL controls except the corner PAUSE button so
+# the player can take a clean screenshot or just enjoy the view.  Toggled
+# from the pause-menu Settings tab.  Pause stays reachable so they can
+# always toggle back without learning a hidden gesture.
+var cinematic_mode: bool = false
+
 func set_modal_ui_open(open: bool) -> void:
 	modal_ui_open = open
 	# Drop mouse filter so swipes pass through to the modal's ScrollContainer.
 	mouse_filter = Control.MOUSE_FILTER_IGNORE if open else Control.MOUSE_FILTER_STOP
+	queue_redraw()
+
+func set_cinematic_mode(on: bool) -> void:
+	cinematic_mode = on
 	queue_redraw()
 
 # ---- THROTTLE ----
@@ -276,6 +286,14 @@ func _draw() -> void:
 	var sy     = v_size.y
 	var paused = get_tree().paused
 
+	# Cinematic mode: skip every control except the corner PAUSE button.
+	# Pause stays visible so the player can always toggle back via Settings.
+	if cinematic_mode and not paused:
+		var pause_label_c: String = "PAUSE"
+		var pause_col_c: Color = C_TEAL.darkened(0.45)
+		_draw_space_button(_rect_menu, pause_label_c, pause_col_c, C_TEAL, false, 13)
+		return
+
 	# ----- THROTTLE BAR (hidden during pause — controls are deactivated) -----
 	if not paused:
 		var bar_x     = _throttle_bar_x
@@ -480,6 +498,13 @@ func _input(event: InputEvent) -> void:
 
 func _on_press(pos: Vector2, index: int) -> void:
 	var paused = get_tree().paused
+
+	# Cinematic mode: only the PAUSE button responds; everything else is
+	# both hidden AND non-interactive.  Bail before checking any other rect.
+	if cinematic_mode and not paused:
+		if _rect_menu.has_point(pos):
+			menu_pressed.emit(); get_viewport().set_input_as_handled()
+		return
 
 	# RECENTER — always available
 	if _rect_recenter.has_point(pos):

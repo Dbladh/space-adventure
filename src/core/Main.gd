@@ -256,7 +256,20 @@ func _setup_titan_splash() -> void:
 	_load_label.text = "TITAN UNIVERSAL GENESIS - BOOTING..."
 	HUDStyle.style_label(_load_label, HUDStyle.HUD_FONT_LRG, HUDStyle.CRT_GREEN_BG)
 	_load_overlay.add_child(_load_label)
-	_load_label.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+	# Span the full screen width so the text horizontally centres regardless
+	# of length — PRESET_CENTER bakes in offsets at call time, which leaves
+	# shorter follow-up texts ("CALIBRATING QUANTUM FIELD: 84%") left-aligned
+	# within the original wider rect.
+	_load_label.anchor_left = 0.0
+	_load_label.anchor_right = 1.0
+	_load_label.anchor_top = 0.5
+	_load_label.anchor_bottom = 0.5
+	_load_label.offset_left = 0
+	_load_label.offset_right = 0
+	_load_label.offset_top = -30
+	_load_label.offset_bottom = 30
+	_load_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_load_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	
 	add_child(canvas)
 
@@ -598,6 +611,7 @@ func _setup_hardened_diag_hud() -> void:
 	pause_node.dead_changed.connect(_on_pause_dead_changed)
 	pause_node.save_requested.connect(_on_pause_save_requested)
 	pause_node.new_game_confirmed.connect(_on_pause_new_game_confirmed)
+	pause_node.hud_visibility_toggled.connect(_on_pause_hud_toggled)
 	_pause_overlay = pause_node
 
 	add_child(hud_layer)
@@ -869,6 +883,32 @@ func _on_pause_dead_changed(idx: int) -> void:
 func _on_pause_save_requested() -> void:
 	if Engine.has_meta("SaveManager"):
 		Engine.get_meta("SaveManager").save_now()
+
+# Toggle "cinematic mode" — hides every HUD overlay so the player gets a
+# clean view of the world.  The pause button itself stays visible (handled
+# inside MobileControlsUI.set_cinematic_mode), so the player can always
+# reach Settings → "SHOW HUD" to restore.
+func _on_pause_hud_toggled(hidden: bool) -> void:
+	# 1. Toggle every CanvasLayer / Control registered in the GameHUD group.
+	for node in get_tree().get_nodes_in_group("GameHUD"):
+		if "visible" in node:
+			node.visible = not hidden
+	# 2. MobileControlsUI keeps the corner PAUSE button visible/active even
+	# while everything else in it goes dark.
+	for mc in get_tree().get_nodes_in_group("mobile_controls_ui"):
+		if mc.has_method("set_cinematic_mode"):
+			mc.set_cinematic_mode(hidden)
+	# 3. Suppress every SpaceStation's DOCK prompt — the prompt lives on the
+	# station's own CanvasLayer (not in GameHUD) and auto-shows in _process
+	# whenever the player is in range, so a one-shot hide gets overwritten
+	# next frame.  Set the class-level flag the station checks each tick.
+	var ss := load("res://src/world/SpaceStation.gd")
+	if ss:
+		ss.set_hud_hidden(hidden)
+	if hidden:
+		for s in get_tree().get_nodes_in_group("SpaceStation"):
+			if "_prompt_btn" in s and s._prompt_btn != null:
+				s._prompt_btn.hide()
 
 func _on_pause_new_game_confirmed() -> void:
 	# Destructive: nuke save.json then reload Main so all managers re-init

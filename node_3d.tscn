@@ -8,9 +8,8 @@
 [node name="Node3D" type="Node3D" unique_id=1729097473]
 script = ExtResource("1_main")
 
-[node name="FloatingOrigin" type="Node" parent="." unique_id=175951537 node_paths=PackedStringArray("player_node")]
+[node name="FloatingOrigin" type="Node" parent="." unique_id=175951537]
 script = ExtResource("2_origin")
-player_node = NodePath("../Player")
 
 [node name="Player" parent="." unique_id=1244927095 instance=ExtResource("3_player")]
 

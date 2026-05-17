@@ -58,17 +58,23 @@ var _inv_label: Label = null
 var _creds_label: Label = null
 var _forge_slots: Array = []          # Array[OptionButton] (legacy, unused)
 var _forge_selected: Array[String] = []  # Up to 3 chosen resource names
-var _forge_card_grid: GridContainer = null
+var _forge_card_grid: VBoxContainer = null
 var _forge_slot_labels: Array = []    # 3 Label nodes showing chosen slots
+var _forge_slot_hints: Array = []     # 3 small "tap to remove" hint labels
+var _forge_slot_panels: Array = []    # 3 ForgeSlot panels — for stylebox tinting
 var _forge_btn: Button = null
 var _forge_cost_label: Label = null
 var _forge_status: Label = null
-var _planets_container: VBoxContainer = null
-var _worlds_header: Label = null
 var _prompt_btn: Button = null
 var _ui_visible: bool = false
 var _in_range: bool = false
 var _cinematic_active: bool = false
+
+# Forge-ready celebration animation: rainbow modulate + scale pulse on the
+# FORGE PLANET button when all 3 slots are filled and the cost is affordable.
+var _forge_ready_tween: Tween = null
+var _forge_ready_scale_tween: Tween = null
+var _forge_ready_active: bool = false
 
 # ACE SIGNALS: Notify the universe of major system changes
 signal planet_forged(count: int)
@@ -79,11 +85,30 @@ var _market_rows_vbox: VBoxContainer = null
 var _market_status: Label = null
 
 # Tab references
-var _tab_btns: Array = []  # [market_btn, forge_btn, upgrades_btn]
-var _active_tab: int = 0  # 0 = Market, 1 = Forge, 2 = Upgrades
+var _tab_btns: Array = []  # [market_btn, upgrades_btn, planets_btn, forge_btn]
+var _active_tab: int = 0  # 0 = Market, 1 = Upgrades, 2 = Planets, 3 = Forge
 var _tab_market_panel: Control = null
 var _tab_forge_panel: Control = null
 var _tab_upgrades_panel: Control = null
+var _tab_planets_panel: Control = null
+# Planets tab paging state — index into _active_planets for the currently
+# displayed planet, plus refs to nodes that get repopulated each refresh.
+var _planet_view_idx: int = 0
+var _planet_illustration: TextureRect = null
+var _planet_name_lbl: Label = null
+var _planet_rank_badge: PanelContainer = null
+var _planet_rank_lbl: Label = null
+var _planet_combo_lbl: Label = null
+var _planet_page_lbl: Label = null
+var _planet_resource_grid: GridContainer = null
+var _planet_prev_btn: Button = null
+var _planet_next_btn: Button = null
+var _planet_empty_lbl: Label = null
+var _planet_content_root: VBoxContainer = null
+var _planet_content_window: Control = null   # clipping wrapper for slide animation
+var _planet_dismantle_btn: Button = null
+var _planet_slide_tween: Tween = null
+var _planet_slide_in_progress: bool = false
 var _upgrade_rows: Dictionary = {}  # track -> PanelContainer
 var _upgrades_status: Label = null
 
@@ -104,6 +129,38 @@ static func get_total_forges() -> int:
 static func set_total_forges(n: int) -> void:
 	_total_forges = max(0, int(n))
 
+# Called by LootGem on collection so we can mark resources discovered on
+# the planet they came from.  No-op if the planet isn't a forged one
+# (e.g., legacy/natural worlds we don't track).  Notifies a live
+# SpaceStation so any open Planets tab refreshes immediately.
+static func record_discovery(planet_node: Node, resource_name: String) -> void:
+	if planet_node == null or resource_name == "":
+		return
+	for entry in _active_planets:
+		if entry.get("node", null) == planet_node:
+			var discovered: Array = entry.get("discovered", [])
+			if not discovered.has(resource_name):
+				discovered.append(resource_name)
+				entry["discovered"] = discovered
+				# Refresh any open station UI showing this planet.
+				_emit_discovery_refresh()
+			return
+
+# Walks SpaceStation instances in the tree and asks them to refresh their
+# Planets tab.  Done as a soft pull so we don't need a global signal bus.
+# Throttled to only refresh stations whose UI is actually open AND on the
+# Planets tab — otherwise we'd rebuild the planet view on every shard
+# collected (10-20 per mineral × every station in the world).
+static func _emit_discovery_refresh() -> void:
+	if Engine.get_main_loop() == null: return
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null: return
+	for station in tree.get_nodes_in_group("SpaceStation"):
+		var visible: bool = bool(station.get("_ui_visible")) if "_ui_visible" in station else false
+		var on_planets_tab: bool = int(station.get("_active_tab")) == 2 if "_active_tab" in station else false
+		if visible and on_planets_tab and station.has_method("_refresh_planets_ui"):
+			station.call_deferred("_refresh_planets_ui")
+
 class ForgeSlot extends PanelContainer:
 	var slot_index: int = 0
 	var station_ref: Node = null
@@ -116,21 +173,11 @@ class ForgeSlot extends PanelContainer:
 	func _drop_data(_at_position: Vector2, data: Variant) -> void:
 		station_ref._on_card_pressed(data["res"])
 	func _get_drag_data(_at_position: Vector2) -> Variant:
-		# On mobile, drag-and-drop competes with ScrollContainer touch
-		# scrolling. Tap-to-remove (below) covers the same intent.
-		if station_ref and station_ref._is_mobile_ui: return null
+		# Slots live outside the scrollable resource list, so drag-from-slot
+		# doesn't fight the ScrollContainer on mobile.
 		if slot_index >= station_ref._forge_selected.size(): return null
 		var r: String = station_ref._forge_selected[slot_index]
-		var preview := PanelContainer.new()
-		var sb := StyleBoxFlat.new()
-		sb.bg_color = station_ref._tier_color(ResourceRegistry.get_tier(r)).darkened(0.5)
-		sb.content_margin_left = 10; sb.content_margin_right = 10
-		sb.content_margin_top = 4; sb.content_margin_bottom = 4
-		preview.add_theme_stylebox_override("panel", sb)
-		var lbl := Label.new()
-		lbl.text = ResourceRegistry.get_abbrev(r)
-		preview.add_child(lbl)
-		set_drag_preview(preview)
+		set_drag_preview(station_ref._make_drag_preview(r))
 		station_ref._on_remove_slot(slot_index)
 		return {"type": "removed_resource", "res": r}
 	func _gui_input(event: InputEvent) -> void:
@@ -153,41 +200,112 @@ class ResourceCard extends PanelContainer:
 	var resource_id: String = ""
 	var available_count: int = 0
 	var station_ref: Node = null
+	# Press/hold/arm state for visual feedback.
+	# pressed: finger is down on this card (dim tint).
+	# armed:   mobile press-and-hold threshold reached (bright tint + floating
+	#          ghost preview) — drag is now permitted.
+	var _press_time_ms: int = 0
+	var _pressed: bool = false
+	var _armed: bool = false
+	var _drag_ghost: Control = null
+	# How long the finger must stay down on mobile before a drag is permitted.
+	# Below this, a motion gesture falls through to the ScrollContainer so the
+	# user can scroll the resource list without accidentally dragging.
+	const _DRAG_ARM_MS: int = 220
 	func _init() -> void:
 		# Gamepad navigation: focusable so ui_accept (Enter / gamepad A)
 		# triggers the same "add to forge" action that drag-in does.
 		focus_mode = Control.FOCUS_ALL
+	func _exit_tree() -> void:
+		_hide_drag_ghost()
+	func _process(_delta: float) -> void:
+		# Mobile hold-to-arm: once the threshold passes without motion, swap
+		# to the "drag is ready" visuals and surface a floating ghost preview
+		# so the user knows they can now drag.
+		if _pressed and not _armed:
+			var elapsed: int = Time.get_ticks_msec() - _press_time_ms
+			if elapsed >= _DRAG_ARM_MS:
+				_set_armed(true)
+	func _set_pressed_visual(p: bool) -> void:
+		if p:
+			modulate = Color(0.82, 0.86, 1.0)
+		else:
+			modulate = Color(1, 1, 1)
+	func _set_armed(a: bool) -> void:
+		_armed = a
+		if a:
+			modulate = Color(1.25, 1.2, 1.45)
+			pivot_offset = size * 0.5
+			scale = Vector2(1.035, 1.035)
+			_show_drag_ghost()
+		else:
+			scale = Vector2.ONE
+			_hide_drag_ghost()
+	func _show_drag_ghost() -> void:
+		if _drag_ghost != null or station_ref == null or not is_inside_tree():
+			return
+		_drag_ghost = station_ref._make_drag_preview(resource_id)
+		_drag_ghost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# Add to the modal root so the ghost can float above the
+		# ScrollContainer that clips the card.
+		var host: Node = station_ref._panel if station_ref._panel else station_ref
+		host.add_child(_drag_ghost)
+		var card_rect: Rect2 = get_global_rect()
+		_drag_ghost.global_position = Vector2(
+			card_rect.position.x + card_rect.size.x * 0.5,
+			card_rect.position.y
+		)
+	func _hide_drag_ghost() -> void:
+		if _drag_ghost != null:
+			_drag_ghost.queue_free()
+			_drag_ghost = null
+	func _reset_press_state() -> void:
+		_hide_drag_ghost()
+		_pressed = false
+		_armed = false
+		_press_time_ms = 0
+		set_process(false)
+		modulate = Color(1, 1, 1)
+		scale = Vector2.ONE
 	func _get_drag_data(_at_position: Vector2) -> Variant:
-		# On mobile, drag-and-drop competes with ScrollContainer touch
-		# scrolling. Tap-to-add (below) covers the same intent.
-		if station_ref and station_ref._is_mobile_ui: return null
-		if available_count <= 0 or station_ref._forge_selected.size() >= 3: return null
-		var preview := PanelContainer.new()
-		var sb := StyleBoxFlat.new()
-		sb.bg_color = station_ref._tier_color(ResourceRegistry.get_tier(resource_id)).darkened(0.5)
-		sb.content_margin_left = 10; sb.content_margin_right = 10
-		sb.content_margin_top = 4; sb.content_margin_bottom = 4
-		preview.add_theme_stylebox_override("panel", sb)
-		var lbl := Label.new()
-		lbl.text = ResourceRegistry.get_abbrev(resource_id)
-		preview.add_child(lbl)
-		set_drag_preview(preview)
+		# Drag works on mobile too — the new forge layout isolates the
+		# scrollable area to the left column so a horizontal drag toward the
+		# slots on the right doesn't conflict with vertical scroll.
+		if available_count <= 0 or station_ref._forge_selected.size() >= 3:
+			_reset_press_state()
+			return null
+		# Mobile hold gate: if the user starts moving immediately after touch,
+		# treat the gesture as a scroll, not a drag.  Desktop has no hold
+		# requirement — a mouse click+drag is unambiguous.
+		if station_ref._is_mobile_ui and not _armed:
+			return null
+		set_drag_preview(station_ref._make_drag_preview(resource_id))
+		_reset_press_state()
 		return {"type": "resource", "res": resource_id}
 	func _gui_input(event: InputEvent) -> void:
 		if event.is_action_pressed("ui_accept"):
 			if station_ref and available_count > 0 and station_ref._forge_selected.size() < 3:
 				station_ref._on_card_pressed(resource_id)
 				accept_event()
-		# Mobile tap-to-add. Fire on RELEASE, not press — so a swipe-to-scroll
-		# over a card gets stolen by the ScrollContainer mid-drag and the
-		# release never reaches us. Only a clean tap fires.
-		elif station_ref and station_ref._is_mobile_ui \
-				and event is InputEventMouseButton \
-				and not event.pressed \
-				and event.button_index == MOUSE_BUTTON_LEFT:
-			if available_count > 0 and station_ref._forge_selected.size() < 3:
-				station_ref._on_card_pressed(resource_id)
-				accept_event()
+		elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+			if event.pressed:
+				_press_time_ms = Time.get_ticks_msec()
+				_pressed = true
+				_set_pressed_visual(true)
+				# _process drives the mobile arm-after-hold visual swap.
+				# Desktop drag is immediate on motion, no timer needed.
+				if station_ref and station_ref._is_mobile_ui:
+					set_process(true)
+			else:
+				# Release.  If we were armed (hold completed) but never
+				# moved, treat as "changed my mind" — just clear state.
+				# Otherwise on mobile a quick tap fires tap-to-add.
+				var was_armed := _armed
+				_reset_press_state()
+				if not was_armed and station_ref and station_ref._is_mobile_ui \
+						and available_count > 0 and station_ref._forge_selected.size() < 3:
+					station_ref._on_card_pressed(resource_id)
+					accept_event()
 
 func _ready() -> void:
 	add_to_group("SpaceStation")
@@ -387,16 +505,10 @@ func _build_ui() -> void:
 	_close_btn.pressed.connect(_hide_ui)
 	plate_inner.add_child(_close_btn)
 
-	# ---- Title ----
-	var title := Label.new()
-	title.text = "[ STATION " + station_display_name.to_upper() + " ]"
-	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	title.add_theme_font_size_override("font_size", 34)
-	title.add_theme_color_override("font_color", Color.CYAN)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(title)
-
 	# ---- Credits ----
+	# Station name + inventory summary intentionally removed — the forge UI
+	# shows per-resource quantities in the left column, and the close X +
+	# station-context is implicit from the docked modal.
 	_creds_label = Label.new()
 	_creds_label.text = "$0"
 	_creds_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -405,24 +517,14 @@ func _build_ui() -> void:
 	_creds_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(_creds_label)
 
-	# ---- Inventory ----
-	_inv_label = Label.new()
-	_inv_label.text = "Inventory: (empty)"
-	_inv_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_inv_label.add_theme_font_size_override("font_size", 20)
-	_inv_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
-	_inv_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_inv_label.autowrap_mode = TextServer.AUTOWRAP_WORD
-	vbox.add_child(_inv_label)
-
-	# ---- Tabs: MARKET | FORGE ----
+	# ---- Tabs: MARKET | UPGRADES | PLANETS | FORGE ----
 	var tab_row := HBoxContainer.new()
 	tab_row.add_theme_constant_override("separation", 4)
 	tab_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_child(tab_row)
 
-	for tab_i in range(3):
-		var tab_lbl: String = ["  MARKET  ", "  FORGE  ", "  UPGRADES  "][tab_i]
+	for tab_i in range(4):
+		var tab_lbl: String = ["  MARKET  ", "  UPGRADES  ", "  PLANETS  ", "  FORGE  "][tab_i]
 		var tb: Button = Button.new()
 		tb.text = tab_lbl
 		# toggle_mode + style_button gives us recessed-when-pressed behavior;
@@ -509,60 +611,46 @@ func _build_ui() -> void:
 	_tab_market_panel.add_child(sell_all_btn)
 
 	# ======================== FORGE TAB ========================
-	_tab_forge_panel = VBoxContainer.new()
-	_tab_forge_panel.add_theme_constant_override("separation", 8)
+	# Forge tab is a sibling of _market_scroll under `vbox` (NOT inside the
+	# outer ScrollContainer).  This lets the slots+button column fill the
+	# visible height exactly, with only the resources column scrolling.
+	# _switch_tab toggles _market_scroll vs _tab_forge_panel visibility.
+	_tab_forge_panel = HBoxContainer.new()
+	_tab_forge_panel.add_theme_constant_override("separation", 12)
 	_tab_forge_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	inner_vbox.add_child(_tab_forge_panel)
+	_tab_forge_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(_tab_forge_panel)
+
+	# ── LEFT COLUMN: scrollable resource list ─────────────────────────
+	var left_col := VBoxContainer.new()
+	left_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left_col.add_theme_constant_override("separation", 6)
+	_tab_forge_panel.add_child(left_col)
 
 	var forge_title := Label.new()
-	forge_title.text = "— FORGE PLANET —\n" + ("Tap 3 resources to fill the slots" if _is_mobile_ui else "Drag 3 resources into the slots")
+	forge_title.text = "— RESOURCES —\nDrag or tap to fill slots"
 	forge_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	forge_title.add_theme_font_size_override("font_size", 20)
+	forge_title.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 16)
 	forge_title.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
 	forge_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	forge_title.autowrap_mode = TextServer.AUTOWRAP_WORD
-	_tab_forge_panel.add_child(forge_title)
+	left_col.add_child(forge_title)
 
-	# ── Selected slots row (inside forge tab) ──────────────────────────
-	var slots_row := HBoxContainer.new()
-	slots_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	slots_row.add_theme_constant_override("separation", 6)
-	_tab_forge_panel.add_child(slots_row)
+	var res_scroll := ScrollContainer.new()
+	res_scroll.process_mode = PROCESS_MODE_ALWAYS
+	res_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	res_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	res_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	res_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	left_col.add_child(res_scroll)
 
-	for i in range(3):
-		var slot_panel := ForgeSlot.new()
-		slot_panel.slot_index = i
-		slot_panel.station_ref = self
-		
-		var slot_sb := StyleBoxFlat.new()
-		slot_sb.bg_color = Color(0.08, 0.08, 0.15)
-		slot_sb.border_color = Color(0.4, 0.4, 0.6)
-		slot_sb.set_border_width_all(2)
-		slot_sb.set_corner_radius_all(6)
-		slot_sb.content_margin_left = 6; slot_sb.content_margin_right = 6
-		slot_sb.content_margin_top = 4;  slot_sb.content_margin_bottom = 4
-		slot_panel.add_theme_stylebox_override("panel", slot_sb)
-		slot_panel.custom_minimum_size = Vector2(_FORGE_SLOT_W_MOBILE, _FORGE_SLOT_H_MOBILE) if _is_mobile_ui else Vector2(90, 40)
-
-		var slot_vb := VBoxContainer.new()
-		slot_vb.alignment = BoxContainer.ALIGNMENT_CENTER
-		slot_panel.add_child(slot_vb)
-
-		var slot_lbl := Label.new()
-		slot_lbl.text = "[ SLOT " + str(i + 1) + " ]"
-		slot_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		slot_lbl.add_theme_font_size_override("font_size", 17 if _is_mobile_ui else 14)
-		slot_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
-		slot_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		slot_vb.add_child(slot_lbl)
-		_forge_slot_labels.append(slot_lbl)
-
-		# Keep the array populated for legacy sync, but hide the remove btn
-		var remove_btn := Button.new()
-		remove_btn.visible = false
-		_forge_slots.append(remove_btn)
-
-		slots_row.add_child(slot_panel)
+	# Repurpose _forge_card_grid as a vertical list of resource rows. Same
+	# member name to avoid churn at callsites; only the layout differs.
+	_forge_card_grid = VBoxContainer.new()
+	_forge_card_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_forge_card_grid.add_theme_constant_override("separation", 6)
+	res_scroll.add_child(_forge_card_grid)
 
 	_forge_status = Label.new()
 	_forge_status.text = ""
@@ -571,21 +659,96 @@ func _build_ui() -> void:
 	_forge_status.add_theme_color_override("font_color", Color(1.0, 0.5, 0.3))
 	_forge_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_forge_status.autowrap_mode = TextServer.AUTOWRAP_WORD
-	_tab_forge_panel.add_child(_forge_status)
+	left_col.add_child(_forge_status)
 
-	# ── Resource card grid (inside forge tab) ──────────────────────────
-	var card_title := Label.new()
-	card_title.text = "Available Resources:"
-	card_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	card_title.add_theme_font_size_override("font_size", 16)
-	card_title.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
-	_tab_forge_panel.add_child(card_title)
+	# ── RIGHT COLUMN: 3 large stacked slots + cost + giant FORGE button ─
+	var right_col := VBoxContainer.new()
+	right_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_col.add_theme_constant_override("separation", 6)
+	var right_col_w: int = 240 if _is_mobile_ui else 300
+	right_col.custom_minimum_size = Vector2(right_col_w, 0)
+	_tab_forge_panel.add_child(right_col)
 
-	_forge_card_grid = GridContainer.new()
-	_forge_card_grid.columns = 2 if _is_mobile_ui else 3
-	_forge_card_grid.add_theme_constant_override("h_separation", 10 if _is_mobile_ui else 8)
-	_forge_card_grid.add_theme_constant_override("v_separation", 10 if _is_mobile_ui else 8)
-	_tab_forge_panel.add_child(_forge_card_grid)
+	var slots_header := Label.new()
+	slots_header.text = "— FORGE PLANET —\nUse resources to forge a planet"
+	slots_header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	slots_header.add_theme_font_size_override("font_size", 20 if _is_mobile_ui else 18)
+	slots_header.add_theme_color_override("font_color", Color(0.8, 0.6, 1.0))
+	slots_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	slots_header.autowrap_mode = TextServer.AUTOWRAP_WORD
+	right_col.add_child(slots_header)
+
+	# Vertical group of the 3 slots — its own EXPAND_FILL wrapper so the cost
+	# label + FORGE button sit snug at the bottom (small separation), while
+	# the slots share whatever vertical space remains.
+	var slots_box := VBoxContainer.new()
+	slots_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slots_box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	slots_box.add_theme_constant_override("separation", 8)
+	right_col.add_child(slots_box)
+
+	for i in range(3):
+		var slot_panel := ForgeSlot.new()
+		slot_panel.slot_index = i
+		slot_panel.station_ref = self
+		slot_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		slot_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+		var slot_sb := StyleBoxFlat.new()
+		slot_sb.bg_color = Color(0.08, 0.08, 0.15)
+		slot_sb.border_color = Color(0.4, 0.4, 0.6)
+		slot_sb.set_border_width_all(2)
+		slot_sb.set_corner_radius_all(10)
+		slot_sb.content_margin_left = 10; slot_sb.content_margin_right = 10
+		slot_sb.content_margin_top = 8;   slot_sb.content_margin_bottom = 8
+		slot_panel.add_theme_stylebox_override("panel", slot_sb)
+
+		# Side-by-side: large abbrev on the left, small "tap to remove" hint
+		# on the right.  Center-aligned so the empty placeholder reads cleanly.
+		var slot_hb := HBoxContainer.new()
+		slot_hb.alignment = BoxContainer.ALIGNMENT_CENTER
+		slot_hb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		slot_hb.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		slot_hb.add_theme_constant_override("separation", 12)
+		slot_panel.add_child(slot_hb)
+
+		var slot_lbl := Label.new()
+		slot_lbl.text = "[ SLOT " + str(i + 1) + " ]"
+		slot_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot_lbl.add_theme_font_size_override("font_size", 32 if _is_mobile_ui else 28)
+		slot_lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
+		slot_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		slot_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		slot_hb.add_child(slot_lbl)
+		_forge_slot_labels.append(slot_lbl)
+
+		# Hidden until the slot is filled — then surfaces "tap to remove" so
+		# players discover the removal gesture.  Sits to the right of the
+		# abbreviation so it reads as "Cu — tap to remove".
+		var slot_hint := Label.new()
+		slot_hint.text = "tap to remove"
+		slot_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		slot_hint.add_theme_font_size_override("font_size", 14 if _is_mobile_ui else 12)
+		slot_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.8, 0.85))
+		slot_hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		slot_hint.visible = false
+		slot_hb.add_child(slot_hint)
+		_forge_slot_hints.append(slot_hint)
+
+		# Keep _forge_slots populated for legacy compatibility (handlers
+		# elsewhere index into it).  Remove buttons aren't used in this layout.
+		var remove_btn := Button.new()
+		remove_btn.visible = false
+		_forge_slots.append(remove_btn)
+
+		_forge_slot_panels.append(slot_panel)
+		slots_box.add_child(slot_panel)
+
+	# Cost + button live in a tight footer group so the button hugs the slots.
+	var footer := VBoxContainer.new()
+	footer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	footer.add_theme_constant_override("separation", 4)
+	right_col.add_child(footer)
 
 	_forge_cost_label = Label.new()
 	_forge_cost_label.text = ""
@@ -593,29 +756,188 @@ func _build_ui() -> void:
 	_forge_cost_label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.6))
 	_forge_cost_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_forge_cost_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_tab_forge_panel.add_child(_forge_cost_label)
+	footer.add_child(_forge_cost_label)
 
 	_forge_btn = Button.new()
 	_forge_btn.text = "FORGE PLANET"
-	HUDStyle.style_button(_forge_btn, HUDStyle.BTN_PINK, 28 if _is_mobile_ui else 26)
-	if _is_mobile_ui:
-		_forge_btn.custom_minimum_size = Vector2(0, _FORGE_BTN_H_MOBILE)
+	HUDStyle.style_button(_forge_btn, HUDStyle.BTN_PINK, 40 if _is_mobile_ui else 36)
+	_forge_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_forge_btn.custom_minimum_size = Vector2(0, 120 if _is_mobile_ui else 96)
 	_forge_btn.pressed.connect(_on_forge_planet)
-	_tab_forge_panel.add_child(_forge_btn)
+	# Forge-ready animation scales from the button's centre.
+	_forge_btn.pivot_offset = Vector2.ZERO
+	_forge_btn.resized.connect(func() -> void:
+		_forge_btn.pivot_offset = _forge_btn.size * 0.5)
+	footer.add_child(_forge_btn)
 
-	# ---- Active Worlds (forge tab only — your forged planets live here) ----
-	_tab_forge_panel.add_child(HSeparator.new())
-	_worlds_header = Label.new()
-	_worlds_header.text = "— ACTIVE WORLDS (0/" + str(_max_planets()) + ") —"
-	_worlds_header.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_worlds_header.add_theme_font_size_override("font_size", 20)
-	_worlds_header.add_theme_color_override("font_color", Color(0.6, 1.0, 0.8))
-	_worlds_header.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_tab_forge_panel.add_child(_worlds_header)
+	# Active Worlds section intentionally removed from the Forge tab —
+	# replaced by the dedicated Planets tab below.
 
-	_planets_container = VBoxContainer.new()
-	_planets_container.add_theme_constant_override("separation", 6)
-	_tab_forge_panel.add_child(_planets_container)
+	# ======================== PLANETS TAB ========================
+	# Sibling of _tab_forge_panel under `vbox` — fills the visible area and
+	# never overflows into the outer ScrollContainer.  One planet at a time;
+	# prev/next arrows step through _active_planets.
+	_tab_planets_panel = HBoxContainer.new()
+	_tab_planets_panel.add_theme_constant_override("separation", 8)
+	_tab_planets_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tab_planets_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_tab_planets_panel.visible = false
+	vbox.add_child(_tab_planets_panel)
+
+	_planet_prev_btn = Button.new()
+	_planet_prev_btn.text = "‹"
+	HUDStyle.style_button(_planet_prev_btn, HUDStyle.BTN_BLUE, 48 if _is_mobile_ui else 40)
+	_planet_prev_btn.custom_minimum_size = Vector2(64 if _is_mobile_ui else 52, 0)
+	_planet_prev_btn.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_planet_prev_btn.pressed.connect(_on_planet_prev)
+	_tab_planets_panel.add_child(_planet_prev_btn)
+
+	# Clipping window so the slide animation doesn't bleed past the arrows.
+	# The center content is a child of this Control with PRESET_FULL_RECT
+	# anchors so we can tween its offsets to slide it horizontally.
+	_planet_content_window = Control.new()
+	_planet_content_window.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_planet_content_window.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_planet_content_window.clip_contents = true
+	_planet_content_window.mouse_filter = Control.MOUSE_FILTER_PASS
+	_tab_planets_panel.add_child(_planet_content_window)
+
+	_planet_content_root = VBoxContainer.new()
+	_planet_content_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_planet_content_root.add_theme_constant_override("separation", 6)
+	_planet_content_root.alignment = BoxContainer.ALIGNMENT_BEGIN
+	_planet_content_window.add_child(_planet_content_root)
+
+	# Page indicator sits across the top, centered above the two columns.
+	_planet_page_lbl = Label.new()
+	_planet_page_lbl.text = ""
+	_planet_page_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_planet_page_lbl.add_theme_font_size_override("font_size", 14 if _is_mobile_ui else 13)
+	_planet_page_lbl.add_theme_color_override("font_color", Color(0.55, 0.55, 0.65))
+	_planet_page_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_planet_content_root.add_child(_planet_page_lbl)
+
+	# ── TWO COLUMNS: illustration left, resource chips right ──────────
+	var two_col := HBoxContainer.new()
+	two_col.add_theme_constant_override("separation", 16)
+	two_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	two_col.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_planet_content_root.add_child(two_col)
+
+	# ── LEFT COLUMN: name / rank+combo / large illustration ───────────
+	var planet_left := VBoxContainer.new()
+	planet_left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	planet_left.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	planet_left.alignment = BoxContainer.ALIGNMENT_CENTER
+	planet_left.add_theme_constant_override("separation", 8)
+	two_col.add_child(planet_left)
+
+	_planet_name_lbl = Label.new()
+	_planet_name_lbl.text = ""
+	_planet_name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_planet_name_lbl.add_theme_font_size_override("font_size", 28 if _is_mobile_ui else 26)
+	_planet_name_lbl.add_theme_color_override("font_color", Color(0.9, 0.92, 1.0))
+	_planet_name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	planet_left.add_child(_planet_name_lbl)
+
+	# Rank badge + combo on one line, centered.
+	var rank_row := HBoxContainer.new()
+	rank_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	rank_row.add_theme_constant_override("separation", 12)
+	planet_left.add_child(rank_row)
+
+	_planet_rank_badge = PanelContainer.new()
+	_planet_rank_badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var badge_sb := StyleBoxFlat.new()
+	badge_sb.bg_color = Color(0.2, 0.2, 0.25)
+	badge_sb.border_color = Color(0.5, 0.5, 0.6)
+	badge_sb.set_border_width_all(2)
+	badge_sb.set_corner_radius_all(8)
+	badge_sb.content_margin_left = 12; badge_sb.content_margin_right = 12
+	badge_sb.content_margin_top = 3;   badge_sb.content_margin_bottom = 3
+	_planet_rank_badge.add_theme_stylebox_override("panel", badge_sb)
+	_planet_rank_lbl = Label.new()
+	_planet_rank_lbl.text = ""
+	_planet_rank_lbl.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 20)
+	_planet_rank_badge.add_child(_planet_rank_lbl)
+	rank_row.add_child(_planet_rank_badge)
+
+	_planet_combo_lbl = Label.new()
+	_planet_combo_lbl.text = ""
+	_planet_combo_lbl.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 16)
+	_planet_combo_lbl.add_theme_color_override("font_color", Color(0.75, 0.9, 0.8))
+	_planet_combo_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	rank_row.add_child(_planet_combo_lbl)
+
+	# Illustration fills the remaining vertical space in the left column.
+	# STRETCH_KEEP_ASPECT_CENTERED + EXPAND_FILL lets the icon grow as big as
+	# the column allows while staying square + crisp (nearest filter).
+	_planet_illustration = TextureRect.new()
+	_planet_illustration.custom_minimum_size = Vector2(
+		240 if _is_mobile_ui else 280,
+		240 if _is_mobile_ui else 280)
+	_planet_illustration.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_planet_illustration.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_planet_illustration.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_planet_illustration.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_planet_illustration.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	planet_left.add_child(_planet_illustration)
+
+	# ── RIGHT COLUMN: resource chip grid + dismantle ───────────────────
+	var planet_right := VBoxContainer.new()
+	planet_right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	planet_right.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	planet_right.add_theme_constant_override("separation", 10)
+	two_col.add_child(planet_right)
+
+	var slots_title := Label.new()
+	slots_title.text = "RESOURCES ON THIS PLANET"
+	slots_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	slots_title.add_theme_font_size_override("font_size", 16 if _is_mobile_ui else 14)
+	slots_title.add_theme_color_override("font_color", Color(0.7, 0.6, 1.0))
+	slots_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	planet_right.add_child(slots_title)
+
+	_planet_resource_grid = GridContainer.new()
+	_planet_resource_grid.columns = 3
+	_planet_resource_grid.add_theme_constant_override("h_separation", 8)
+	_planet_resource_grid.add_theme_constant_override("v_separation", 10)
+	_planet_resource_grid.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_planet_resource_grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	planet_right.add_child(_planet_resource_grid)
+
+	# Dismantle button — narrower and centered at the bottom of the column.
+	_planet_dismantle_btn = Button.new()
+	_planet_dismantle_btn.text = "Dismantle Planet"
+	HUDStyle.style_button(_planet_dismantle_btn, HUDStyle.BTN_RED, 18 if _is_mobile_ui else 16)
+	_planet_dismantle_btn.custom_minimum_size = Vector2(
+		200 if _is_mobile_ui else 180,
+		44 if _is_mobile_ui else 38)
+	_planet_dismantle_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_planet_dismantle_btn.pressed.connect(_on_planet_view_dismantle)
+	planet_right.add_child(_planet_dismantle_btn)
+
+	# Empty state — shown when _active_planets is empty.  Sits on top of
+	# the two-column layout so it can hide everything else without re-flow.
+	_planet_empty_lbl = Label.new()
+	_planet_empty_lbl.text = "No forged planets yet.\nForge one from the Forge tab."
+	_planet_empty_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_planet_empty_lbl.add_theme_font_size_override("font_size", 20 if _is_mobile_ui else 18)
+	_planet_empty_lbl.add_theme_color_override("font_color", Color(0.55, 0.55, 0.6))
+	_planet_empty_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_planet_empty_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_planet_empty_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_planet_empty_lbl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_planet_empty_lbl.visible = false
+	_planet_content_window.add_child(_planet_empty_lbl)
+
+	_planet_next_btn = Button.new()
+	_planet_next_btn.text = "›"
+	HUDStyle.style_button(_planet_next_btn, HUDStyle.BTN_BLUE, 48 if _is_mobile_ui else 40)
+	_planet_next_btn.custom_minimum_size = Vector2(64 if _is_mobile_ui else 52, 0)
+	_planet_next_btn.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_planet_next_btn.pressed.connect(_on_planet_next)
+	_tab_planets_panel.add_child(_planet_next_btn)
 
 	# ======================== UPGRADES TAB ========================
 	_tab_upgrades_panel = VBoxContainer.new()
@@ -642,14 +964,14 @@ func _build_ui() -> void:
 		var inv = Engine.get_meta("InventoryManager")
 		inv.inventory_changed.connect(func(_t: String, _a: int) -> void:
 			_refresh_inv_display()
-			if _active_tab == 2:
+			if _active_tab == 1:
 				_rebuild_all_upgrade_rows())
 		_refresh_inv_display()
 
 	if Engine.has_meta("EconomyManager"):
 		var econ2 = Engine.get_meta("EconomyManager")
 		econ2.currency_changed.connect(func(_n: int) -> void:
-			if _active_tab == 2:
+			if _active_tab == 1:
 				_rebuild_all_upgrade_rows())
 
 	if Engine.has_meta("UpgradeManager"):
@@ -666,14 +988,17 @@ func _build_ui() -> void:
 func _refresh_inv_display() -> void:
 	if not Engine.has_meta("InventoryManager"):
 		return
-	var inv = Engine.get_meta("InventoryManager")
-	var all: Dictionary = inv.get_all()
-	var parts: Array[String] = []
-	for r in ResourceRegistry.all_names():
-		var amt: int = all.get(r, 0)
-		if amt > 0:
-			parts.append(ResourceRegistry.get_abbrev(r) + ":" + str(amt))
-	_inv_label.text = "Inventory: " + ("  ".join(parts) if parts.size() > 0 else "(empty)")
+	# _inv_label was removed from the modal header; the per-resource quantities
+	# now live in the Forge tab's left column.  Skip the summary if no label.
+	if _inv_label != null:
+		var inv = Engine.get_meta("InventoryManager")
+		var all: Dictionary = inv.get_all()
+		var parts: Array[String] = []
+		for r in ResourceRegistry.all_names():
+			var amt: int = all.get(r, 0)
+			if amt > 0:
+				parts.append(ResourceRegistry.get_abbrev(r) + ":" + str(amt))
+		_inv_label.text = "Inventory: " + ("  ".join(parts) if parts.size() > 0 else "(empty)")
 	_rebuild_forge_cards()
 	_rebuild_market_rows()
 
@@ -684,6 +1009,72 @@ func _tier_color(tier: int) -> Color:
 		3: return Color(0.6,  0.3,  1.0)    # Rare — purple
 		4: return Color(1.0,  0.55, 0.05)   # Legendary — gold
 		_: return Color(0.55, 0.55, 0.55)
+
+# Push a sampled palette colour toward the brightness/saturation the player
+# actually perceives on the rendered planet (which benefits from emission,
+# HDR lighting and bloom).  Returns the boosted colour, clamped to [0, 1].
+func _vivify_palette(col: Color, sat_mul: float, val_mul: float) -> Color:
+	var h: float = col.h
+	var s: float = clampf(col.s * sat_mul, 0.0, 1.0)
+	var v: float = clampf(col.v * val_mul, 0.0, 1.0)
+	var out: Color = Color.from_hsv(h, s, v)
+	out.a = col.a
+	return out
+
+# Large, finger-visible drag preview used by ResourceCard and ForgeSlot.
+# The Godot default puts the preview at the cursor's top-left, which on a
+# touchscreen sits directly under the user's fingertip and can be obscured.
+# We oversize the chip and offset its pivot so it floats above the finger.
+func _make_drag_preview(res_id: String) -> Control:
+	var rarity_col: Color = _tier_color(ResourceRegistry.get_tier(res_id))
+	var full_name: String = String(ResourceRegistry.get_data(res_id).get("name", res_id))
+	var abbrev: String = ResourceRegistry.get_abbrev(res_id)
+
+	# Wrapper Control lets us shift the preview up so the chip floats above
+	# the finger instead of hiding underneath it.
+	var preview_root := Control.new()
+	preview_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var chip_w: int = 220 if _is_mobile_ui else 180
+	var chip_h: int = 96 if _is_mobile_ui else 76
+	preview_root.custom_minimum_size = Vector2(chip_w, chip_h)
+
+	var chip := PanelContainer.new()
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	# Float the chip above the finger so it stays visible on touch devices.
+	chip.position = Vector2(- chip_w * 0.5, - chip_h - (40 if _is_mobile_ui else 12))
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = rarity_col.darkened(0.45)
+	sb.border_color = rarity_col
+	sb.set_border_width_all(3)
+	sb.set_corner_radius_all(10)
+	sb.content_margin_left = 14; sb.content_margin_right = 14
+	sb.content_margin_top = 8;   sb.content_margin_bottom = 8
+	chip.add_theme_stylebox_override("panel", sb)
+	preview_root.add_child(chip)
+
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_child(vb)
+
+	var name_lbl := Label.new()
+	name_lbl.text = full_name
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	name_lbl.add_theme_font_size_override("font_size", 22 if _is_mobile_ui else 18)
+	name_lbl.add_theme_color_override("font_color", Color(1, 1, 1))
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(name_lbl)
+
+	var abbrev_lbl := Label.new()
+	abbrev_lbl.text = abbrev
+	abbrev_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	abbrev_lbl.add_theme_font_size_override("font_size", 26 if _is_mobile_ui else 22)
+	abbrev_lbl.add_theme_color_override("font_color", rarity_col)
+	abbrev_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vb.add_child(abbrev_lbl)
+
+	return preview_root
 
 func _rebuild_forge_cards() -> void:
 	if not _forge_card_grid: return
@@ -700,58 +1091,65 @@ func _rebuild_forge_cards() -> void:
 
 		var tier := ResourceRegistry.get_tier(r)
 		var rarity_col := _tier_color(tier)
+		var full_name: String = String(ResourceRegistry.get_data(r).get("name", r))
+		var abbrev: String = ResourceRegistry.get_abbrev(r)
 
 		# Count how many times this resource is already selected
 		var selected_count := _forge_selected.count(r)
 		var available := amt - selected_count
 
-		# Card outer panel
+		# Each resource is a full-width horizontal row: swatch | name (abbrev) | qty
 		var card := ResourceCard.new()
 		card.resource_id = r
 		card.available_count = available
 		card.station_ref = self
-		
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.custom_minimum_size = Vector2(0, 64 if _is_mobile_ui else 48)
+
 		var sb := StyleBoxFlat.new()
 		sb.bg_color = rarity_col.darkened(0.65)
 		sb.border_color = rarity_col
 		sb.set_border_width_all(2)
 		sb.set_corner_radius_all(6)
-		sb.content_margin_left = 6; sb.content_margin_right = 6
-		sb.content_margin_top = 4;  sb.content_margin_bottom = 4
+		sb.content_margin_left = 10; sb.content_margin_right = 10
+		sb.content_margin_top = 6;   sb.content_margin_bottom = 6
 		card.add_theme_stylebox_override("panel", sb)
-		if _is_mobile_ui:
-			card.custom_minimum_size = Vector2(_FORGE_CARD_W_MOBILE, _FORGE_CARD_H_MOBILE)
-			card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		else:
-			card.custom_minimum_size = Vector2(100, 46)
 
-		var vb := VBoxContainer.new()
-		vb.alignment = BoxContainer.ALIGNMENT_CENTER
-		vb.add_theme_constant_override("separation", -2)
-		card.add_child(vb)
+		var hb := HBoxContainer.new()
+		hb.alignment = BoxContainer.ALIGNMENT_CENTER
+		hb.add_theme_constant_override("separation", 10)
+		hb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		card.add_child(hb)
 
-		# Resource name
+		# Tier color swatch on the left.
+		var swatch := ColorRect.new()
+		swatch.color = rarity_col
+		swatch.custom_minimum_size = Vector2(14, 28)
+		swatch.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		swatch.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hb.add_child(swatch)
+
+		# "Copper (Cu)"
 		var name_lbl := Label.new()
-		name_lbl.text = ResourceRegistry.get_abbrev(r)
+		name_lbl.text = full_name + " (" + abbrev + ")"
 		name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		name_lbl.add_theme_font_size_override("font_size", 18 if _is_mobile_ui else 15)
+		name_lbl.add_theme_font_size_override("font_size", 19 if _is_mobile_ui else 17)
 		name_lbl.add_theme_color_override("font_color", rarity_col)
-		name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		vb.add_child(name_lbl)
+		name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		hb.add_child(name_lbl)
 
-		# Qty + tier badge row
-		var sub_row := HBoxContainer.new()
-		sub_row.alignment = BoxContainer.ALIGNMENT_CENTER
-		vb.add_child(sub_row)
-
+		# Quantity on the right.
 		var qty_lbl := Label.new()
 		qty_lbl.text = "x" + str(amt)
-		qty_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		if selected_count > 0:
-			qty_lbl.text += " (" + str(available) + " left)"
-		qty_lbl.add_theme_font_size_override("font_size", 15 if _is_mobile_ui else 12)
-		qty_lbl.add_theme_color_override("font_color", Color(0.8, 0.8, 0.8))
-		sub_row.add_child(qty_lbl)
+			qty_lbl.text += "  (" + str(available) + " left)"
+		qty_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		qty_lbl.add_theme_font_size_override("font_size", 17 if _is_mobile_ui else 15)
+		qty_lbl.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
+		qty_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		qty_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		hb.add_child(qty_lbl)
 
 		# Greyed out if none available or slots full
 		var can_pick := available > 0 and _forge_selected.size() < 3
@@ -759,6 +1157,7 @@ func _rebuild_forge_cards() -> void:
 			sb.bg_color = Color(0.08, 0.08, 0.1)
 			sb.border_color = Color(0.25, 0.25, 0.3)
 			name_lbl.add_theme_color_override("font_color", Color(0.35, 0.35, 0.35))
+			swatch.color = rarity_col.darkened(0.6)
 		elif available > 0:
 			card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 
@@ -786,10 +1185,17 @@ func _grab_first_usable_card_focus_deferred() -> void:
 
 func _grab_first_usable_card_focus() -> void:
 	if _forge_card_grid == null: return
+	# The deferred dispatch can outrun scene-teardown (e.g. when the player
+	# triggers New Game and the reset fires inventory_changed signals while
+	# the scene is about to reload).  By the time we get here the SpaceStation
+	# may be detached, making get_viewport() null.  Bail safely in that case.
+	if not is_inside_tree(): return
+	var vp := get_viewport()
+	if vp == null: return
 	# Only steal focus if the previously-focused control is gone (i.e. it
 	# was a card we just freed) — otherwise the user might have moved to
 	# a slot or the Forge button and we'd yank them back.
-	var f: Control = get_viewport().gui_get_focus_owner()
+	var f: Control = vp.gui_get_focus_owner()
 	if f != null and is_instance_valid(f): return
 	for c in _forge_card_grid.get_children():
 		if c is ResourceCard:
@@ -819,15 +1225,29 @@ func _on_remove_slot(idx: int) -> void:
 func _update_slot_display() -> void:
 	for i in range(3):
 		var lbl: Label = _forge_slot_labels[i]
-		if i < _forge_selected.size():
+		var filled := i < _forge_selected.size()
+		var slot_sb: StyleBoxFlat = null
+		if i < _forge_slot_panels.size():
+			slot_sb = _forge_slot_panels[i].get_theme_stylebox("panel") as StyleBoxFlat
+		if filled:
 			var r := _forge_selected[i]
 			var tier := ResourceRegistry.get_tier(r)
 			var col := _tier_color(tier)
 			lbl.text = ResourceRegistry.get_abbrev(r)
 			lbl.add_theme_color_override("font_color", col)
+			if slot_sb:
+				slot_sb.bg_color = col.darkened(0.7)
+				slot_sb.border_color = col
+			if i < _forge_slot_hints.size():
+				_forge_slot_hints[i].add_theme_color_override("font_color", col.lerp(Color(1, 1, 1), 0.4))
 		else:
 			lbl.text = "[ SLOT " + str(i + 1) + " ]"
 			lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.6))
+			if slot_sb:
+				slot_sb.bg_color = Color(0.08, 0.08, 0.15)
+				slot_sb.border_color = Color(0.4, 0.4, 0.6)
+		if i < _forge_slot_hints.size():
+			_forge_slot_hints[i].visible = filled
 
 	var slots_full := _forge_selected.size() >= 3
 	var credit_cost := 0
@@ -853,96 +1273,242 @@ func _update_slot_display() -> void:
 	if _forge_btn:
 		_forge_btn.disabled = not slots_full or not can_afford_credits
 
+	# Celebration animation when the player has met all conditions to forge.
+	var should_glow := slots_full and can_afford_credits
+	if should_glow and not _forge_ready_active:
+		_start_forge_ready_anim()
+	elif not should_glow and _forge_ready_active:
+		_stop_forge_ready_anim()
+
+
+func _start_forge_ready_anim() -> void:
+	if _forge_btn == null: return
+	_forge_ready_active = true
+	if _forge_ready_tween: _forge_ready_tween.kill()
+	if _forge_ready_scale_tween: _forge_ready_scale_tween.kill()
+	_forge_btn.pivot_offset = _forge_btn.size * 0.5
+
+	# Rainbow modulate cycle — bright tints that read against the pink button.
+	var col_a := Color(1.4, 0.8, 1.3)   # pink-magenta
+	var col_b := Color(0.9, 1.4, 1.0)   # green
+	var col_c := Color(1.0, 1.1, 1.5)   # cyan-blue
+	_forge_ready_tween = create_tween().set_loops()
+	_forge_ready_tween.tween_property(_forge_btn, "modulate", col_a, 0.7) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_forge_ready_tween.tween_property(_forge_btn, "modulate", col_b, 0.7) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_forge_ready_tween.tween_property(_forge_btn, "modulate", col_c, 0.7) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+	# Scale pulse in parallel.
+	_forge_ready_scale_tween = create_tween().set_loops()
+	_forge_ready_scale_tween.tween_property(_forge_btn, "scale", Vector2(1.05, 1.05), 0.55) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_forge_ready_scale_tween.tween_property(_forge_btn, "scale", Vector2.ONE, 0.55) \
+		.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+
+func _stop_forge_ready_anim() -> void:
+	_forge_ready_active = false
+	if _forge_ready_tween:
+		_forge_ready_tween.kill()
+		_forge_ready_tween = null
+	if _forge_ready_scale_tween:
+		_forge_ready_scale_tween.kill()
+		_forge_ready_scale_tween = null
+	if _forge_btn:
+		_forge_btn.modulate = Color.WHITE
+		_forge_btn.scale = Vector2.ONE
+
 func _refresh_planets_ui() -> void:
-	for child in _planets_container.get_children():
-		child.queue_free()
-
-	_worlds_header.text = "— ACTIVE WORLDS (" + str(_active_planets.size()) + "/" + str(_max_planets()) + ") —"
-
-	if _active_planets.is_empty():
-		var none_lbl := Label.new()
-		none_lbl.text = "(no forged planets)"
-		none_lbl.add_theme_font_size_override("font_size", 18)
-		none_lbl.add_theme_color_override("font_color", Color(0.55, 0.55, 0.55))
-		none_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		_planets_container.add_child(none_lbl)
+	# Populates the Planets tab with the currently-paged planet.  Safe to
+	# call when the tab hasn't been built yet (e.g. during early _show_ui).
+	if _tab_planets_panel == null or _planet_resource_grid == null:
 		return
 
-	for entry in _active_planets:
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 12)
-		_planets_container.add_child(row)
+	var total := _active_planets.size()
 
-		var combo: String = ResourceRegistry.get_abbrev(entry.r1) + "+" + ResourceRegistry.get_abbrev(entry.r2) + "+" + ResourceRegistry.get_abbrev(entry.r3)
-		var seed_val: int = PlanetSeedKitchen.make_seed(entry.r1, entry.r2, entry.r3)
-		var rank: Dictionary = PlanetSeedKitchen.rank_planet(entry.r1, entry.r2, entry.r3, seed_val, float(entry.get("luck_variance", 0.0)))
+	# Clamp page index whenever the list size changes (e.g. after dismantle).
+	if total == 0:
+		_planet_view_idx = 0
+	else:
+		_planet_view_idx = clampi(_planet_view_idx, 0, total - 1)
 
-		# ── Planet thumbnail (4× the old 40px, crisp nearest-neighbour) ──
-		var thumb := TextureRect.new()
-		thumb.texture = _planet_thumbnail_for(entry)
-		thumb.custom_minimum_size = Vector2(160, 160)
-		thumb.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		thumb.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		thumb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(thumb)
+	# Empty state overlays the populated content via PRESET_FULL_RECT inside
+	# _planet_content_window, so we just toggle the two as a pair.
+	var has_planets := total > 0
+	if _planet_content_root: _planet_content_root.visible = has_planets
+	if _planet_empty_lbl: _planet_empty_lbl.visible = not has_planets
+	# Page indicator + arrows are only meaningful when there's something to page through.
+	if _planet_page_lbl: _planet_page_lbl.visible = total > 1
+	if _planet_prev_btn: _planet_prev_btn.visible = total > 1
+	if _planet_next_btn: _planet_next_btn.visible = total > 1
 
-		# Stack name + badge + combo vertically so the row stays compact next
-		# to the larger thumbnail.
-		var info_vb := VBoxContainer.new()
-		info_vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		info_vb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		info_vb.add_theme_constant_override("separation", 6)
-		row.add_child(info_vb)
+	for c in _planet_resource_grid.get_children():
+		c.queue_free()
 
-		# ── Planet name ────────────────────────────────────────────────
-		var name_lbl := Label.new()
-		name_lbl.text = _display_planet_name(entry)
-		name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		name_lbl.add_theme_font_size_override("font_size", 20 if _is_mobile_ui else 18)
-		name_lbl.add_theme_color_override("font_color", Color(0.9, 0.92, 1.0))
-		info_vb.add_child(name_lbl)
+	if not has_planets:
+		return
 
-		# ── Rank Badge + Combo on one line ──────────────────────────────
-		var sub_row := HBoxContainer.new()
-		sub_row.add_theme_constant_override("separation", 10)
-		info_vb.add_child(sub_row)
+	var entry: Dictionary = _active_planets[_planet_view_idx]
+	var r1: String = entry.get("r1", "")
+	var r2: String = entry.get("r2", "")
+	var r3: String = entry.get("r3", "")
+	var seed_val: int = int(entry.get("seed_val", PlanetSeedKitchen.make_seed(r1, r2, r3)))
+	var rank: Dictionary = PlanetSeedKitchen.rank_planet(
+		r1, r2, r3, seed_val, float(entry.get("luck_variance", 0.0)))
 
-		var badge_panel := PanelContainer.new()
-		badge_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var badge_sb := StyleBoxFlat.new()
+	_planet_page_lbl.text = str(_planet_view_idx + 1) + " / " + str(total)
+	_planet_name_lbl.text = _display_planet_name(entry)
+
+	_planet_rank_lbl.text = String(rank.get("label", "?"))
+	_planet_rank_lbl.add_theme_color_override("font_color", rank.color)
+	var badge_sb: StyleBoxFlat = _planet_rank_badge.get_theme_stylebox("panel") as StyleBoxFlat
+	if badge_sb:
 		badge_sb.bg_color = rank.color.darkened(0.55)
 		badge_sb.border_color = rank.color
-		badge_sb.set_border_width_all(2)
-		badge_sb.set_corner_radius_all(6)
-		badge_sb.content_margin_left = 8; badge_sb.content_margin_right = 8
-		badge_sb.content_margin_top = 2;  badge_sb.content_margin_bottom = 2
-		badge_panel.add_theme_stylebox_override("panel", badge_sb)
 
-		var badge_lbl := Label.new()
-		badge_lbl.text = rank.label
-		badge_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		badge_lbl.add_theme_font_size_override("font_size", 16)
-		badge_lbl.add_theme_color_override("font_color", rank.color)
-		badge_panel.add_child(badge_lbl)
-		sub_row.add_child(badge_panel)
+	var combo: String = ResourceRegistry.get_abbrev(r1) + "+" + ResourceRegistry.get_abbrev(r2) + "+" + ResourceRegistry.get_abbrev(r3)
+	_planet_combo_lbl.text = combo
+	_planet_illustration.texture = _planet_thumbnail_for(entry)
 
-		# ── Combo (resource recipe) ────────────────────────────────────
-		var lbl := Label.new()
-		lbl.text = combo
-		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		lbl.add_theme_font_size_override("font_size", 18)
-		lbl.add_theme_color_override("font_color", Color(0.8, 0.9, 0.8))
-		sub_row.add_child(lbl)
+	# Resource discovery slots.  Pool = the planet's natural spawn list, but
+	# Wood/Carbon Fiber nodes can drop *secondary* resources outside that pool
+	# (Living Resin, Primal Fruit, Organic Sludge).  So we display the UNION
+	# of the pool + anything the player has actually discovered here.  This
+	# way blue/purple secondaries the player mined show up as discovered
+	# chips even though they weren't in the planet's base pool.
+	#
+	# Sorted least → most rare; ties break alphabetically.
+	var discovered: Array = entry.get("discovered", ["Stone", "Wood"])
+	var pool: Array = PlanetSeedKitchen.resources_for_planet(r1, r2, r3)
+	var combined: Dictionary = {}
+	for r in pool: combined[String(r)] = true
+	for r in discovered: combined[String(r)] = true
+	var display_list: Array = combined.keys()
+	display_list.sort_custom(func(a, b):
+		var ta := ResourceRegistry.get_tier(String(a))
+		var tb := ResourceRegistry.get_tier(String(b))
+		if ta != tb: return ta < tb
+		return String(a) < String(b))
+	for res_name in display_list:
+		_planet_resource_grid.add_child(
+			_build_planet_resource_chip(String(res_name), discovered.has(String(res_name))))
 
-		var dis_btn := Button.new()
-		dis_btn.text = "Dismantle"
-		HUDStyle.style_button(dis_btn, HUDStyle.BTN_RED, 20 if _is_mobile_ui else 17)
-		dis_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		dis_btn.custom_minimum_size = Vector2(160, _BTN_H_MOBILE) if _is_mobile_ui else Vector2(110, 38)
-		# Capture entry by value with a local copy
-		var captured := entry
-		dis_btn.pressed.connect(func() -> void: _on_dismantle(captured))
-		row.add_child(dis_btn)
+
+# Build a single resource-slot chip for the Planets tab.
+# Discovered: solid rarity-tinted chip with abbrev + full name.
+# Locked:     faded tier-colored silhouette, no text — partial reveal of rarity.
+func _build_planet_resource_chip(res_name: String, discovered: bool) -> PanelContainer:
+	var chip := PanelContainer.new()
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var chip_w: int = 130 if _is_mobile_ui else 150
+	var chip_h: int = 64 if _is_mobile_ui else 60
+	chip.custom_minimum_size = Vector2(chip_w, chip_h)
+
+	var tier := ResourceRegistry.get_tier(res_name)
+	var col := _tier_color(tier)
+
+	var sb := StyleBoxFlat.new()
+	sb.set_corner_radius_all(8)
+	sb.content_margin_left = 8; sb.content_margin_right = 8
+	sb.content_margin_top = 4;  sb.content_margin_bottom = 4
+	if discovered:
+		sb.bg_color = col.darkened(0.65)
+		sb.border_color = col
+		sb.set_border_width_all(2)
+	else:
+		# Locked: very dim wash of the tier color so rarity is hinted.
+		sb.bg_color = col.darkened(0.85)
+		sb.border_color = col.darkened(0.6)
+		sb.set_border_width_all(1)
+	chip.add_theme_stylebox_override("panel", sb)
+
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.add_child(vb)
+
+	if discovered:
+		var ab := Label.new()
+		ab.text = ResourceRegistry.get_abbrev(res_name)
+		ab.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ab.add_theme_font_size_override("font_size", 24 if _is_mobile_ui else 22)
+		ab.add_theme_color_override("font_color", col)
+		ab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vb.add_child(ab)
+
+		var nm := Label.new()
+		nm.text = String(ResourceRegistry.get_data(res_name).get("name", res_name))
+		nm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		nm.add_theme_font_size_override("font_size", 14 if _is_mobile_ui else 13)
+		nm.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
+		nm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vb.add_child(nm)
+	else:
+		# Locked silhouette: a single faint glyph hint so the chip doesn't
+		# read as totally empty — purely decorative, no resource identity.
+		var lock_lbl := Label.new()
+		lock_lbl.text = "?"
+		lock_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lock_lbl.add_theme_font_size_override("font_size", 24 if _is_mobile_ui else 22)
+		lock_lbl.add_theme_color_override("font_color", col.darkened(0.3))
+		lock_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vb.add_child(lock_lbl)
+
+	return chip
+
+
+func _on_planet_prev() -> void:
+	_slide_to_planet(-1)
+
+
+func _on_planet_next() -> void:
+	_slide_to_planet(1)
+
+
+# Slide the current planet view off-screen, swap to the new index, then
+# slide the new view in from the opposite side.  `dir`: -1 = previous (slide
+# right out, new comes in from left), +1 = next (slide left out, in from right).
+func _slide_to_planet(dir: int) -> void:
+	if _planet_slide_in_progress: return
+	if _active_planets.size() <= 1: return
+	if _planet_content_root == null or _planet_content_window == null: return
+	_planet_slide_in_progress = true
+
+	var W: float = max(_planet_content_window.size.x, 600.0)
+	if _planet_slide_tween: _planet_slide_tween.kill()
+
+	# Phase 1: slide out in the direction of travel.
+	var t1 := create_tween().set_parallel(true)
+	t1.tween_property(_planet_content_root, "offset_left", -dir * W, 0.16) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	t1.tween_property(_planet_content_root, "offset_right", -dir * W, 0.16) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_planet_slide_tween = t1
+	await t1.finished
+
+	# Swap data + jump to the opposite side so the slide-in feels continuous.
+	_planet_view_idx = (_planet_view_idx + dir + _active_planets.size()) % _active_planets.size()
+	_planet_content_root.offset_left = dir * W
+	_planet_content_root.offset_right = dir * W
+	_refresh_planets_ui()
+
+	# Phase 2: slide in from the opposite side.
+	var t2 := create_tween().set_parallel(true)
+	t2.tween_property(_planet_content_root, "offset_left", 0.0, 0.20) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	t2.tween_property(_planet_content_root, "offset_right", 0.0, 0.20) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_planet_slide_tween = t2
+	await t2.finished
+	_planet_slide_in_progress = false
+
+
+func _on_planet_view_dismantle() -> void:
+	if _active_planets.is_empty(): return
+	if _planet_view_idx < 0 or _planet_view_idx >= _active_planets.size(): return
+	_on_dismantle(_active_planets[_planet_view_idx])
 
 # ---------------------------------------------------------------------------
 # PROXIMITY LOOP
@@ -1078,6 +1644,7 @@ func _show_ui() -> void:
 func _hide_ui() -> void:
 	_ui_visible = false
 	_notify_mobile_controls(false)
+	_stop_forge_ready_anim()
 	_panel.hide()
 	if _in_range:
 		_prompt_btn.show()
@@ -1097,11 +1664,18 @@ func _hide_ui() -> void:
 
 func _switch_tab(idx: int) -> void:
 	_active_tab = idx
+	# Tab index map: 0 Market, 1 Upgrades, 2 Planets, 3 Forge.
+	# Market + Upgrades live inside the outer ScrollContainer; Planets and
+	# Forge are siblings of the scroll (so they can fill the visible height).
 	if _tab_market_panel:   _tab_market_panel.visible   = (idx == 0)
-	if _tab_forge_panel:    _tab_forge_panel.visible    = (idx == 1)
-	if _tab_upgrades_panel: _tab_upgrades_panel.visible = (idx == 2)
-	if idx == 2:
+	if _tab_upgrades_panel: _tab_upgrades_panel.visible = (idx == 1)
+	if _tab_planets_panel:  _tab_planets_panel.visible  = (idx == 2)
+	if _tab_forge_panel:    _tab_forge_panel.visible    = (idx == 3)
+	if _market_scroll:      _market_scroll.visible      = (idx == 0 or idx == 1)
+	if idx == 1:
 		_rebuild_all_upgrade_rows()
+	elif idx == 2:
+		_refresh_planets_ui()
 	# Active tab: pink + recessed.  Inactive tabs: blue + raised.  Mirrors the
 	# EASY-button "selected = pushed-in pink" look from the Designercize ref.
 	for i in _tab_btns.size():
@@ -1119,8 +1693,9 @@ func _grab_first_in_active_tab() -> void:
 	var panel: Control = null
 	match _active_tab:
 		0: panel = _tab_market_panel
-		1: panel = _tab_forge_panel
-		2: panel = _tab_upgrades_panel
+		1: panel = _tab_upgrades_panel
+		2: panel = _tab_planets_panel
+		3: panel = _tab_forge_panel
 	if panel == null: return
 	var first := _find_first_focusable(panel)
 	if first: first.grab_focus()
@@ -1128,10 +1703,16 @@ func _grab_first_in_active_tab() -> void:
 
 func _find_first_focusable(n: Node) -> Control:
 	# Depth-first walk to the first Control that accepts focus.
+	# Skip disabled buttons — focusing them paints the bright focus stylebox
+	# over the disabled stylebox, which misleadingly makes a button the player
+	# can't actually press look enabled.
 	if n is Control:
 		var c: Control = n
 		if c.focus_mode != Control.FOCUS_NONE and c.is_visible_in_tree():
-			return c
+			if c is BaseButton and (c as BaseButton).disabled:
+				pass  # fall through to children
+			else:
+				return c
 	for child in n.get_children():
 		var found := _find_first_focusable(child)
 		if found: return found
@@ -1386,6 +1967,8 @@ func _on_forge_planet() -> void:
 
 		# Record to persistent registry. pos / name / seed_val are stored so
 		# SaveManager can rehydrate this planet on a future launch.
+		# `discovered` tracks resource types the player has mined from this
+		# planet; Stone + Wood are pre-filled as they're always present.
 		_active_planets.append({
 			node = planet_node,
 			r1 = r1, r2 = r2, r3 = r3,
@@ -1393,6 +1976,7 @@ func _on_forge_planet() -> void:
 			pos = pos,
 			name = p_name,
 			seed_val = seed_val,
+			discovered = ["Stone", "Wood"],
 		})
 
 		# ACE UNIVERSE SYNC: Notify that a planet was added
@@ -1481,8 +2065,13 @@ func _display_planet_name(entry: Dictionary) -> String:
 # a SubViewport + camera per slot — instead we paint a stylized icon using
 # the planet's own grass/water/sky colors, which reads as a recognizable
 # "summary card" of what the world looks like up close.
+const _PLANET_THUMB_VERSION: int = 9
+
 func _planet_thumbnail_for(entry: Dictionary) -> ImageTexture:
-	if entry.has("thumbnail") and entry.thumbnail != null:
+	# Versioned cache — bump _PLANET_THUMB_VERSION to invalidate older
+	# session-cached thumbnails when the renderer changes.
+	if int(entry.get("thumb_version", 0)) == _PLANET_THUMB_VERSION \
+			and entry.has("thumbnail") and entry.thumbnail != null:
 		return entry.thumbnail
 
 	var node = entry.get("node", null)
@@ -1491,34 +2080,84 @@ func _planet_thumbnail_for(entry: Dictionary) -> ImageTexture:
 	var water_col: Color = Color(0.10, 0.40, 0.80)
 	var sky_col: Color   = Color(0.05, 0.05, 0.08)
 	var planet_seed: int = 0
-	var has_basin: bool = true  # most planets have water; archetype-aware fallback below
+	var has_basin: bool = true
+	var archetype: String = ""
+	# Track whether the colors we sampled actually came from a fully-initialized
+	# PlanetGen palette.  If they're still the GDScript default (Color(0,0,0,1)
+	# = pitch black) the live node is in the gap between construction and
+	# _ready() — we use defaults instead and skip caching so the next refresh
+	# can pick up the real palette.
+	var palette_live: bool = false
+	# Live-node ring detection — PlanetGen attaches a TorusMesh child when
+	# the planet rolled rings, so we can mirror that exactly instead of
+	# guessing from the profile.
+	var live_has_rings: bool = false
 	if node != null and is_instance_valid(node):
-		if "pal_grass_col" in node: grass_col = node.get("pal_grass_col")
-		if "pal_mount_col" in node: mount_col = node.get("pal_mount_col")
-		if "pal_water_base" in node: water_col = node.get("pal_water_base")
-		if "sky_horizon_color" in node: sky_col = node.get("sky_horizon_color")
+		var maybe_grass: Color = node.get("pal_grass_col") if "pal_grass_col" in node else Color(0,0,0,1)
+		if maybe_grass.r + maybe_grass.g + maybe_grass.b > 0.03:
+			grass_col = maybe_grass
+			palette_live = true
+			if "pal_mount_col" in node: mount_col = node.get("pal_mount_col")
+			if "pal_water_base" in node: water_col = node.get("pal_water_base")
+			if "sky_horizon_color" in node: sky_col = node.get("sky_horizon_color")
 		if "planet_seed" in node: planet_seed = int(node.get("planet_seed"))
-		# Dry-world archetypes don't have surface water.
 		if "archetype" in node:
-			var arche: String = String(node.get("archetype"))
-			if arche in ["DESERT", "RUST", "BARREN", "ASH", "MUDFLAT", "VOLCANIC", "OBSIDIAN"]:
+			archetype = String(node.get("archetype"))
+			# Only truly dry archetypes skip the "basin" (water/lava) pass.
+			# VOLCANIC + OBSIDIAN are wet with lava/glass and should show
+			# their water_base colour as oceans.
+			if archetype in ["DESERT", "RUST", "BARREN", "ASH", "MUDFLAT"]:
 				has_basin = false
+		for c in node.get_children():
+			if c is MeshInstance3D and c.mesh is TorusMesh:
+				live_has_rings = true
+				break
 
-	var size: int = 32
+	# Vivify the sampled palette — the in-game planet reads brighter than the
+	# raw albedo because of emission shaders, HDR lighting and bloom; pumping
+	# saturation and value here brings the icon closer to what the player
+	# actually sees on the rendered globe.
+	grass_col = _vivify_palette(grass_col, 1.40, 1.15)
+	mount_col = _vivify_palette(mount_col, 1.30, 1.10)
+	water_col = _vivify_palette(water_col, 1.45, 1.20)
+
+	# Mineral-derived profile gives clouds / rings / biolum / glow even if
+	# the live PlanetGen node hasn't been spawned yet (loaded-from-save case).
+	var profile: Dictionary = PlanetSeedKitchen.derive_profile(
+		String(entry.get("r1", "")),
+		String(entry.get("r2", "")),
+		String(entry.get("r3", "")),
+		int(entry.get("seed_val", 0)))
+	var cloud_coverage: float = clampf(0.45 + float(profile.get("cloud_coverage_delta", 0.0)), 0.0, 1.0)
+	var cloud_alpha: float = clampf(0.55 + float(profile.get("cloud_alpha_delta", 0.0)), 0.0, 1.0)
+	var biolum: float = clampf(float(profile.get("biolum_boost", 0.0)), 0.0, 1.5)
+	var glow: float = clampf(float(profile.get("glow_boost", 0.0)), 0.0, 1.5)
+	var frozen: bool = archetype in ["FROZEN", "ICE", "ALPINE", "TUNDRA"]
+	# Rings: prefer ground truth from the live planet's TorusMesh child.  When
+	# the planet isn't rehydrated yet, replay the seeded RNG roll that
+	# PlanetGen uses so the icon matches what the player would see if they
+	# flew there.  Both branches use the same `0.5 + ring_boost` chance.
+	var has_rings: bool = live_has_rings
+	if not live_has_rings and node == null:
+		var ring_rng := RandomNumberGenerator.new()
+		ring_rng.seed = int(entry.get("seed_val", 0))
+		var ring_chance: float = clampf(0.5 + float(profile.get("ring_boost", 0.0)), 0.0, 1.0)
+		has_rings = ring_rng.randf() < ring_chance
+
+	# Larger canvas + tighter planet radius so the rings have room to extend
+	# past the disc without being clipped at the image bounds.
+	var size: int = 144
 	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
 
 	# Deterministic seed → same planet always renders the same icon.
 	var seed_int: int = planet_seed if planet_seed != 0 else hash(str(entry.r1) + str(entry.r2) + str(entry.r3))
 
-	# Two FBM noise layers drive an irregular continent mask — coarse for the
-	# overall landmass shape, fine for the jagged coastlines.  Using noise
-	# instead of overlapping circles is what turns a "round blob" into
-	# something that reads as a continent.
+	# Noise layers: continent shape, coastline detail, clouds.
 	var noise_continent := FastNoiseLite.new()
 	noise_continent.seed = seed_int
 	noise_continent.noise_type = FastNoiseLite.TYPE_PERLIN
-	noise_continent.frequency = 0.12
+	noise_continent.frequency = 0.04
 	noise_continent.fractal_type = FastNoiseLite.FRACTAL_FBM
 	noise_continent.fractal_octaves = 4
 	noise_continent.fractal_lacunarity = 2.1
@@ -1527,21 +2166,89 @@ func _planet_thumbnail_for(entry: Dictionary) -> ImageTexture:
 	var noise_detail := FastNoiseLite.new()
 	noise_detail.seed = seed_int + 7919
 	noise_detail.noise_type = FastNoiseLite.TYPE_PERLIN
-	noise_detail.frequency = 0.32
+	noise_detail.frequency = 0.11
 	noise_detail.fractal_type = FastNoiseLite.FRACTAL_FBM
 	noise_detail.fractal_octaves = 3
 	noise_detail.fractal_lacunarity = 2.0
 	noise_detail.fractal_gain = 0.5
 
+	var noise_cloud := FastNoiseLite.new()
+	noise_cloud.seed = seed_int + 13337
+	noise_cloud.noise_type = FastNoiseLite.TYPE_PERLIN
+	noise_cloud.frequency = 0.06
+	noise_cloud.fractal_type = FastNoiseLite.FRACTAL_FBM
+	noise_cloud.fractal_octaves = 3
+
 	var cx: float = float(size) * 0.5
 	var cy: float = float(size) * 0.5
-	var r: float = float(size) * 0.46
+	# Planet radius — sized so the widest ring band (1.55x) still fits inside
+	# the image with a few pixels of breathing room (max image radius = 72px
+	# on a 144 canvas → planet r 43px puts the outer ring at ~67px).
+	var r: float = float(size) * 0.30
 
-	# Thresholds — dry worlds get more land coverage so the icon doesn't
-	# look mostly water on a planet that has none.
-	var land_threshold: float = 0.0 if has_basin else -0.18
-	var mountain_threshold: float = 0.20  # above this on top of land = mountain colour
+	# ── Percentile-based thresholds (computed below from a noise pre-pass) ──
+	# Plain Perlin output for a tiny 144px window can be heavily biased
+	# (one seed = 95% water, another = 95% land).  We sample every disc
+	# pixel up-front, sort the values, then pick land/mountain cutoffs at
+	# fixed percentiles so the basin/land/mountain ratio is always the same
+	# regardless of the seed's particular noise bias.
+	#
+	# Target ratios:
+	#   Wet world  (has_basin = true):  ~50% basin · ~38% land · ~12% mountain
+	#   Dry world  (has_basin = false):  0% basin · ~85% land · ~15% mountain
+	var land_threshold: float = 0.0
+	var mountain_threshold: float = 0.0
+	# Stash per-pixel noise values during the pre-pass so we don't recompute
+	# them during the render pass.  Indexed by y * size + x.
+	var n_lookup: PackedFloat32Array = PackedFloat32Array()
+	n_lookup.resize(size * size)
+	var disc_values: Array[float] = []
+	for py in range(size):
+		for px in range(size):
+			var dxp: float = float(px) + 0.5 - cx
+			var dyp: float = float(py) + 0.5 - cy
+			var dp: float = sqrt(dxp * dxp + dyp * dyp)
+			if dp > r:
+				continue
+			var np: float = noise_continent.get_noise_2d(float(px), float(py)) \
+				+ noise_detail.get_noise_2d(float(px), float(py)) * 0.35
+			var rim_tp: float = clampf(dp / r, 0.0, 1.0)
+			np -= pow(rim_tp, 3.0) * 0.22
+			n_lookup[py * size + px] = np
+			disc_values.append(np)
+	disc_values.sort()
+	var dv_count: int = disc_values.size()
+	if dv_count > 0:
+		if has_basin:
+			land_threshold = disc_values[mini(int(dv_count * 0.50), dv_count - 1)]
+			mountain_threshold = disc_values[mini(int(dv_count * 0.88), dv_count - 1)]
+		else:
+			# No basin on dry worlds — push the threshold below the min so
+			# the basin branch never fires.
+			land_threshold = disc_values[0] - 1.0
+			mountain_threshold = disc_values[mini(int(dv_count * 0.85), dv_count - 1)]
 
+	# ── Background half of ring system (drawn before the planet body) ──
+	# Multi-band ring with a Cassini-style gap so it reads as detailed rather
+	# than a flat sash.  Each band has its own radius range, alpha, and tint
+	# bias.  Front arcs are composited again after the planet pass.
+	var ring_tint: Color = sky_col.lerp(Color(1.0, 0.93, 0.78), 0.55)
+	var ring_bands: Array = [
+		# {inner_mult, outer_mult, alpha, tint_lerp_white}
+		{"inner": 1.08, "outer": 1.22, "alpha": 0.80, "shade": 0.10},  # bright main inner
+		{"inner": 1.24, "outer": 1.30, "alpha": 0.55, "shade": 0.32},  # narrow secondary
+		# 1.30 – 1.36  Cassini-style gap (no band drawn)
+		{"inner": 1.36, "outer": 1.48, "alpha": 0.78, "shade": 0.05},  # main outer
+		{"inner": 1.50, "outer": 1.55, "alpha": 0.38, "shade": 0.48},  # faint outer dust
+	]
+	if has_rings:
+		for band in ring_bands:
+			_draw_planet_ring(img, cx, cy, r,
+				r * float(band["inner"]), r * float(band["outer"]),
+				ring_tint.lerp(Color.WHITE, float(band["shade"])),
+				float(band["alpha"]), true)
+
+	# ── Planet body: terrain + clouds + polar caps + biolum ───────────
 	for y in range(size):
 		for x in range(size):
 			var dx: float = float(x) + 0.5 - cx
@@ -1550,47 +2257,143 @@ func _planet_thumbnail_for(entry: Dictionary) -> ImageTexture:
 			if d > r:
 				continue
 
-			# Combine coarse continent shape with finer coastline jitter.
-			var n: float = noise_continent.get_noise_2d(float(x), float(y)) \
-				+ noise_detail.get_noise_2d(float(x), float(y)) * 0.35
-			# Fall-off near the disc edge so continents don't run off the
-			# visible globe — produces oceans at the limb regardless of noise.
+			# Reuse the noise value sampled during the percentile pre-pass.
+			var n: float = n_lookup[y * size + x]
 			var rim_t: float = clampf(d / r, 0.0, 1.0)
-			n -= pow(rim_t, 3.0) * 0.45
 
 			var base: Color
+			var is_land: bool = true
 			if has_basin and n < land_threshold:
 				base = water_col
+				is_land = false
 			elif n > mountain_threshold:
 				base = mount_col
 			else:
 				base = grass_col
 
-			# West-darker / east-lighter shading sells the lit-globe look.
-			var shade: float = 0.82 + (dx / r) * 0.20
-			# Slight darkening near the rim (atmosphere occlusion) so the
-			# planet doesn't blend into the halo.
-			shade *= 1.0 - rim_t * 0.10
+			# Polar caps on cold worlds — fade in toward the top/bottom rows.
+			# Latitude approximated by dy / r (-1 = top, +1 = bottom).
+			if frozen and is_land:
+				var lat: float = abs(dy) / r
+				var cap_t: float = smoothstep(0.55, 0.95, lat)
+				if cap_t > 0.01:
+					base = base.lerp(Color(0.92, 0.95, 1.0), cap_t)
+
+			# Bioluminescent dots — sparse glow spots on land driven by noise
+			# threshold so the same planet always shows the same pattern.
+			if is_land and biolum > 0.3:
+				var bl: float = noise_detail.get_noise_2d(float(x) * 3.1, float(y) * 3.1)
+				if bl > 0.55 - (biolum - 0.3) * 0.25:
+					var glow_col: Color = Color(0.4, 1.0, 0.85)
+					base = base.lerp(glow_col, 0.55)
+
+			# West-darker / east-lighter shading sells the lit-globe look —
+			# kept gentle (min 0.92×) so the planet's vivid palette doesn't get
+			# muted into a dull wash.  Same gentleness on rim atmospheric
+			# falloff (was 10% darkening at the limb; now 5%).
+			var shade: float = 0.92 + (dx / r) * 0.12
+			shade *= 1.0 - rim_t * 0.05
 
 			base.r = clampf(base.r * shade, 0.0, 1.0)
 			base.g = clampf(base.g * shade, 0.0, 1.0)
 			base.b = clampf(base.b * shade, 0.0, 1.0)
+
+			# Cloud layer — semi-opaque white where cloud noise exceeds
+			# threshold modulated by coverage; lighter alpha so the planet's
+			# base colour reads clearly under the clouds.
+			if cloud_coverage > 0.1:
+				var cl: float = noise_cloud.get_noise_2d(float(x), float(y) * 1.4)
+				var cl_t: float = clampf((cl - (0.55 - cloud_coverage)) / 0.35, 0.0, 1.0)
+				if cl_t > 0.02:
+					var cloud_col: Color = Color(1, 1, 1)
+					base = base.lerp(cloud_col, cl_t * cloud_alpha * 0.5)
+
 			base.a = 1.0
 			img.set_pixel(x, y, base)
 
-	# Atmosphere halo — one-pixel ring tinted with the planet's sky colour.
+	# ── Front half of rings (overlays the planet body for in-front arc) ─
+	if has_rings:
+		for band in ring_bands:
+			_draw_planet_ring(img, cx, cy, r,
+				r * float(band["inner"]), r * float(band["outer"]),
+				ring_tint.lerp(Color.WHITE, float(band["shade"])),
+				float(band["alpha"]), false)
+
+	# ── Atmospheric halo (2-pixel soft gradient) + emissive glow ─────
 	var halo: Color = sky_col.lerp(Color.WHITE, 0.35)
-	halo.a = 0.55
-	for ang_i in range(64):
-		var ang: float = float(ang_i) / 64.0 * TAU
-		var hx: int = int(round(cx + cos(ang) * (r + 0.6)))
-		var hy: int = int(round(cy + sin(ang) * (r + 0.6)))
-		if hx >= 0 and hx < size and hy >= 0 and hy < size:
-			img.set_pixel(hx, hy, halo)
+	for halo_t in range(3):
+		var rad: float = r + 0.5 + float(halo_t)
+		var alpha: float = 0.60 - float(halo_t) * 0.18
+		alpha = clampf(alpha + glow * 0.20, 0.0, 0.85)
+		halo.a = alpha
+		var steps: int = max(96, int(rad * 6.0))
+		for ang_i in range(steps):
+			var ang: float = float(ang_i) / float(steps) * TAU
+			var hx: int = int(round(cx + cos(ang) * rad))
+			var hy: int = int(round(cy + sin(ang) * rad))
+			if hx >= 0 and hx < size and hy >= 0 and hy < size:
+				var existing: Color = img.get_pixel(hx, hy)
+				if existing.a < halo.a:
+					img.set_pixel(hx, hy, halo)
 
 	var tex := ImageTexture.create_from_image(img)
-	entry["thumbnail"] = tex
+	# Only cache once we've actually got the live planet's palette; otherwise
+	# the next refresh re-renders with the real colours instead of fallbacks.
+	if palette_live:
+		entry["thumbnail"] = tex
+		entry["thumb_version"] = _PLANET_THUMB_VERSION
 	return tex
+
+
+# Paints a tilted ring around the planet.  `behind = true` draws the back
+# arc (top half — hidden by the planet body) and `behind = false` draws the
+# front arc (bottom half — visible across the planet body).  Call once
+# before the planet pass for the back arc and once after for the front
+# arc so the ring weaves through the disc.
+func _draw_planet_ring(img: Image, cx: float, cy: float, planet_r: float,
+		inner: float, outer: float, tint: Color, max_alpha: float, behind: bool) -> void:
+	var size: int = img.get_width()
+	# Slight vertical squish so the ring reads as elliptical (viewed at a tilt).
+	var ring_y_scale: float = 0.30
+	var ring_y_offset: float = -planet_r * 0.05
+	for y in range(size):
+		for x in range(size):
+			var dx: float = float(x) + 0.5 - cx
+			var dy: float = (float(y) + 0.5 - (cy + ring_y_offset)) / ring_y_scale
+			var d: float = sqrt(dx * dx + dy * dy)
+			if d < inner or d > outer:
+				continue
+			var dy_real: float = float(y) + 0.5 - cy
+			var d_real: float = sqrt(dx * dx + dy_real * dy_real)
+			var inside_disc: bool = d_real < planet_r
+			# Back pass hides whatever's inside the planet body — that arc
+			# is occluded by the globe.  Front pass keeps drawing over the
+			# body so the ring's front sweep is visible across it.
+			if behind and inside_disc:
+				continue
+			# Front/back split: pixels below the planet center are 'in front'.
+			var is_front_half: bool = (float(y) + 0.5) > cy
+			if behind and is_front_half: continue
+			if (not behind) and (not is_front_half): continue
+			# Soft fall-off at inner/outer edge.
+			var t: float = (d - inner) / max(outer - inner, 0.001)
+			var edge_a: float = smoothstep(0.0, 0.15, t) * (1.0 - smoothstep(0.85, 1.0, t))
+			var alpha: float = max_alpha * edge_a
+			if alpha < 0.04: continue
+			# Manual alpha blend — Image.set_pixel doesn't composite, so we
+			# read the existing pixel (planet body, halo, or transparent bg)
+			# and lerp toward the ring tint by `alpha`.  Preserves the
+			# underlying opaqueness so we don't punch transparent holes in
+			# the disc when drawing the front arc across it.
+			var existing: Color = img.get_pixel(x, y)
+			var blended: Color
+			if existing.a > 0.01:
+				blended = existing.lerp(tint, alpha)
+				blended.a = max(existing.a, alpha)
+			else:
+				blended = tint
+				blended.a = alpha
+			img.set_pixel(x, y, blended)
 
 func _spawn_planet_node(seed_val: int, custom_pos: Vector3, custom_name: String, rank_label: String = "", planet_res: Array = [], profile: Dictionary = {}) -> Node3D:
 	print("--- FORGE: Spawning Planet Node at %s ---" % str(custom_pos))
@@ -1824,7 +2627,7 @@ func _on_upgrade_changed(track: String, new_level: int) -> void:
 	if _upgrades_status != null:
 		_upgrades_status.text = String(track).to_upper() + " UPGRADED → Lvl " + str(new_level)
 		_upgrades_status.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
-	if _active_tab == 2:
+	if _active_tab == 1:
 		_rebuild_all_upgrade_rows()
 
 func _on_upgrade_purchase_failed(track: String, reason: String) -> void:
@@ -1852,6 +2655,7 @@ static func active_planets_for_save() -> Array:
 		if entry.get("node", null) != null and not is_instance_valid(entry.node):
 			continue
 		var pos: Vector3 = entry.get("pos", Vector3.ZERO)
+		var discovered: Array = entry.get("discovered", ["Stone", "Wood"])
 		out.append({
 			"r1":             String(entry.get("r1", "")),
 			"r2":             String(entry.get("r2", "")),
@@ -1860,6 +2664,7 @@ static func active_planets_for_save() -> Array:
 			"seed_val":       int(entry.get("seed_val", 0)),
 			"name":           String(entry.get("name", "")),
 			"pos":            {"x": pos.x, "y": pos.y, "z": pos.z},
+			"discovered":     discovered.duplicate(),
 		})
 	return out
 
@@ -1876,6 +2681,10 @@ static func load_active_planets_from_save(arr: Array) -> void:
 			float(pos_data.get("y", 0.0)),
 			float(pos_data.get("z", 0.0)),
 		)
+		var disc_raw: Array = raw.get("discovered", ["Stone", "Wood"])
+		var discovered: Array = []
+		for d in disc_raw:
+			discovered.append(String(d))
 		_active_planets.append({
 			node = null,
 			r1 = String(raw.get("r1", "")),
@@ -1885,6 +2694,7 @@ static func load_active_planets_from_save(arr: Array) -> void:
 			seed_val = int(raw.get("seed_val", 0)),
 			name = String(raw.get("name", "")),
 			pos = pos,
+			discovered = discovered,
 		})
 
 # Walk _active_planets and spawn a Node3D for any entry whose node is null.

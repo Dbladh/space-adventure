@@ -228,4 +228,13 @@ func _on_collected() -> void:
 	# Add resource to inventory — player sells at station for credits
 	if Engine.has_meta("InventoryManager"):
 		Engine.get_meta("InventoryManager").add(resource_type, 1)
+	# Mark this resource as discovered on the source planet so the station's
+	# Planets tab fills in the corresponding slot.  No-op for resources mined
+	# from natural/non-forged worlds.  Note: Script.has_method() does NOT
+	# detect static methods in Godot 4, so we call directly — record_discovery
+	# itself is null-safe.
+	if planet != null and is_instance_valid(planet):
+		var ss := load("res://src/world/SpaceStation.gd")
+		if ss:
+			ss.record_discovery(planet, resource_type)
 	queue_free()

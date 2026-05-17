@@ -873,9 +873,40 @@ func _on_pause_save_requested() -> void:
 func _on_pause_new_game_confirmed() -> void:
 	# Destructive: nuke save.json then reload Main so all managers re-init
 	# from a blank slate.  settings.cfg is left alone — user prefs survive.
+	# IMPORTANT: autoload nodes (Economy / Inventory / Upgrade managers)
+	# survive reload_current_scene(), and SpaceStation's per-class static
+	# vars (_total_forges, _active_planets) are not re-initialised either.
+	# Without an explicit reset the previous run's state bleeds into the
+	# "new game" — credits, inventory, upgrade levels, and the lifetime
+	# forge count would all carry over, costing the player their free
+	# first-forge.
 	DirAccess.remove_absolute("user://save.json")
+	_reset_game_state_for_new_game()
 	get_tree().paused = false   # safety
 	get_tree().reload_current_scene()
+
+
+func _reset_game_state_for_new_game() -> void:
+	# Silent reset — we deliberately do NOT emit the *_changed signals.
+	# The scene reloads immediately after, so any UI hooked to those signals
+	# is about to be destroyed; firing them just churns the dying tree (and
+	# can crash, e.g. SpaceStation's deferred focus grab running after its
+	# viewport is gone).  The fresh scene reads the cleared state directly
+	# from the managers at startup.
+	if Engine.has_meta("EconomyManager"):
+		Engine.get_meta("EconomyManager").credits = 0
+	if Engine.has_meta("InventoryManager"):
+		Engine.get_meta("InventoryManager")._stacks.clear()
+	if Engine.has_meta("UpgradeManager"):
+		var up = Engine.get_meta("UpgradeManager")
+		for t in up.levels.keys():
+			up.levels[t] = 0
+	# SpaceStation static state — clear the forged-planet registry and reset
+	# the lifetime forge counter so the next forge is free again.
+	var ss := load("res://src/world/SpaceStation.gd")
+	if ss:
+		ss.load_active_planets_from_save([])
+		ss.set_total_forges(0)
 
 func _on_open_rebind() -> void:
 	# Hide the pause menu, show the rebind submenu.  Game stays paused so

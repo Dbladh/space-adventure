@@ -514,13 +514,29 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 	var t_pts: Array[Transform3D] = []; var r_pts: Array[Transform3D] = []; var g_pts: Array[Transform3D] = []; var c_pts: Array[Transform3D] = []
 	var m_pts: Array = []
 
-	# Cache the planet's mineable resource list locally     safe to read once from the
-	# background thread since planet_resources is set before chunk generation begins.
+	# Cache the planet's mineable resource list locally — safe to read once
+	# from the background thread since planet_resources is set before chunk
+	# generation begins.  We build a *weighted* list where commoner resources
+	# appear more times so the per-cell uniform random pick naturally favours
+	# them.  Without this, a pool of [Carbon Fiber, Copper, Gold] would spawn
+	# each equally — the player would meet rare Gold before common CF.
+	#
+	# Weights by tier: t1=8, t2=4, t3=2, t4=1.  So a tier-1 mineral is 8x
+	# more likely to spawn than a tier-4 one in the same pool.
 	var _mineable: Array[String] = []
 	if is_instance_valid(planet) and "planet_resources" in planet:
 		for r in planet.get("planet_resources"):
-			if r != "Stone" and r != "Wood":
-				_mineable.append(r)
+			if r == "Stone" or r == "Wood":
+				continue
+			var weight: int = 8
+			match ResourceRegistry.get_tier(String(r)):
+				1: weight = 8
+				2: weight = 4
+				3: weight = 2
+				4: weight = 1
+				_: weight = 4
+			for _i in range(weight):
+				_mineable.append(String(r))
 	if _mineable.is_empty():
 		_mineable = ["Copper"]
 	
@@ -556,8 +572,13 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 			# ACE STRUCTURAL HIERARCHY: Natural Wilderness only
 			# WILDERNESS ZONE: Minerals & Nature
 			# -----------------------------------
-			# 1. MINERAL PRIORITY: Extreme Rarity (1 in 300,000 baseline, scaled by planet tier)
-			if (h_v % int(300000.0 / _tier_resource_mult)) < 1:
+			# 1. MINERAL PRIORITY: Reliably visible — baseline 1 in 5,000 scaled
+			# by planet tier.  A close-up chunk covers ~440 cells, so this works
+			# out to ~0.09 minerals per chunk on a C-rank planet → several
+			# visible at once across the loaded chunk ring.  Old 1-in-300,000
+			# (and even my intermediate 1-in-75,000) bottomed out at "1 mineral
+			# per planet" which made low-rank planets feel mineral-empty.
+			if (h_v % int(5000.0 / _tier_resource_mult)) < 1:
 				var h = get_terrain_elevation(cp)
 				if h > -100.0:
 					# Pick deterministically from this planet's resource pool
@@ -568,20 +589,22 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 					m_pts.append([xf, type])
 			else:
 				# 2. NATURE FALLBACK: Standard Biome Scattering
-				# Per-archetype tree-density multiplier — drab F/D worlds have
-				# no trees so they read as dead rock; JUNGLE doubles density;
-				# CRYSTAL grows only crystal spires (no botw foliage), kept
-				# normal so the rare gem clusters still appear.
+				# Per-archetype tree-density multiplier.  Even barren worlds get
+				# *some* sparse scrub now so the surface doesn't read as empty
+				# (players need something to mine + visual variety).  JUNGLE
+				# stays lush, dead worlds stay drab but readable.
 				var _nat_scale: float = 1.0
 				match archetype:
-					"BARREN", "ASH", "MUDFLAT", "DESERT", "RUST":
-						_nat_scale = 0.0
+					"BARREN", "ASH", "MUDFLAT":
+						_nat_scale = 0.20  # sparse scrub on dead worlds
+					"DESERT", "RUST":
+						_nat_scale = 0.40  # scattered cacti / dust spires
 					"JUNGLE":
 						_nat_scale = 2.0
 					"SAVANNA":
-						_nat_scale = 0.4
+						_nat_scale = 0.6
 					"OBSIDIAN":
-						_nat_scale = 0.2
+						_nat_scale = 0.3
 				if cluster_n > 0.35 and _nat_scale > 0.0: # ACE: Raised cluster threshold (narrower groves)
 					var grove_strength = clamp((cluster_n - 0.35) * 8.0, 0.0, 1.0)
 					if (h_v % 1000) < int(125 * grove_strength * DebugSettings.tree_mult * _tier_resource_mult * _nat_scale):
@@ -602,8 +625,8 @@ func _scatter_deterministic_stellar_layers_thread_safe(has_water: bool) -> void:
 								m_pts.append([xform, "Wood"])
 							else:
 								t_pts.append(xform.rotated_local(Vector3.UP, float(h_v % 360)))
-				elif cluster_n < -0.30: # ACE: Widened rock threshold
-					if (h_v % 1000) < int(30 * DebugSettings.rock_mult * _tier_resource_mult):
+				elif cluster_n < -0.15: # ACE: Even wider rock threshold so dead worlds aren't featureless
+					if (h_v % 1000) < int(80 * DebugSettings.rock_mult * _tier_resource_mult):
 						var h_r = get_terrain_elevation(cp)
 						if h_r > -150.0:
 							var r_pos = cp * (radius + max(h_r, SEA_LEVEL - 50.0))

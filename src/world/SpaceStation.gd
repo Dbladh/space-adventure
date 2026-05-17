@@ -83,6 +83,12 @@ signal planet_forged(count: int)
 var _market_scroll: ScrollContainer = null
 var _market_rows_vbox: VBoxContainer = null
 var _market_status: Label = null
+# Bulk-trade quantity mode for the Market tab.  Values: "1", "10", "100",
+# "max".  Applied to BOTH the Sell and Buy columns so a single global toggle
+# drives the price totals shown on every row.  Reset to "1" each time the
+# modal opens so the player can't accidentally bulk-sell on next visit.
+var _market_qty_mode: String = "1"
+var _market_qty_btns: Array = []  # 4 toggle buttons, indexed by preset order
 
 # Tab references
 var _tab_btns: Array = []  # [market_btn, upgrades_btn, planets_btn, forge_btn]
@@ -572,6 +578,42 @@ func _build_ui() -> void:
 	_market_status.autowrap_mode = TextServer.AUTOWRAP_WORD
 	_tab_market_panel.add_child(_market_status)
 
+	# ── Bulk quantity selector (applies to BOTH sell and buy) ──────────
+	# Single global mode drives every row's button labels + disabled state.
+	# Resets to "1" each modal open so the player doesn't accidentally
+	# bulk-trade on next visit (handled in _show_ui).
+	var qty_row := HBoxContainer.new()
+	qty_row.add_theme_constant_override("separation", 4)
+	qty_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tab_market_panel.add_child(qty_row)
+
+	var qty_lbl := Label.new()
+	qty_lbl.text = "QUANTITY:"
+	qty_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	qty_lbl.add_theme_font_size_override("font_size", 16 if _is_mobile_ui else 14)
+	qty_lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
+	qty_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	qty_lbl.custom_minimum_size = Vector2(110 if _is_mobile_ui else 90, 0)
+	qty_row.add_child(qty_lbl)
+
+	_market_qty_btns.clear()
+	var presets: Array = ["1", "10", "100", "max"]
+	for p_i in range(presets.size()):
+		var preset: String = presets[p_i]
+		var btn := Button.new()
+		btn.text = ("×" + preset) if preset != "max" else "MAX"
+		btn.toggle_mode = true
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		if _is_mobile_ui:
+			btn.custom_minimum_size = Vector2(0, _TAB_H_MOBILE - 8)
+		else:
+			btn.custom_minimum_size = Vector2(0, 32)
+		_apply_qty_btn_color(btn, preset == _market_qty_mode)
+		var captured_preset: String = preset
+		btn.pressed.connect(func() -> void: _on_market_qty_pressed(captured_preset))
+		qty_row.add_child(btn)
+		_market_qty_btns.append(btn)
+
 	# Column header row
 	var header_row := HBoxContainer.new()
 	header_row.add_theme_constant_override("separation", 8 if _is_mobile_ui else 4)
@@ -971,6 +1013,13 @@ func _build_ui() -> void:
 	if Engine.has_meta("EconomyManager"):
 		var econ2 = Engine.get_meta("EconomyManager")
 		econ2.currency_changed.connect(func(_n: int) -> void:
+			# Refresh the forge button's enabled state — it gates on credits
+			# >= cost.  Without this, a market sale lifts your credits past
+			# the cost but the Forge button stays disabled.
+			_update_slot_display()
+			# Market button labels (MAX-buy in particular) depend on credits.
+			if _active_tab == 0:
+				_rebuild_market_rows()
 			if _active_tab == 1:
 				_rebuild_all_upgrade_rows())
 
@@ -1607,6 +1656,12 @@ func _show_ui() -> void:
 	_ui_visible = true
 	_notify_mobile_controls(true)
 	_panel.show()
+	# Reset bulk-trade mode each session so the player never bulk-sells by
+	# accident on next visit.  The visual state of the segmented selector
+	# is repainted inside the rebuild below.
+	_market_qty_mode = "1"
+	for b in _market_qty_btns:
+		_apply_qty_btn_color(b, b.text == "×1")
 	_refresh_inv_display()
 	_rebuild_market_rows()
 	_refresh_planets_ui()
@@ -1764,32 +1819,85 @@ func _on_sell_all() -> void:
 		_set_market_status("Nothing to sell.", Color(1.0, 0.5, 0.3))
 	_refresh_inv_display()
 
-func _on_sell_one(resource_type: String) -> void:
+func _on_sell_resource(resource_type: String) -> void:
 	if not Engine.has_meta("InventoryManager") or not Engine.has_meta("EconomyManager"): return
 	var inv = Engine.get_meta("InventoryManager")
 	var econ = Engine.get_meta("EconomyManager")
-	if inv.get_amount(resource_type) <= 0:
-		_set_market_status("None in inventory.", Color(1.0, 0.5, 0.3))
+	var held: int = inv.get_amount(resource_type)
+	var qty: int = _market_qty_for_sell(held)
+	if qty <= 0 or held < qty:
+		_set_market_status("Not enough " + resource_type + " to sell ×" + str(max(qty, 1)) + ".", Color(1.0, 0.5, 0.3))
 		return
-	var sell_price: int = ResourceRegistry.get_value(resource_type)
-	inv.consume(resource_type, 1)
-	econ.add_credits(sell_price)
-	_set_market_status("+$" + str(sell_price) + " for " + resource_type, Color(0.4, 1.0, 0.7))
+	var unit_price: int = ResourceRegistry.get_value(resource_type)
+	var total: int = qty * unit_price
+	inv.consume(resource_type, qty)
+	econ.add_credits(total)
+	_set_market_status("+$" + str(total) + " — Sold ×" + str(qty) + " " + resource_type, Color(0.4, 1.0, 0.7))
 	_refresh_inv_display()
 
-func _on_buy_one(resource_type: String) -> void:
+func _on_buy_resource(resource_type: String) -> void:
 	if not Engine.has_meta("InventoryManager") or not Engine.has_meta("EconomyManager"): return
 	var inv = Engine.get_meta("InventoryManager")
 	var econ = Engine.get_meta("EconomyManager")
-	var buy_price: int = ResourceRegistry.get_buy_price(resource_type)
-	if econ.credits < buy_price:
-		_set_market_status("Need $" + str(buy_price) + " to buy " + resource_type, Color(1.0, 0.5, 0.3))
+	var unit_price: int = ResourceRegistry.get_buy_price(resource_type)
+	var qty: int = _market_qty_for_buy(unit_price, int(econ.credits))
+	var total: int = qty * unit_price
+	if qty <= 0 or econ.credits < total:
+		_set_market_status("Need $" + str(total) + " to buy ×" + str(max(qty, 1)) + " " + resource_type, Color(1.0, 0.5, 0.3))
 		return
-	econ.credits -= buy_price
+	econ.credits -= total
 	econ.emit_signal("currency_changed", econ.credits)
-	inv.add(resource_type, 1)
-	_set_market_status("-$" + str(buy_price) + " — Bought " + resource_type, Color(1.0, 0.85, 0.3))
+	inv.add(resource_type, qty)
+	_set_market_status("-$" + str(total) + " — Bought ×" + str(qty) + " " + resource_type, Color(1.0, 0.85, 0.3))
 	_refresh_inv_display()
+
+# Resolve the effective sell quantity based on the active selector mode and
+# how much the player currently holds.  "max" returns everything; numeric
+# modes return the literal value (caller checks for `held < qty` to disable
+# the button when there isn't enough).
+func _market_qty_for_sell(held: int) -> int:
+	match _market_qty_mode:
+		"10": return 10
+		"100": return 100
+		"max": return held
+		_: return 1
+
+# Same for the buy side — "max" is the largest qty the player can afford
+# at the given unit price.  Returns 0 when the player can't even afford one.
+func _market_qty_for_buy(unit_price: int, credits: int) -> int:
+	match _market_qty_mode:
+		"10": return 10
+		"100": return 100
+		"max":
+			if unit_price <= 0: return 0
+			return credits / unit_price
+		_: return 1
+
+# Format a market-row button label.  MAX mode appends the count so the
+# player can see how many will trade without having to glance at the Held
+# column; numeric modes hide the count since it's already in the button text.
+func _market_btn_label(total: int, qty: int) -> String:
+	if _market_qty_mode == "max":
+		return "$" + str(total) + " (×" + str(qty) + ")"
+	return "$" + str(total)
+
+func _on_market_qty_pressed(preset: String) -> void:
+	if _market_qty_mode == preset:
+		# Re-affirm visual state — the toggle button can come up un-pressed if
+		# the user clicks the active one again.
+		for b in _market_qty_btns:
+			_apply_qty_btn_color(b, b.text == ("×" + preset) or (preset == "max" and b.text == "MAX"))
+		return
+	_market_qty_mode = preset
+	for b in _market_qty_btns:
+		_apply_qty_btn_color(b, b.text == ("×" + preset) or (preset == "max" and b.text == "MAX"))
+	_rebuild_market_rows()
+
+func _apply_qty_btn_color(btn: Button, active: bool) -> void:
+	var fs: int = 18 if _is_mobile_ui else 14
+	var base_col: Color = HUDStyle.BTN_PINK if active else HUDStyle.BTN_BLUE
+	HUDStyle.style_button(btn, base_col, fs)
+	btn.button_pressed = active
 
 func _set_market_status(msg: String, col: Color) -> void:
 	if _market_status:
@@ -1854,32 +1962,34 @@ func _rebuild_market_rows() -> void:
 		held_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 		row.add_child(held_lbl)
 
-		# ── Sell button ───────────────────────────────────────────────
+		# ── Sell button (quantity from global _market_qty_mode) ────────
+		var sell_qty: int = _market_qty_for_sell(held)
 		var sell_btn: Button = Button.new()
-		sell_btn.text = "$" + str(sell_val)
+		sell_btn.text = _market_btn_label(sell_qty * sell_val, sell_qty)
 		HUDStyle.style_button(sell_btn, HUDStyle.BTN_GREEN, 18 if _is_mobile_ui else 13)
 		if _is_mobile_ui:
 			sell_btn.custom_minimum_size = Vector2(_BTN_MIN_W_MOBILE, _BTN_H_MOBILE)
 			sell_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		else:
 			sell_btn.custom_minimum_size = Vector2(58, 28)
-		sell_btn.disabled = held <= 0
+		sell_btn.disabled = sell_qty <= 0 or held < sell_qty
 		var sell_r: String = r  # capture
-		sell_btn.pressed.connect(func() -> void: _on_sell_one(sell_r))
+		sell_btn.pressed.connect(func() -> void: _on_sell_resource(sell_r))
 		row.add_child(sell_btn)
 
-		# ── Buy button ────────────────────────────────────────────────
+		# ── Buy button (quantity from global _market_qty_mode) ─────────
+		var buy_qty: int = _market_qty_for_buy(buy_price, credits_val)
 		var buy_btn: Button = Button.new()
-		buy_btn.text = "$" + str(buy_price)
+		buy_btn.text = _market_btn_label(buy_qty * buy_price, buy_qty)
 		HUDStyle.style_button(buy_btn, HUDStyle.BTN_YELLOW, 18 if _is_mobile_ui else 13)
 		if _is_mobile_ui:
 			buy_btn.custom_minimum_size = Vector2(_BTN_MIN_W_MOBILE, _BTN_H_MOBILE)
 			buy_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		else:
 			buy_btn.custom_minimum_size = Vector2(58, 28)
-		buy_btn.disabled = credits_val < buy_price
+		buy_btn.disabled = buy_qty <= 0 or credits_val < buy_qty * buy_price
 		var buy_r: String = r  # capture
-		buy_btn.pressed.connect(func() -> void: _on_buy_one(buy_r))
+		buy_btn.pressed.connect(func() -> void: _on_buy_resource(buy_r))
 		row.add_child(buy_btn)
 
 

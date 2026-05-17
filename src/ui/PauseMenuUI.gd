@@ -13,6 +13,7 @@ extends Control
 signal resume_requested()
 signal rebind_requested()
 signal quit_requested()
+signal main_menu_requested()
 signal music_volume_changed(level: int)      # 0..4
 signal sfx_volume_changed(level: int)
 signal gyro_toggled(paused: bool)
@@ -23,57 +24,27 @@ signal new_game_confirmed()
 signal hud_visibility_toggled(hidden: bool)
 
 const HUDStyle = preload("res://src/ui/HUDStyle.gd")
-
-const VOLUME_STEPS: int = 5  # 0 mute, 4 full
+const SettingsPanelScript = preload("res://src/ui/SettingsPanel.gd")
 
 var _is_mobile_ui: bool = MobilePerf.is_mobile()
 
 # Two screens that share the centered plate.  Only one visible at a time.
 var _pause_screen:    VBoxContainer = null
-var _settings_screen: VBoxContainer = null
+var _settings_screen: SettingsPanel = null
 
 # Primary-pause widgets we keep references to
 var _resume_btn: Button = null
 var _save_btn:   Button = null
 
-# Settings widgets we keep references to so cycler labels can refresh
-var _music_btn: Button = null
-var _sfx_btn:   Button = null
-var _gyro_btn:  Button = null
-var _sens_btn:  Button = null
-var _dead_btn:  Button = null
-var _hud_btn:   Button = null
-var _hud_hidden: bool = false
-
-# Persisted-state mirror (kept in-memory so cycler labels stay correct without
-# round-tripping through SettingsManager every tap).
-var _music_level: int = 4
-var _sfx_level:   int = 4
-var _gyro_paused: bool = false
-var _sens_idx:    int = 1
-var _dead_idx:    int = 1
-
 # Destructive confirm modal — lazy-built on first NEW GAME tap.
 var _confirm_dim:   ColorRect = null
 var _confirm_plate: PanelContainer = null
-
-const _SENS_LABELS := ["LOW", "MED", "HIGH"]
-const _DEAD_LABELS := ["NARROW", "MED", "WIDE"]
 
 
 func _ready() -> void:
 	process_mode = PROCESS_MODE_ALWAYS
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
-
-	# Mirror persisted state so cyclers display the saved level on first open.
-	if Engine.has_meta("SettingsManager"):
-		var sm = Engine.get_meta("SettingsManager")
-		_music_level = int(sm.music_level)
-		_sfx_level   = int(sm.sfx_level)
-		_gyro_paused = bool(sm.gyro_paused)
-		_sens_idx    = int(sm.sens_idx)
-		_dead_idx    = int(sm.dead_idx)
 
 	# ── DIM BACKDROP ──────────────────────────────────────────────────────
 	var bg := ColorRect.new()
@@ -106,9 +77,18 @@ func _ready() -> void:
 	_pause_screen.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	screen_host.add_child(_pause_screen)
 
-	_settings_screen = _build_settings_screen()
+	_settings_screen = SettingsPanelScript.new()
 	_settings_screen.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_settings_screen.visible = false
+	# Forward SettingsPanel intents so Main's existing connections still work.
+	_settings_screen.music_volume_changed.connect(func(l: int) -> void: music_volume_changed.emit(l))
+	_settings_screen.sfx_volume_changed.connect(func(l: int) -> void: sfx_volume_changed.emit(l))
+	_settings_screen.gyro_toggled.connect(func(p: bool) -> void: gyro_toggled.emit(p))
+	_settings_screen.sens_changed.connect(func(i: int) -> void: sens_changed.emit(i))
+	_settings_screen.dead_changed.connect(func(i: int) -> void: dead_changed.emit(i))
+	_settings_screen.hud_visibility_toggled.connect(func(h: bool) -> void: hud_visibility_toggled.emit(h))
+	_settings_screen.rebind_requested.connect(func() -> void: rebind_requested.emit())
+	_settings_screen.back_requested.connect(_show_pause_screen)
 	screen_host.add_child(_settings_screen)
 
 	visibility_changed.connect(_on_visibility_changed)
@@ -152,87 +132,14 @@ func _build_pause_screen() -> VBoxContainer:
 	new_btn.pressed.connect(_on_new_game_pressed)
 	vb.add_child(new_btn)
 
-	if not _is_mobile_ui:
-		var quit_btn := _make_btn("QUIT TO DESKTOP", HUDStyle.BTN_RED)
-		quit_btn.pressed.connect(func() -> void: quit_requested.emit())
-		vb.add_child(quit_btn)
+	# Quit to Main Menu — shown on both desktop and mobile so the player can
+	# return to the start screen without force-quitting the app. The start
+	# screen itself offers a QUIT button on desktop for closing the game.
+	var menu_btn := _make_btn("QUIT TO MAIN MENU", HUDStyle.BTN_RED)
+	menu_btn.pressed.connect(func() -> void: main_menu_requested.emit())
+	vb.add_child(menu_btn)
 
 	return vb
-
-
-func _build_settings_screen() -> VBoxContainer:
-	var vb := VBoxContainer.new()
-	vb.alignment = BoxContainer.ALIGNMENT_CENTER
-	vb.add_theme_constant_override("separation", 10)
-
-	# BACK row — labeled button at top-left, plus screen title centered.
-	var top_row := HBoxContainer.new()
-	top_row.add_theme_constant_override("separation", 12)
-	top_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vb.add_child(top_row)
-
-	var back_btn := Button.new()
-	back_btn.text = "← BACK"
-	HUDStyle.style_button(back_btn, HUDStyle.BTN_BLUE, HUDStyle.HUD_FONT_MED)
-	back_btn.custom_minimum_size = Vector2(140, 56) if _is_mobile_ui else Vector2(110, 40)
-	back_btn.pressed.connect(_show_pause_screen)
-	top_row.add_child(back_btn)
-
-	var title := Label.new()
-	title.text = "SETTINGS"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	HUDStyle.style_label(title, HUDStyle.HUD_FONT_LRG, HUDStyle.CRT_GREEN_BG)
-	top_row.add_child(title)
-
-	# Spacer to balance the BACK button width so title stays centered.
-	var balance := Control.new()
-	balance.custom_minimum_size = Vector2(140 if _is_mobile_ui else 110, 0)
-	balance.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	top_row.add_child(balance)
-
-	# Audio
-	_music_btn = _make_cycler_btn(_format_volume("MUSIC", _music_level), HUDStyle.BTN_BLUE)
-	_music_btn.pressed.connect(_on_music_pressed)
-	vb.add_child(_music_btn)
-	_sfx_btn = _make_cycler_btn(_format_volume("SFX  ", _sfx_level), HUDStyle.BTN_BLUE)
-	_sfx_btn.pressed.connect(_on_sfx_pressed)
-	vb.add_child(_sfx_btn)
-
-	# Mobile controls
-	if _is_mobile_ui:
-		_gyro_btn = _make_cycler_btn(_format_gyro(_gyro_paused), HUDStyle.BTN_BLUE)
-		_gyro_btn.pressed.connect(_on_gyro_pressed)
-		vb.add_child(_gyro_btn)
-		_sens_btn = _make_cycler_btn("SENS: " + _SENS_LABELS[_sens_idx], HUDStyle.BTN_BLUE)
-		_sens_btn.pressed.connect(_on_sens_pressed)
-		vb.add_child(_sens_btn)
-		_dead_btn = _make_cycler_btn("DEAD: " + _DEAD_LABELS[_dead_idx], HUDStyle.BTN_BLUE)
-		_dead_btn.pressed.connect(_on_dead_pressed)
-		vb.add_child(_dead_btn)
-
-	# Desktop rebind
-	if not _is_mobile_ui:
-		var rebind_btn := _make_btn("REBIND CONTROLS", HUDStyle.BTN_BLUE)
-		rebind_btn.pressed.connect(func() -> void: rebind_requested.emit())
-		vb.add_child(rebind_btn)
-
-	# Hide HUD — true cinematic mode.  Pause button stays reachable, so the
-	# only path back is via this same setting (toggle to SHOW HUD).
-	_hud_btn = _make_cycler_btn(_format_hud(_hud_hidden), HUDStyle.BTN_BLUE)
-	_hud_btn.pressed.connect(_on_hud_pressed)
-	vb.add_child(_hud_btn)
-
-	return vb
-
-func _format_hud(is_hidden: bool) -> String:
-	return "HUD: " + ("HIDDEN" if is_hidden else "SHOWN")
-
-func _on_hud_pressed() -> void:
-	_hud_hidden = not _hud_hidden
-	if is_instance_valid(_hud_btn):
-		_hud_btn.text = _format_hud(_hud_hidden)
-	hud_visibility_toggled.emit(_hud_hidden)
 
 
 # ─── Screen navigation ────────────────────────────────────────────────────
@@ -245,9 +152,9 @@ func _show_pause_screen() -> void:
 
 func _show_settings_screen() -> void:
 	if _pause_screen: _pause_screen.visible = false
-	if _settings_screen: _settings_screen.visible = true
-	if is_instance_valid(_music_btn):
-		_music_btn.call_deferred("grab_focus")
+	if _settings_screen:
+		_settings_screen.visible = true
+		_settings_screen.focus_first_control()
 
 
 # ─── Button factories ────────────────────────────────────────────────────
@@ -258,53 +165,6 @@ func _make_btn(text: String, color: Color = HUDStyle.BTN_BLUE, font_size: int = 
 	HUDStyle.style_button(b, color, font_size)
 	b.custom_minimum_size = Vector2(520, 76) if _is_mobile_ui else Vector2(340, 56)
 	return b
-
-func _make_cycler_btn(text: String, color: Color) -> Button:
-	var b := Button.new()
-	b.text = text
-	HUDStyle.style_button(b, color, HUDStyle.HUD_FONT_MED)
-	b.custom_minimum_size = Vector2(520, 64) if _is_mobile_ui else Vector2(340, 48)
-	return b
-
-
-# ─── Label formatters ────────────────────────────────────────────────────
-
-func _format_volume(label: String, level: int) -> String:
-	var pips := ""
-	for i in range(VOLUME_STEPS - 1):
-		pips += "▶" if i < level else "▷"
-	return label + ": " + pips
-
-func _format_gyro(paused: bool) -> String:
-	return "GYRO: " + ("OFF" if paused else "ON")
-
-
-# ─── Cycler handlers ─────────────────────────────────────────────────────
-
-func _on_music_pressed() -> void:
-	_music_level = (_music_level + 1) % VOLUME_STEPS
-	_music_btn.text = _format_volume("MUSIC", _music_level)
-	music_volume_changed.emit(_music_level)
-
-func _on_sfx_pressed() -> void:
-	_sfx_level = (_sfx_level + 1) % VOLUME_STEPS
-	_sfx_btn.text = _format_volume("SFX  ", _sfx_level)
-	sfx_volume_changed.emit(_sfx_level)
-
-func _on_gyro_pressed() -> void:
-	_gyro_paused = not _gyro_paused
-	_gyro_btn.text = _format_gyro(_gyro_paused)
-	gyro_toggled.emit(_gyro_paused)
-
-func _on_sens_pressed() -> void:
-	_sens_idx = (_sens_idx + 1) % _SENS_LABELS.size()
-	_sens_btn.text = "SENS: " + _SENS_LABELS[_sens_idx]
-	sens_changed.emit(_sens_idx)
-
-func _on_dead_pressed() -> void:
-	_dead_idx = (_dead_idx + 1) % _DEAD_LABELS.size()
-	_dead_btn.text = "DEAD: " + _DEAD_LABELS[_dead_idx]
-	dead_changed.emit(_dead_idx)
 
 func _on_save_pressed() -> void:
 	save_requested.emit()

@@ -603,6 +603,7 @@ func _setup_hardened_diag_hud() -> void:
 	pause_node.resume_requested.connect(toggle_pause)
 	pause_node.rebind_requested.connect(_on_open_rebind)
 	pause_node.quit_requested.connect(func() -> void: get_tree().quit())
+	pause_node.main_menu_requested.connect(_on_pause_main_menu_requested)
 	# New unified-pause signals: volume / control prefs / save / new-game.
 	pause_node.music_volume_changed.connect(_on_music_volume_changed)
 	pause_node.sfx_volume_changed.connect(_on_sfx_volume_changed)
@@ -909,6 +910,15 @@ func _on_pause_hud_toggled(hidden: bool) -> void:
 		for s in get_tree().get_nodes_in_group("SpaceStation"):
 			if "_prompt_btn" in s and s._prompt_btn != null:
 				s._prompt_btn.hide()
+
+func _on_pause_main_menu_requested() -> void:
+	# Auto-save before bouncing out so progress isn't lost. Mirrors the same
+	# save_now() call the autosave-on-exit path uses.
+	if Engine.has_meta("SaveManager"):
+		Engine.get_meta("SaveManager").save_now()
+	get_tree().paused = false
+	get_tree().change_scene_to_file("res://src/ui/StartScreen.tscn")
+
 
 func _on_pause_new_game_confirmed() -> void:
 	# Destructive: nuke save.json then reload Main so all managers re-init

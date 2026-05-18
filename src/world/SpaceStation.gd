@@ -56,6 +56,11 @@ var _safe_top: float    = 0.0
 var _safe_bottom: float = 0.0
 var _inv_label: Label = null
 var _creds_label: Label = null
+# Captain identity header — left side of the new top bar.
+var _captain_avatar: TextureRect = null
+var _captain_name_lbl: Label = null
+# Right side: stat readouts keyed by id for live refresh on signal.
+var _stat_labels: Dictionary = {}   # id (String) -> Label
 var _forge_slots: Array = []          # Array[OptionButton] (legacy, unused)
 var _forge_selected: Array[String] = []  # Up to 3 chosen resource names
 var _forge_card_grid: VBoxContainer = null
@@ -680,17 +685,11 @@ func _build_ui() -> void:
 	_close_btn.pressed.connect(_hide_ui)
 	plate_inner.add_child(_close_btn)
 
-	# ---- Credits ----
-	# Station name + inventory summary intentionally removed — the forge UI
-	# shows per-resource quantities in the left column, and the close X +
-	# station-context is implicit from the docked modal.
-	_creds_label = Label.new()
-	_creds_label.text = "$0"
-	_creds_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_creds_label.add_theme_font_size_override("font_size", 26)
-	_creds_label.add_theme_color_override("font_color", Color.GOLD)
-	_creds_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(_creds_label)
+	# ---- Captain header (avatar + name on left, stats on right) ----
+	# Replaces the old centered credits label.  Stats refresh via signals
+	# wired further down (UpgradeManager, EconomyManager) and on _show_ui()
+	# for the per-session counters (planets / kills / playtime).
+	_build_captain_header(vbox)
 
 	# ---- Tabs: MARKET | UPGRADES | PLANETS | FORGE ----
 	var tab_row := HBoxContainer.new()
@@ -1831,6 +1830,7 @@ func _show_ui() -> void:
 	_refresh_inv_display()
 	_rebuild_market_rows()
 	_refresh_planets_ui()
+	_refresh_captain_header()
 	_forge_status.text = ""
 	_market_status.text = ""
 	_update_slot_display()
@@ -2912,6 +2912,7 @@ func _on_upgrade_changed(track: String, new_level: int) -> void:
 		_upgrades_status.add_theme_color_override("font_color", Color(0.4, 1.0, 0.7))
 	if _active_tab == 1:
 		_rebuild_all_upgrade_rows()
+	_refresh_upgrade_stat_cells()
 
 func _on_upgrade_purchase_failed(track: String, reason: String) -> void:
 	if _upgrades_status == null:
@@ -3004,3 +3005,125 @@ func _rehydrate_active_planets() -> void:
 		print("--- SAVE: rehydrated ", spawned, " forged planet(s) ---")
 		planet_forged.emit(_active_planets.size())
 		_refresh_planets_ui()
+
+
+# ─── Captain header (top of station UI) ──────────────────────────────────
+# Avatar + name on the left, an 8-cell stat grid on the right.  Stats:
+# CREDITS / PLANETS / KILLS / TIME and the four upgrade levels the player
+# cares about (ATTACK / HULL / WARP / LUCK).  Refresh paths:
+#   - CREDITS: existing currency_changed signal handler updates _creds_label.
+#   - Upgrades: signal-driven via _refresh_stat_grid() on upgrade_changed.
+#   - PLANETS / KILLS / TIME: refreshed each _show_ui() call (cheap, no tick).
+
+func _build_captain_header(parent: VBoxContainer) -> void:
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 14)
+	header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(header)
+
+	# ── Left: avatar + name ─────────────────────────────────────────────
+	var left := VBoxContainer.new()
+	left.alignment = BoxContainer.ALIGNMENT_CENTER
+	left.add_theme_constant_override("separation", 4)
+	left.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	header.add_child(left)
+
+	_captain_avatar = TextureRect.new()
+	_captain_avatar.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+	_captain_avatar.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	var avatar_size: int = 88 if _is_mobile_ui else 72
+	_captain_avatar.custom_minimum_size = Vector2(avatar_size, avatar_size)
+	_captain_avatar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	left.add_child(_captain_avatar)
+
+	_captain_name_lbl = Label.new()
+	_captain_name_lbl.text = "CAPT."
+	_captain_name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_captain_name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	HUDStyle.style_label(_captain_name_lbl, HUDStyle.HUD_FONT_MED, HUDStyle.CRT_GREEN_BG)
+	left.add_child(_captain_name_lbl)
+
+	# ── Right: 2-column stat grid ──────────────────────────────────────
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 14)
+	grid.add_theme_constant_override("v_separation", 4)
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(grid)
+
+	_creds_label = _add_stat_cell(grid, "credits", "CREDITS", "$0", Color.GOLD)
+	_add_stat_cell(grid, "planets", "PLANETS", "0")
+	_add_stat_cell(grid, "kills", "KILLS", "0")
+	_add_stat_cell(grid, "time", "TIME", "0:00")
+	_add_stat_cell(grid, "attack", "ATTACK", "Lv 0")
+	_add_stat_cell(grid, "hull", "HULL", "Lv 0")
+	_add_stat_cell(grid, "warp", "WARP", "Lv 0")
+	_add_stat_cell(grid, "luck", "LUCK", "Lv 0")
+
+
+func _add_stat_cell(grid: GridContainer, key: String, label_text: String, default_value: String, value_color: Color = HUDStyle.CRT_GREEN_BG) -> Label:
+	var cell := HBoxContainer.new()
+	cell.add_theme_constant_override("separation", 6)
+	grid.add_child(cell)
+
+	var lbl := Label.new()
+	lbl.text = label_text
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	HUDStyle.style_label(lbl, HUDStyle.HUD_FONT_SMALL, Color(0.55, 0.6, 0.75))
+	cell.add_child(lbl)
+
+	var value := Label.new()
+	value.text = default_value
+	value.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	value.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	HUDStyle.style_label(value, HUDStyle.HUD_FONT_MED, value_color)
+	cell.add_child(value)
+
+	_stat_labels[key] = value
+	return value
+
+
+func _refresh_captain_header() -> void:
+	# Pull identity + counters from the live managers; tolerate any missing
+	# (e.g. station UI built before save load completes).
+	var p_name: String = "CAPTAIN"
+	var character: String = "axolotl"
+	if Engine.has_meta("SaveManager"):
+		var sm = Engine.get_meta("SaveManager")
+		if String(sm.player_name).strip_edges() != "":
+			p_name = String(sm.player_name)
+		character = String(sm.player_character)
+	if is_instance_valid(_captain_name_lbl):
+		_captain_name_lbl.text = "CAPT. " + p_name.to_upper()
+	if is_instance_valid(_captain_avatar):
+		var portrait_path: String = "res://assets/images/portraits/%s/%s_default.png" % [character, character]
+		if ResourceLoader.exists(portrait_path):
+			_captain_avatar.texture = load(portrait_path) as Texture2D
+
+	if _stat_labels.has("planets"):
+		_stat_labels["planets"].text = str(_active_planets.size())
+
+	if Engine.has_meta("StatsTracker"):
+		var st = Engine.get_meta("StatsTracker")
+		if _stat_labels.has("kills"):
+			_stat_labels["kills"].text = str(st.enemy_kills)
+		if _stat_labels.has("time"):
+			_stat_labels["time"].text = st.format_playtime()
+
+	_refresh_upgrade_stat_cells()
+
+
+func _refresh_upgrade_stat_cells() -> void:
+	if not Engine.has_meta("UpgradeManager"): return
+	var up = Engine.get_meta("UpgradeManager")
+	# Map our display keys to UpgradeManager track keys.
+	var mapping: Dictionary = {
+		"attack": "attack",
+		"hull":   "health",
+		"warp":   "movement",
+		"luck":   "luck",
+	}
+	for display_key in mapping.keys():
+		var track: String = mapping[display_key]
+		if _stat_labels.has(display_key):
+			_stat_labels[display_key].text = "Lv " + str(up.get_level(track))

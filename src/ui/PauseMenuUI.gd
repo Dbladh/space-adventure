@@ -116,6 +116,10 @@ func _build_pause_screen() -> VBoxContainer:
 	HUDStyle.style_label(title, HUDStyle.HUD_FONT_TITLE, HUDStyle.CRT_GREEN_BG)
 	vb.add_child(title)
 
+	# Captain identity strip: portrait + name above the menu buttons.  Pulled
+	# from SaveManager so the player is reminded who's at the controls.
+	_build_captain_strip(vb)
+
 	_resume_btn = _make_btn("RESUME", HUDStyle.BTN_GREEN, HUDStyle.HUD_FONT_LRG)
 	_resume_btn.pressed.connect(func() -> void: resume_requested.emit())
 	vb.add_child(_resume_btn)
@@ -140,6 +144,49 @@ func _build_pause_screen() -> VBoxContainer:
 	vb.add_child(menu_btn)
 
 	return vb
+
+
+func _build_captain_strip(parent: VBoxContainer) -> void:
+	var character: String = "axolotl"
+	var p_name: String = "CAPTAIN"
+	if Engine.has_meta("SaveManager"):
+		var sm = Engine.get_meta("SaveManager")
+		character = String(sm.player_character)
+		if String(sm.player_name).strip_edges() != "":
+			p_name = String(sm.player_name)
+
+	var portrait_path: String = "res://assets/images/portraits/%s/%s_default.png" % [character, character]
+	if not ResourceLoader.exists(portrait_path):
+		return  # silently skip if assets missing — the rest of the pause menu still works
+
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+	parent.add_child(row)
+
+	var tex_rect := TextureRect.new()
+	tex_rect.texture = load(portrait_path) as Texture2D
+	tex_rect.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+	tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	var sz: int = 96 if _is_mobile_ui else 80
+	tex_rect.custom_minimum_size = Vector2(sz, sz)
+	tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(tex_rect)
+
+	var info := VBoxContainer.new()
+	info.alignment = BoxContainer.ALIGNMENT_CENTER
+	info.add_theme_constant_override("separation", 2)
+	row.add_child(info)
+
+	var name_lbl := Label.new()
+	name_lbl.text = "CAPT. " + p_name.to_upper()
+	HUDStyle.style_label(name_lbl, HUDStyle.HUD_FONT_LRG, HUDStyle.CRT_GREEN_BG)
+	info.add_child(name_lbl)
+
+	var sub := Label.new()
+	sub.text = "CAPTAIN"
+	HUDStyle.style_label(sub, HUDStyle.HUD_FONT_SMALL, Color(0.6, 0.65, 0.8))
+	info.add_child(sub)
 
 
 # ─── Screen navigation ────────────────────────────────────────────────────

@@ -277,6 +277,9 @@ func _die():
 	# LOOT DROP: Spawn 1-3 resource gems from the wreckage
 	_drop_loot()
 
+	if Engine.has_meta("StatsTracker"):
+		Engine.get_meta("StatsTracker").add_kill()
+
 	queue_free()
 
 func _drop_loot() -> void:

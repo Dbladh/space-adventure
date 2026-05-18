@@ -80,6 +80,15 @@ func _ready() -> void:
 		add_child(up)
 		Engine.set_meta("UpgradeManager", up)
 
+	# STATS GENESIS: Lifetime counters (enemy kills + playtime).  Registered
+	# BEFORE SaveManager so load_if_exists() can seed values directly into it.
+	var stats_script = load("res://src/core/StatsTracker.gd")
+	if stats_script:
+		var st = stats_script.new()
+		st.name = "StatsTracker"
+		add_child(st)
+		Engine.set_meta("StatsTracker", st)
+
 	# SAVE GENESIS: JSON persistence (user://save.json)
 	var save_script = load("res://src/core/SaveManager.gd")
 	if save_script:

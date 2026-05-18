@@ -6,9 +6,16 @@ extends Node
 # after currency/inventory mutations; upgrade purchases save immediately.
 
 const SAVE_PATH := "user://save.json"
-const SCHEMA_VERSION := 1
+const SCHEMA_VERSION := 2
 const DEBOUNCE_SECS := 1.5
 const SpaceStationGD := preload("res://src/world/SpaceStation.gd")
+
+# Captain identity — chosen once during the new-game flow on StartScreen and
+# baked into save.json.  Defaults are placeholders so any code path that
+# reads these before the new-game flow runs gets sane values.
+var player_name: String = ""
+var player_character: String = "axolotl"   # axolotl | rabbit | monkey | panda
+var player_ship: String = "ship1"          # ship1 | ship2 | ship3 | ship4
 
 var _dirty: bool = false
 var _debounce_t: float = 0.0
@@ -63,6 +70,11 @@ func save_now() -> void:
 		"inventory": {},
 		"upgrades": {},
 		"planets": [],
+		"player_name": player_name,
+		"player_character": player_character,
+		"player_ship": player_ship,
+		"enemy_kills": 0,
+		"playtime_seconds": 0.0,
 	}
 	if Engine.has_meta("EconomyManager"):
 		data["credits"] = int(Engine.get_meta("EconomyManager").credits)
@@ -72,6 +84,10 @@ func save_now() -> void:
 		data["upgrades"] = Engine.get_meta("UpgradeManager").levels.duplicate()
 	data["planets"] = SpaceStationGD.active_planets_for_save()
 	data["total_forges"] = SpaceStationGD.get_total_forges()
+	if Engine.has_meta("StatsTracker"):
+		var st = Engine.get_meta("StatsTracker")
+		data["enemy_kills"] = int(st.enemy_kills)
+		data["playtime_seconds"] = float(st.playtime_seconds)
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f == null:
 		push_warning("SaveManager: failed to open " + SAVE_PATH + " for write")
@@ -96,6 +112,18 @@ func load_if_exists() -> bool:
 	if int(parsed.get("version", 0)) != SCHEMA_VERSION:
 		_back_up_corrupt_file("version_mismatch")
 		return false
+
+	# Restore captain identity + lifetime counters FIRST.  The upgrade-restore
+	# block below emits upgrade_changed, which our own _on_upgrade_changed
+	# handler calls save_now() against — so any field not assigned before that
+	# emit gets written back as its default.
+	player_name      = String(parsed.get("player_name", ""))
+	player_character = String(parsed.get("player_character", "axolotl"))
+	player_ship      = String(parsed.get("player_ship", "ship1"))
+	var saved_kills: int = int(parsed.get("enemy_kills", 0))
+	var saved_seconds: float = float(parsed.get("playtime_seconds", 0.0))
+	if Engine.has_meta("StatsTracker"):
+		Engine.get_meta("StatsTracker").set_from_save(saved_kills, saved_seconds)
 
 	# Restore credits.
 	if Engine.has_meta("EconomyManager"):
@@ -139,6 +167,35 @@ func load_if_exists() -> bool:
 
 	print("--- SAVE: loaded ", SAVE_PATH, " ---")
 	return true
+
+func set_identity(captain: String, character_id: String, ship_id: String) -> void:
+	player_name = captain
+	player_character = character_id
+	player_ship = ship_id
+
+# Called from StartScreen before the scene change.  Writes a fresh save.json
+# carrying just the captain identity so Main.gd's load_if_exists() picks it
+# up — all other state defaults to zero.
+static func write_new_game_seed(captain: String, character_id: String, ship_id: String) -> void:
+	var data: Dictionary = {
+		"version": SCHEMA_VERSION,
+		"credits": 0,
+		"inventory": {},
+		"upgrades": {},
+		"planets": [],
+		"total_forges": 0,
+		"player_name": captain,
+		"player_character": character_id,
+		"player_ship": ship_id,
+		"enemy_kills": 0,
+		"playtime_seconds": 0.0,
+	}
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f == null:
+		push_warning("SaveManager: failed to write new-game seed at " + SAVE_PATH)
+		return
+	f.store_string(JSON.stringify(data, "\t"))
+	f.close()
 
 func _back_up_corrupt_file(reason: String) -> void:
 	var stamp := str(Time.get_unix_time_from_system())

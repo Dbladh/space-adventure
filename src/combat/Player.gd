@@ -528,7 +528,10 @@ func _setup_thruster_trails() -> void:
 		t.set_meta("light_node", light)
 
 func _setup_starhawk_hull() -> void:
-	var path = "res://assets/models/player/ship/Meshy_AI_Starhawk_01_0331051011_texture.glb"
+	var ship_id: String = ShipRegistry.DEFAULT_ID
+	if Engine.has_meta("SaveManager"):
+		ship_id = String(Engine.get_meta("SaveManager").player_ship)
+	var path: String = ShipRegistry.path_for(ship_id)
 	if ResourceLoader.exists(path):
 		var scene = load(path)
 		if scene:

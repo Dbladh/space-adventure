@@ -8,6 +8,8 @@ extends Node
 
 const HUDStyle = preload("res://src/ui/HUDStyle.gd")
 const SettingsPanelScript = preload("res://src/ui/SettingsPanel.gd")
+const SaveManagerGD = preload("res://src/core/SaveManager.gd")
+const ShipRegistryGD = preload("res://src/combat/ShipRegistry.gd")
 const _PLANET_SHADER = preload("res://src/shaders/background_planet.gdshader")
 const _RING_SHADER = preload("res://src/shaders/background_ring.gdshader")
 const _STAR_SHADER = preload("res://src/shaders/background_star.gdshader")
@@ -16,6 +18,10 @@ const _MILKYWAY_SHADER = preload("res://src/shaders/background_milkyway.gdshader
 # dither + 5-step palette banding + shadow tint — applied as a top CanvasLayer
 # so the start screen reads identically to the in-game world.
 const _RETRO_SHADER = preload("res://src/world/retro_vfx.gdshader")
+# Texture-sampling variant for portraits inside _overlay_layer (above the
+# global retro pass). Stacked SCREEN_TEXTURE samples share a back-buffer and
+# only the first card's portrait survives — sampling TEXTURE avoids that.
+const _RETRO_PORTRAIT_SHADER = preload("res://src/world/retro_portrait.gdshader")
 
 # Background tint pool — mirrors the variety of nebula zones the player flies
 # through in-game. Picked randomly per session so each launch feels like a
@@ -57,8 +63,51 @@ var _scene_3d: Node3D = null
 var _settings_panel: SettingsPanel = null
 var _settings_layer: Control = null
 var _confirm_layer: Control = null
+var _setup_layer: Control = null     # New-game character creation overlay
 var _ui_layer: CanvasLayer = null
 var _retro_layer: CanvasLayer = null
+
+# ─── New-game setup state ────────────────────────────────────────────────
+const _CHARACTERS: Array[Dictionary] = [
+	{"id": "axolotl", "label": "AXOLOTL", "portrait": "res://assets/images/portraits/axolotl/axolotl_default.png"},
+	{"id": "rabbit",  "label": "BUNNY",   "portrait": "res://assets/images/portraits/rabbit/rabbit_default.png"},
+	{"id": "monkey",  "label": "MONKEY",  "portrait": "res://assets/images/portraits/monkey/monkey_default.png"},
+	{"id": "panda",   "label": "PANDA",   "portrait": "res://assets/images/portraits/panda/panda_default.png"},
+]
+
+# Sci-fi captain name pool — same vibe as PlanetPlacementUI.PLANET_NAMES.
+# Mix of classical/mythic, made-up callsigns, and catalog-style designations
+# so consecutive RND presses feel varied. The initial name is rolled from
+# here too, so the field is never empty on first open.
+const _CAPTAIN_NAMES: Array[String] = [
+	# Classical / mythic
+	"Orion", "Cassius", "Lyra", "Atlas", "Phoebe", "Calypso", "Cygnus", "Vega",
+	"Helios", "Selene", "Astraea", "Perseus", "Ariadne", "Theron", "Nyx",
+	"Icarus", "Andromeda", "Rhea", "Pyrrhus", "Hyperion",
+	# Made-up callsigns
+	"Kestrel", "Wren", "Ash", "Vex", "Riven", "Mira", "Sable", "Cinder",
+	"Rook", "Halcyon", "Indigo", "Onyx", "Echo", "Juno", "Quill", "Wraith",
+	"Talon", "Briar", "Mercer", "Sol", "Nova", "Tess", "Roan", "Halen",
+	# Alien-flavoured
+	"Zynara", "Kelvix", "Xerath", "Vexen", "Sythari", "Threnos", "Ozymar",
+	"Kaelis", "Drazhar", "Velthros", "Crelix",
+	# Catalog-style callsigns
+	"K-9", "V-12", "X-01", "R-7", "M-42", "Z-3",
+]
+var _name_rng: RandomNumberGenerator = RandomNumberGenerator.new()
+var _setup_step: int = 0
+var _setup_name: String = ""
+var _setup_character: String = "axolotl"
+var _setup_ship_idx: int = 0
+var _setup_page_root: Control = null   # Swappable per-page container inside the panel
+var _setup_back_btn: Button = null
+var _setup_next_btn: Button = null
+var _setup_progress_lbl: Label = null
+var _setup_ship_viewport: SubViewport = null
+var _setup_ship_model: Node3D = null
+var _setup_ship_pivot: Node3D = null   # rotated each frame to spin the preview
+var _setup_ship_name_lbl: Label = null
+var _setup_character_cards: Array = []   # of PanelContainer
 # Sits above the retro post-process so interactive UI (menu buttons, settings
 # panel, confirm modals) renders crisp — the chunky pixelation + dither only
 # applies to the 3D world + logo below it.
@@ -721,6 +770,599 @@ func _start_new_game() -> void:
 		var d: DirAccess = DirAccess.open("user://")
 		if d != null:
 			d.rename(SAVE_PATH.replace("user://", ""), bak.replace("user://", ""))
+	_open_new_game_setup()
+
+
+# ─── New-game setup overlay ──────────────────────────────────────────────
+# Four pages — Name → Character → Ship → Confirm — shown over the start
+# screen.  On BEGIN we write a fresh save.json seed (identity only) and
+# scene-change to gameplay; Main.gd's SaveManager.load_if_exists() then
+# picks up the captain identity.
+
+func _open_new_game_setup() -> void:
+	_setup_step = 0
+	_name_rng.randomize()
+	# Pre-fill with a random captain name so the field has a confident
+	# default (mirrors PlanetPlacementUI). Player can still type their own.
+	_setup_name = _pick_random_captain_name()
+	_setup_character = "axolotl"
+	_setup_ship_idx = 0
+	if _setup_layer != null and is_instance_valid(_setup_layer):
+		_setup_layer.queue_free()
+		_setup_layer = null
+
+	_setup_layer = Control.new()
+	_setup_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_setup_layer.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var dim := ColorRect.new()
+	dim.color = Color(HUDStyle.BG_DEEP_PURPLE.r, HUDStyle.BG_DEEP_PURPLE.g, HUDStyle.BG_DEEP_PURPLE.b, 0.92)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_setup_layer.add_child(dim)
+
+	var plate := PanelContainer.new()
+	plate.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
+	plate.set_anchors_preset(Control.PRESET_CENTER)
+	# Plate scales with viewport so the setup screens read big — mobile gets
+	# nearly full-width, desktop caps so the modal doesn't sprawl on ultrawides.
+	var viewport_size: Vector2 = get_viewport().get_visible_rect().size
+	var plate_w: float = max(680.0, viewport_size.x - (60.0 if _is_mobile_ui else 200.0))
+	if not _is_mobile_ui:
+		plate_w = min(plate_w, 1200.0)
+	var plate_h: float = max(560.0, viewport_size.y - (160.0 if _is_mobile_ui else 200.0))
+	if not _is_mobile_ui:
+		plate_h = min(plate_h, 840.0)
+	var pw: int = int(plate_w * 0.5)
+	var ph: int = int(plate_h * 0.5)
+	plate.offset_left = -pw; plate.offset_right = pw
+	plate.offset_top  = -ph; plate.offset_bottom = ph
+	_setup_layer.add_child(plate)
+
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 12)
+	plate.add_child(vb)
+
+	_setup_progress_lbl = Label.new()
+	_setup_progress_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_label(_setup_progress_lbl, HUDStyle.HUD_FONT_SMALL, Color(0.6, 0.75, 1.0))
+	vb.add_child(_setup_progress_lbl)
+
+	_setup_page_root = Control.new()
+	_setup_page_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_setup_page_root.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# Page area = plate height minus progress label + nav row + paddings (~140px).
+	_setup_page_root.custom_minimum_size = Vector2(0, max(420.0, plate_h - 160.0))
+	vb.add_child(_setup_page_root)
+
+	# Bottom button row: BACK / NEXT (or CANCEL on first page, BEGIN on last)
+	var nav_row := HBoxContainer.new()
+	nav_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	nav_row.add_theme_constant_override("separation", 12)
+	vb.add_child(nav_row)
+
+	_setup_back_btn = _make_menu_btn("CANCEL", HUDStyle.BTN_BLUE)
+	_setup_back_btn.custom_minimum_size = Vector2(220, 64) if _is_mobile_ui else Vector2(150, 52)
+	_setup_back_btn.pressed.connect(_on_setup_back)
+	nav_row.add_child(_setup_back_btn)
+
+	_setup_next_btn = _make_menu_btn("NEXT", HUDStyle.BTN_GREEN)
+	_setup_next_btn.custom_minimum_size = Vector2(220, 64) if _is_mobile_ui else Vector2(150, 52)
+	_setup_next_btn.pressed.connect(_on_setup_next)
+	nav_row.add_child(_setup_next_btn)
+
+	_overlay_layer.add_child(_setup_layer)
+	_build_setup_page()
+
+
+func _build_setup_page() -> void:
+	for c in _setup_page_root.get_children():
+		c.queue_free()
+	_setup_character_cards.clear()
+	_setup_ship_viewport = null
+	_setup_ship_model = null
+	_setup_ship_pivot = null
+
+	var step_labels: Array[String] = ["SELECT CHARACTER", "NAME YOUR CAPTAIN", "SELECT SHIP", "READY TO LAUNCH"]
+	_setup_progress_lbl.text = "STEP %d / 4  ·  %s" % [_setup_step + 1, step_labels[_setup_step]]
+
+	match _setup_step:
+		0:
+			_build_setup_character_page()
+			_setup_back_btn.text = "CANCEL"
+			_setup_next_btn.text = "NEXT"
+		1:
+			_build_setup_name_page()
+			_setup_back_btn.text = "BACK"
+			_setup_next_btn.text = "NEXT"
+		2:
+			_build_setup_ship_page()
+			_setup_back_btn.text = "BACK"
+			_setup_next_btn.text = "NEXT"
+		3:
+			_build_setup_confirm_page()
+			_setup_back_btn.text = "BACK"
+			_setup_next_btn.text = "BEGIN"
+
+	_refresh_setup_next_enabled()
+
+
+func _build_setup_name_page() -> void:
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vb.add_theme_constant_override("separation", 14)
+	_setup_page_root.add_child(vb)
+
+	# Show the chosen character above the input so the player connects the
+	# name to the face they just picked.
+	var portrait_path: String = "res://assets/images/portraits/%s/%s_default.png" % [_setup_character, _setup_character]
+	if ResourceLoader.exists(portrait_path):
+		var portrait := TextureRect.new()
+		portrait.texture = load(portrait_path) as Texture2D
+		portrait.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+		portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		portrait.custom_minimum_size = Vector2(180, 180) if _is_mobile_ui else Vector2(160, 160)
+		portrait.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		portrait.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var portrait_mat := ShaderMaterial.new()
+		portrait_mat.shader = _RETRO_PORTRAIT_SHADER
+		portrait.material = portrait_mat
+		vb.add_child(portrait)
+
+	var prompt := Label.new()
+	prompt.text = "What's your captain's name?"
+	prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_label(prompt, HUDStyle.HUD_FONT_MED, Color.WHITE)
+	vb.add_child(prompt)
+
+	# Name row: LineEdit + RND button (matches PlanetPlacementUI). The field
+	# is pre-seeded with a random pick on overlay open; pressing RND rolls a
+	# new one without repeating the current name.
+	var name_row := HBoxContainer.new()
+	name_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	name_row.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	name_row.add_theme_constant_override("separation", 10)
+	vb.add_child(name_row)
+
+	var le := LineEdit.new()
+	le.placeholder_text = "CAPTAIN"
+	le.text = _setup_name
+	le.max_length = 16
+	le.custom_minimum_size = Vector2(360, 60) if _is_mobile_ui else Vector2(320, 48)
+	le.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_line_edit(le, HUDStyle.HUD_FONT_LRG)
+	le.text_changed.connect(_on_setup_name_changed)
+	name_row.add_child(le)
+
+	var rnd_btn := Button.new()
+	rnd_btn.text = "RND"
+	rnd_btn.tooltip_text = "Pick a random captain name"
+	HUDStyle.style_button(rnd_btn, HUDStyle.BTN_PINK, HUDStyle.HUD_FONT_MED)
+	rnd_btn.custom_minimum_size = Vector2(96, 60) if _is_mobile_ui else Vector2(80, 48)
+	rnd_btn.focus_mode = Control.FOCUS_NONE
+	rnd_btn.pressed.connect(func() -> void:
+		var pick: String = _pick_random_captain_name()
+		le.text = pick
+		_setup_name = pick
+		_refresh_setup_next_enabled())
+	name_row.add_child(rnd_btn)
+	le.call_deferred("grab_focus")
+
+	var hint := Label.new()
+	hint.text = "Up to 16 characters."
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_label(hint, HUDStyle.HUD_FONT_SMALL, Color(0.65, 0.65, 0.7))
+	vb.add_child(hint)
+
+
+func _build_setup_character_page() -> void:
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vb.add_theme_constant_override("separation", 14)
+	_setup_page_root.add_child(vb)
+
+	var prompt := Label.new()
+	prompt.text = "Pick your face for the void."
+	prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_label(prompt, HUDStyle.HUD_FONT_MED, Color.WHITE)
+	vb.add_child(prompt)
+
+	# Grid: single row of 4 across both layouts so all portraits are visible at once.
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 12)
+	grid.add_theme_constant_override("v_separation", 12)
+	grid.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vb.add_child(grid)
+
+	for entry in _CHARACTERS:
+		var card := _make_character_card(entry)
+		grid.add_child(card)
+		_setup_character_cards.append(card)
+
+	_refresh_character_card_highlights()
+
+
+func _make_character_card(entry: Dictionary) -> PanelContainer:
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.PANEL_BEVEL))
+	card.set_meta("character_id", entry["id"])
+	card.custom_minimum_size = Vector2(210, 260) if _is_mobile_ui else Vector2(180, 230)
+	card.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var cv := VBoxContainer.new()
+	cv.alignment = BoxContainer.ALIGNMENT_CENTER
+	cv.add_theme_constant_override("separation", 6)
+	card.add_child(cv)
+
+	# Portrait with the retro pipeline applied directly via material — sampling
+	# the bound TEXTURE instead of SCREEN_TEXTURE so every card renders
+	# independently of draw order.
+	var portrait_wrap := Control.new()
+	portrait_wrap.custom_minimum_size = Vector2(180, 180) if _is_mobile_ui else Vector2(150, 150)
+	portrait_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cv.add_child(portrait_wrap)
+
+	var tex_rect := TextureRect.new()
+	if ResourceLoader.exists(entry["portrait"]):
+		tex_rect.texture = load(entry["portrait"]) as Texture2D
+	tex_rect.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+	tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tex_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var portrait_mat := ShaderMaterial.new()
+	portrait_mat.shader = _RETRO_PORTRAIT_SHADER
+	tex_rect.material = portrait_mat
+	portrait_wrap.add_child(tex_rect)
+
+	var lbl := Label.new()
+	lbl.text = String(entry["label"])
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_label(lbl, HUDStyle.HUD_FONT_MED, HUDStyle.CRT_GREEN_BG)
+	cv.add_child(lbl)
+
+	# Click handler — the card itself catches input and selects.
+	var captured_id: String = String(entry["id"])
+	card.gui_input.connect(func(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			_setup_character = captured_id
+			_refresh_character_card_highlights()
+		elif ev is InputEventScreenTouch and ev.pressed:
+			_setup_character = captured_id
+			_refresh_character_card_highlights())
+	return card
+
+
+func _refresh_character_card_highlights() -> void:
+	for card in _setup_character_cards:
+		var is_sel: bool = String(card.get_meta("character_id")) == _setup_character
+		var base: Color = HUDStyle.BTN_GREEN if is_sel else HUDStyle.PANEL_BEVEL
+		card.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(base))
+
+
+func _build_setup_ship_page() -> void:
+	# Page fills the available space inside the plate; the pedestal sits in the
+	# centre with the arrow buttons anchored at the left + right edges.
+	var page := Control.new()
+	page.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_setup_page_root.add_child(page)
+
+	var prompt := Label.new()
+	prompt.text = "Pick your hull."
+	prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	prompt.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	prompt.offset_top = 4
+	prompt.offset_bottom = 32
+	HUDStyle.style_label(prompt, HUDStyle.HUD_FONT_MED, Color.WHITE)
+	page.add_child(prompt)
+
+	# Wide preview, centred in the page.  Width tracks page width (minus arrow
+	# button gutters) so the preview reads "full-width"; height is bounded by the
+	# page chrome (prompt at top, ship-name + nav at bottom).
+	var arrow_w_preview: int = 80 if _is_mobile_ui else 64
+	var page_w: float = _setup_page_root.size.x
+	if page_w <= 0.0:
+		page_w = _setup_layer.size.x
+	var side_gutter: float = float(arrow_w_preview) + 24.0
+	var preview_w: float = max(360.0, page_w - 2.0 * side_gutter)
+	var page_h: float = _setup_page_root.custom_minimum_size.y
+	var preview_h: float = clamp(page_h - 140.0, 320.0, 640.0)
+	var preview_holder := Control.new()
+	preview_holder.set_anchors_preset(Control.PRESET_CENTER)
+	preview_holder.offset_left   = -preview_w * 0.5
+	preview_holder.offset_right  =  preview_w * 0.5
+	preview_holder.offset_top    = -preview_h * 0.5
+	preview_holder.offset_bottom =  preview_h * 0.5
+	preview_holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	page.add_child(preview_holder)
+
+	var sv_container := SubViewportContainer.new()
+	sv_container.stretch = true
+	sv_container.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	preview_holder.add_child(sv_container)
+
+	_setup_ship_viewport = SubViewport.new()
+	_setup_ship_viewport.size = Vector2i(int(preview_w), int(preview_h))
+	_setup_ship_viewport.transparent_bg = true
+	_setup_ship_viewport.own_world_3d = true
+	_setup_ship_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	sv_container.add_child(_setup_ship_viewport)
+
+	# Scene inside the viewport: camera + light + spinning pivot holding the ship.
+	var scene_root := Node3D.new()
+	_setup_ship_viewport.add_child(scene_root)
+
+	var cam := Camera3D.new()
+	cam.position = Vector3(0, 0.6, 4.2)
+	cam.look_at(Vector3(0, 0.0, 0), Vector3.UP)
+	cam.fov = 42
+	cam.current = true
+	scene_root.add_child(cam)
+
+	var key := DirectionalLight3D.new()
+	key.rotation_degrees = Vector3(-28, 28, 0)
+	key.light_energy = 1.4
+	key.light_color = Color(1.0, 0.95, 0.85)
+	scene_root.add_child(key)
+
+	var fill := DirectionalLight3D.new()
+	fill.rotation_degrees = Vector3(20, -150, 0)
+	fill.light_energy = 0.55
+	fill.light_color = Color(0.6, 0.7, 1.0)
+	scene_root.add_child(fill)
+
+	var env_node := WorldEnvironment.new()
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.05, 0.04, 0.12)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.45, 0.5, 0.7)
+	env.ambient_light_energy = 0.4
+	env_node.environment = env
+	scene_root.add_child(env_node)
+
+	_setup_ship_pivot = Node3D.new()
+	_setup_ship_pivot.position = Vector3(0, 0.5, 0)
+	scene_root.add_child(_setup_ship_pivot)
+
+	# Retro post-process overlay — sits directly above the SubViewportContainer
+	# so the chunky pixelation + dither + palette crush applies only to the
+	# ship preview, leaving surrounding UI text crisp.  Same shader the in-game
+	# world uses (Main.gd: retro_vfx.gdshader) for visual consistency.
+	var retro := ColorRect.new()
+	retro.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	retro.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var retro_mat := ShaderMaterial.new()
+	retro_mat.shader = _RETRO_SHADER
+	retro.material = retro_mat
+	preview_holder.add_child(retro)
+
+	# Side arrows — anchored to page edges so they stay clear of the centred
+	# preview no matter how wide the plate is.
+	var arrow_w: int = 80 if _is_mobile_ui else 64
+	var arrow_h: int = 200 if _is_mobile_ui else 160
+	var left_btn := _make_menu_btn("◀", HUDStyle.BTN_BLUE)
+	left_btn.custom_minimum_size = Vector2(arrow_w, arrow_h)
+	left_btn.set_anchors_preset(Control.PRESET_CENTER_LEFT)
+	left_btn.offset_left = 8
+	left_btn.offset_right = 8 + arrow_w
+	left_btn.offset_top = -arrow_h * 0.5
+	left_btn.offset_bottom = arrow_h * 0.5
+	left_btn.pressed.connect(func() -> void: _cycle_ship(-1))
+	page.add_child(left_btn)
+
+	var right_btn := _make_menu_btn("▶", HUDStyle.BTN_BLUE)
+	right_btn.custom_minimum_size = Vector2(arrow_w, arrow_h)
+	right_btn.set_anchors_preset(Control.PRESET_CENTER_RIGHT)
+	right_btn.offset_left = -(arrow_w + 8)
+	right_btn.offset_right = -8
+	right_btn.offset_top = -arrow_h * 0.5
+	right_btn.offset_bottom = arrow_h * 0.5
+	right_btn.pressed.connect(func() -> void: _cycle_ship(1))
+	page.add_child(right_btn)
+
+	_setup_ship_name_lbl = Label.new()
+	_setup_ship_name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_setup_ship_name_lbl.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	_setup_ship_name_lbl.offset_top = -56
+	_setup_ship_name_lbl.offset_bottom = -8
+	HUDStyle.style_label(_setup_ship_name_lbl, HUDStyle.HUD_FONT_LRG, HUDStyle.CRT_GREEN_BG)
+	page.add_child(_setup_ship_name_lbl)
+
+	_load_setup_ship_model()
+
+
+func _load_setup_ship_model() -> void:
+	if not is_instance_valid(_setup_ship_pivot):
+		return
+	if _setup_ship_model != null and is_instance_valid(_setup_ship_model):
+		_setup_ship_model.queue_free()
+		_setup_ship_model = null
+
+	var ship: Dictionary = ShipRegistryGD.SHIPS[_setup_ship_idx]
+	var path: String = String(ship["path"])
+	if ResourceLoader.exists(path):
+		var packed = load(path)
+		if packed:
+			_setup_ship_model = packed.instantiate()
+			_setup_ship_pivot.add_child(_setup_ship_model)
+			# Fit the ship to the pedestal: compute the merged AABB in the
+			# model's local space (with child mesh transforms applied), then
+			# scale so its longest side is ~3 units, and translate so its
+			# centre sits at the pivot origin.  Without this each ship would
+			# render at its native Meshy export scale (huge) or be off-centre.
+			var aabb := _compute_aabb(_setup_ship_model)
+			var max_dim: float = max(aabb.size.x, max(aabb.size.y, aabb.size.z))
+			if max_dim > 0.001:
+				var s: float = 3.0 / max_dim
+				_setup_ship_model.scale = Vector3(s, s, s)
+				_setup_ship_model.position = -aabb.get_center() * s
+	if is_instance_valid(_setup_ship_name_lbl):
+		_setup_ship_name_lbl.text = String(ship["display_name"])
+
+
+# Merged AABB in `root`'s local space.  Walks the tree and accumulates each
+# MeshInstance3D's mesh AABB transformed by its local-to-root transform so
+# meshes nested under offset child Node3Ds contribute their real position.
+func _compute_aabb(root: Node3D) -> AABB:
+	var out := AABB()
+	var first := true
+	var stack: Array = [{"node": root, "xform": Transform3D.IDENTITY}]
+	while stack.size() > 0:
+		var entry: Dictionary = stack.pop_back()
+		var n = entry["node"]
+		var t: Transform3D = entry["xform"]
+		if n is Node3D and n != root:
+			t = t * n.transform
+		if n is MeshInstance3D and n.mesh != null:
+			var a: AABB = n.mesh.get_aabb()
+			var pmin: Vector3 = Vector3.ZERO
+			var pmax: Vector3 = Vector3.ZERO
+			var inited: bool = false
+			for i in range(8):
+				var p: Vector3 = t * a.get_endpoint(i)
+				if not inited:
+					pmin = p; pmax = p; inited = true
+				else:
+					pmin = pmin.min(p)
+					pmax = pmax.max(p)
+			var tr_aabb := AABB(pmin, pmax - pmin)
+			if first:
+				out = tr_aabb; first = false
+			else:
+				out = out.merge(tr_aabb)
+		for c in n.get_children():
+			stack.append({"node": c, "xform": t})
+	return out
+
+
+func _cycle_ship(dir: int) -> void:
+	var n: int = ShipRegistryGD.SHIPS.size()
+	_setup_ship_idx = (_setup_ship_idx + dir + n) % n
+	_load_setup_ship_model()
+
+
+func _build_setup_confirm_page() -> void:
+	var vb := VBoxContainer.new()
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vb.add_theme_constant_override("separation", 14)
+	_setup_page_root.add_child(vb)
+
+	var prompt := Label.new()
+	prompt.text = "Ready to launch?"
+	prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_label(prompt, HUDStyle.HUD_FONT_LRG, HUDStyle.CRT_GREEN_BG)
+	vb.add_child(prompt)
+
+	var portrait_path: String = "res://assets/images/portraits/%s/%s_default.png" % [_setup_character, _setup_character]
+	if _setup_character == "rabbit":
+		portrait_path = "res://assets/images/portraits/rabbit/rabbit_default.png"
+	if ResourceLoader.exists(portrait_path):
+		var portrait_wrap := Control.new()
+		portrait_wrap.custom_minimum_size = Vector2(300, 300) if _is_mobile_ui else Vector2(260, 260)
+		portrait_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		portrait_wrap.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		vb.add_child(portrait_wrap)
+
+		var tex_rect := TextureRect.new()
+		tex_rect.texture = load(portrait_path) as Texture2D
+		tex_rect.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+		tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tex_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var portrait_mat := ShaderMaterial.new()
+		portrait_mat.shader = _RETRO_PORTRAIT_SHADER
+		tex_rect.material = portrait_mat
+		portrait_wrap.add_child(tex_rect)
+
+	var summary := Label.new()
+	var nm: String = _effective_name()
+	var ship_label: String = ShipRegistryGD.display_name_for(ShipRegistryGD.SHIPS[_setup_ship_idx]["id"])
+	summary.text = "CAPT. %s\nCharacter: %s\nShip: %s" % [
+		nm.to_upper(),
+		_character_display_label(_setup_character),
+		ship_label,
+	]
+	summary.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	HUDStyle.style_label(summary, HUDStyle.HUD_FONT_MED, Color.WHITE)
+	vb.add_child(summary)
+
+
+func _character_display_label(char_id: String) -> String:
+	for entry in _CHARACTERS:
+		if String(entry["id"]) == char_id:
+			return String(entry["label"])
+	return char_id.to_upper()
+
+
+func _effective_name() -> String:
+	var s: String = _setup_name.strip_edges()
+	if s.is_empty(): return "CAPTAIN"
+	return s
+
+
+func _refresh_setup_next_enabled() -> void:
+	if _setup_next_btn == null: return
+	var enabled := true
+	if _setup_step == 0:
+		# Allow blank → defaults to CAPTAIN; never disable so player can skip naming.
+		enabled = true
+	_setup_next_btn.disabled = not enabled
+
+
+func _on_setup_name_changed(new_text: String) -> void:
+	_setup_name = new_text
+	_refresh_setup_next_enabled()
+
+
+# Roll a captain name from the pool. Tries a bounded number of times to
+# avoid handing back the currently-shown name so consecutive RND presses
+# always advance — mirrors PlanetPlacementUI._pick_random_planet_name.
+func _pick_random_captain_name() -> String:
+	if _CAPTAIN_NAMES.is_empty():
+		return "Captain"
+	var current: String = _setup_name
+	var pick: String = current
+	for _i in range(8):
+		pick = _CAPTAIN_NAMES[_name_rng.randi_range(0, _CAPTAIN_NAMES.size() - 1)]
+		if pick != current:
+			break
+	return pick
+
+
+func _on_setup_back() -> void:
+	if _setup_step == 0:
+		_close_setup_overlay()
+	else:
+		_setup_step -= 1
+		_build_setup_page()
+
+
+func _on_setup_next() -> void:
+	if _setup_step < 3:
+		_setup_step += 1
+		_build_setup_page()
+	else:
+		_finalize_new_game()
+
+
+func _close_setup_overlay() -> void:
+	if _setup_layer != null and is_instance_valid(_setup_layer):
+		_setup_layer.queue_free()
+		_setup_layer = null
+	_setup_page_root = null
+	_setup_ship_viewport = null
+	_setup_ship_model = null
+	_setup_ship_pivot = null
+
+
+func _finalize_new_game() -> void:
+	var ship_id: String = String(ShipRegistryGD.SHIPS[_setup_ship_idx]["id"])
+	SaveManagerGD.write_new_game_seed(_effective_name(), _setup_character, ship_id)
 	get_tree().change_scene_to_file(GAMEPLAY_SCENE)
 
 
@@ -857,6 +1499,10 @@ func _on_rebind_pressed() -> void:
 
 func _input(event: InputEvent) -> void:
 	if not _is_close_event(event): return
+	if _setup_layer != null and is_instance_valid(_setup_layer) and _setup_layer.visible:
+		_on_setup_back()
+		get_viewport().set_input_as_handled()
+		return
 	if _confirm_layer != null and is_instance_valid(_confirm_layer) and _confirm_layer.visible:
 		_confirm_layer.hide()
 		get_viewport().set_input_as_handled()
@@ -885,6 +1531,9 @@ func _process(delta: float) -> void:
 	_tilt = _tilt.lerp(_tilt_target, clamp(delta * 6.0, 0.0, 1.0))
 	_apply_parallax()
 	_scroll_background(delta)
+	# Spin the ship preview on the ship-selection page.
+	if is_instance_valid(_setup_ship_pivot):
+		_setup_ship_pivot.rotate_y(delta * 0.6)
 
 
 func _scroll_background(delta: float) -> void:
@@ -907,7 +1556,8 @@ func _scroll_background(delta: float) -> void:
 # zero the tilt so menu interactions feel still.
 func _update_tilt_target() -> void:
 	if (_settings_layer != null and is_instance_valid(_settings_layer) and _settings_layer.visible) \
-			or (_confirm_layer != null and is_instance_valid(_confirm_layer) and _confirm_layer.visible):
+			or (_confirm_layer != null and is_instance_valid(_confirm_layer) and _confirm_layer.visible) \
+			or (_setup_layer != null and is_instance_valid(_setup_layer) and _setup_layer.visible):
 		_tilt_target = Vector2.ZERO
 		return
 

@@ -33,7 +33,6 @@ var _load_label: Label = null
 var _load_progress: float = 0.0
 var _is_finishing: bool = false
 var _boot_timer: float = 0.5 # Mandatory settle time
-var music_director: Node = null
 
 static var _r_cache: Dictionary = {}
 static func _get_res(path: String) -> Resource:
@@ -136,11 +135,8 @@ func _ready() -> void:
 	
 	# 7. MATERIALIZE PILOT
 	_spawn_ace_pilot(Vector3.ZERO)
-	
-	# 8. PROCEDURAL MUSIC DIRECTOR
-	_setup_music_director()
 
-	# 9. TITAN DEVELOPER TOOLS (The Slider Sync)
+	# 8. TITAN DEVELOPER TOOLS (The Slider Sync)
 	_setup_debug_developer_suite()
 	
 	# 10. SHADOWGLASS SIGNATURE: Default to Retro Mode
@@ -628,13 +624,6 @@ func _spawn_ace_pilot(pos: Vector3) -> void:
 		if origin: 
 			origin.player_node = player
 			origin.world_root = world_root
-
-func _setup_music_director() -> void:
-	var md_script = load("res://src/audio/MusicDirector.gd")
-	if md_script:
-		music_director = md_script.new()
-		music_director.name = "MusicDirector"
-		add_child(music_director)
 
 func _process(_delta: float) -> void:
 	# ACE TITAN INITIALIZATION: Track time immediately

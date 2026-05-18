@@ -19,19 +19,25 @@ const _RETRO_SHADER = preload("res://src/world/retro_vfx.gdshader")
 
 # Background tint pool — mirrors the variety of nebula zones the player flies
 # through in-game. Picked randomly per session so each launch feels like a
-# different patch of space. Each entry is the deep-space base colour the
-# retro_vfx shader will dither / band on top of.
+# different patch of space.
+#
+# IMPORTANT: tints must have luminance >= ~0.4 to survive the retro_vfx
+# shadow tint pass (which fully replaces any pixel with lum < 0.4 with the
+# deep-purple shadow colour). Below that threshold every session reads as
+# the same purple-black no matter the source hue. Values here target
+# lum 0.3–0.5 so the hue character carries through the dither + palette
+# crush instead of getting flattened.
 const _SKY_TINTS: Array[Color] = [
-	Color(0.04, 0.05, 0.14),   # deep navy
-	Color(0.14, 0.08, 0.22),   # violet void
-	Color(0.04, 0.10, 0.18),   # cyan-tinted space
-	Color(0.18, 0.10, 0.05),   # warm ember dust
-	Color(0.05, 0.13, 0.10),   # dim emerald nebula
-	Color(0.20, 0.06, 0.10),   # crimson cloud
-	Color(0.10, 0.06, 0.18),   # cosmic indigo
-	Color(0.06, 0.04, 0.08),   # near-black charcoal
-	Color(0.14, 0.13, 0.05),   # ochre dust
-	Color(0.10, 0.14, 0.20),   # twilight steel
+	Color(0.20, 0.20, 0.55),   # starlit blue
+	Color(0.50, 0.20, 0.55),   # vivid violet nebula
+	Color(0.15, 0.45, 0.55),   # cyan aurora
+	Color(0.60, 0.30, 0.15),   # ember dust
+	Color(0.20, 0.55, 0.30),   # emerald cloud
+	Color(0.55, 0.15, 0.30),   # crimson void
+	Color(0.40, 0.20, 0.55),   # cosmic indigo
+	Color(0.50, 0.45, 0.15),   # ochre dust
+	Color(0.20, 0.35, 0.60),   # twilight steel
+	Color(0.55, 0.30, 0.50),   # cosmic pink
 ]
 
 const GAMEPLAY_SCENE: String = "res://node_3d.tscn"
@@ -234,21 +240,20 @@ func _spawn_starfield(host: Node, rng: RandomNumberGenerator) -> void:
 
 
 func _spawn_milkyway(host: Node, rng: RandomNumberGenerator) -> void:
-	# Spiral galaxy backdrop — sits as a focal element behind the planets
-	# rather than a fullscreen band. Square plane so the spiral isn't
-	# stretched. Camera-facing so the shader's polar maths just works.
+	# Spiral galaxy backdrop — sits as a focal element directly behind the
+	# title logo. Square plane so the spiral isn't stretched. Camera-facing
+	# so the shader's polar maths just works.
 	var mw := MeshInstance3D.new()
 	var plane := PlaneMesh.new()
-	# Bigger so the spiral structure reads. The galaxy is the focal hero of
-	# the background, peeking over the planets.
-	var galaxy_size: float = 360.0
+	# Sized to read as the hero element of the background. The shader handles
+	# its own radial falloff so the edges fade rather than hard-clipping.
+	var galaxy_size: float = 460.0
 	plane.size = Vector2(galaxy_size, galaxy_size)
 	mw.mesh = plane
-	# Position in the upper portion of the screen, randomly biased left/right
-	# so each session frames it differently. At z=-380 it sits well behind
-	# the planets (which span z=-12..+6) but in front of the starfield slab.
-	var side: float = rng.randf_range(-90.0, 90.0)
-	mw.position = Vector3(side, rng.randf_range(60.0, 100.0), -380)
+	# Locked to screen-centre horizontally and biased upward so the spiral
+	# core lands directly behind the title logo. At z=-380 it sits well
+	# behind the planets (which span z=-12..+6) but in front of the starfield.
+	mw.position = Vector3(0.0, 85.0, -380.0)
 	# Rotate -90° around X so plane faces the camera (PlaneMesh defaults to
 	# +Y normal; -90° around X swings it to face -Z = camera).
 	mw.rotation_degrees = Vector3(-90, 0, 0)
@@ -263,7 +268,10 @@ func _spawn_milkyway(host: Node, rng: RandomNumberGenerator) -> void:
 	# Intensity capped so the additive-blended galaxy doesn't push arm colours
 	# past 1.0 and clip to white — keeps the cyan / purple character readable.
 	mat.set_shader_parameter("intensity", rng.randf_range(1.1, 1.5))
-	mat.set_shader_parameter("rotation_speed", rng.randf_range(0.012, 0.022))
+	# Visibly spinning over a menu visit — at 0.12–0.18 rad/sec a full
+	# rotation completes in ~35–50s, so the motion reads as live without
+	# being distracting or motion-sick inducing.
+	mat.set_shader_parameter("rotation_speed", rng.randf_range(0.12, 0.18))
 	mat.set_shader_parameter("phase_offset", rng.randf() * TAU)
 	# Palette: bright cyan + purple per the reference, with subtle variation
 	# in hue so each session reads differently without losing the look.
@@ -281,18 +289,34 @@ func _spawn_milkyway(host: Node, rng: RandomNumberGenerator) -> void:
 
 
 func _spawn_planets(host: Node, rng: RandomNumberGenerator) -> void:
-	var count: int = rng.randi_range(3, 5)
+	# Fixed-region layout so each screen quadrant gets a planet — the previous
+	# random shuffle could cluster all picks into one part of the screen.
+	# Per-session variety comes from the jitter below + the per-planet
+	# archetype/colour/ring rolls in _make_planet.
+	#
+	# Slot 4 sits far back centre-right (out of the title + button column) to
+	# add depth without crowding the UI now that the galaxy + bigger logo
+	# occupy the upper-centre region.
+	# Positions chosen so each planet sits in a different screen region and
+	# stays clear of the title (upper-centre, now occupied by the galaxy +
+	# logo) and the button column (middle-centre). Upper slots are pushed
+	# wider; the bottom-right slot is lowered so it sits below the buttons.
 	var slots: Array = [
-		{"pos": Vector3(-7.5, -2.5, 6.0), "radius": 3.8},
-		{"pos": Vector3(5.5, 3.5, -3.0), "radius": 2.4},
-		{"pos": Vector3(-9.0, 4.5, -8.0), "radius": 1.5},
-		{"pos": Vector3(8.5, -2.0, -6.0), "radius": 1.9},
-		{"pos": Vector3(2.0, 5.5, -12.0), "radius": 1.0},
+		{"pos": Vector3(-7.5, -2.5, 6.0), "radius": 3.8},   # bottom-left hero (foreground)
+		{"pos": Vector3(11.0, 3.0, -2.5), "radius": 2.4},   # upper-right mid-foreground
+		{"pos": Vector3(-12.0, 3.5, -6.0), "radius": 1.8},  # upper-left mid
+		{"pos": Vector3(11.0, -5.0, -6.0), "radius": 1.9},  # bottom-right mid (below buttons)
+		{"pos": Vector3(1.0, -7.0, -16.0), "radius": 1.0},  # bottom-centre far back
 	]
-	slots.shuffle()
-	for i in range(min(count, slots.size())):
-		var slot: Dictionary = slots[i]
-		_make_planet(host, slot["pos"], slot["radius"], rng)
+	for slot in slots:
+		# Subtle per-session jitter so positions feel fresh without leaving
+		# the slot's screen region.
+		var jitter := Vector3(
+			rng.randf_range(-0.8, 0.8),
+			rng.randf_range(-0.6, 0.6),
+			rng.randf_range(-1.5, 1.5),
+		)
+		_make_planet(host, slot["pos"] + jitter, slot["radius"], rng)
 
 
 func _make_planet(host: Node, pos: Vector3, radius: float, rng: RandomNumberGenerator) -> void:
@@ -510,16 +534,35 @@ func _build_ui() -> void:
 		logo_tex = load(LOGO_PATH) as Texture2D
 
 	# ── TITLE ─────────────────────────────────────────────────────────
-	# Anchored from the top, width-clamped on narrow mobile screens.
-	var title_holder := Control.new()
-	title_holder.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	var title_height: int = 200 if _is_mobile_ui else 240
-	title_holder.offset_top = 24 if _is_mobile_ui else 36
-	title_holder.offset_bottom = title_holder.offset_top + title_height
-	# Side margin so the title doesn't kiss the edges on narrow viewports.
+	# Holder is sized to match the logo aspect exactly and anchored
+	# top-centre, so the visible art fills it without any centering slack.
+	# Three caps determine the title height:
+	#  • a fixed max so the logo doesn't dominate huge desktop screens
+	#  • a width-derived cap so it never overflows narrow portrait phones
+	#  • a height-budget cap so there's always room for the button column
+	#    + the configured logo-to-button gap below it
+	# `_compute_btn_bias` lower down then pushes the buttons exactly
+	# `_LOGO_TO_BTN_GAP` below the holder's bottom edge.
+	var viewport_h: float = get_viewport().get_visible_rect().size.y
+	var viewport_w: float = get_viewport().get_visible_rect().size.x
 	var side_margin: int = 16 if _is_mobile_ui else 40
-	title_holder.offset_left = side_margin
-	title_holder.offset_right = -side_margin
+	var title_top: int = 24 if _is_mobile_ui else 36
+	var title_height: int
+	if _is_mobile_ui:
+		var max_h_from_width: float = (viewport_w - float(side_margin * 2)) / _LOGO_ASPECT
+		# 380 (button column) + 24 (gap below buttons) + 56 (top inset slack)
+		var max_h_from_layout: float = viewport_h - 460.0
+		title_height = int(max(120.0, min(500.0, max_h_from_width, max_h_from_layout)))
+	else:
+		title_height = 240
+	var title_width: int = int(float(title_height) * _LOGO_ASPECT)
+
+	var title_holder := Control.new()
+	title_holder.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	title_holder.offset_left = -float(title_width) * 0.5
+	title_holder.offset_right = float(title_width) * 0.5
+	title_holder.offset_top = title_top
+	title_holder.offset_bottom = title_top + title_height
 	title_holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	anchor.add_child(title_holder)
 	_parallax_title = title_holder
@@ -548,14 +591,16 @@ func _build_ui() -> void:
 		title_holder.add_child(fallback)
 
 	# ── BUTTON COLUMN ─────────────────────────────────────────────────
-	# Vertically centred in the viewport, slightly biased downward so it
-	# doesn't visually collide with the title. Button width is clamped to
-	# viewport width minus side margin so it never overflows on narrow
-	# phones (iPhone SE ≈ 375 px, Android compact ≈ 360 px).
-	var viewport_w: float = get_viewport().get_visible_rect().size.x
+	# Vertically centred in the viewport, biased downward so it doesn't
+	# visually collide with the title. Button width is clamped to viewport
+	# width minus side margin so it never overflows on narrow phones
+	# (iPhone SE ≈ 375 px, Android compact ≈ 360 px). The vertical bias is
+	# derived from the title height + viewport so the bigger mobile logo
+	# never overlaps the buttons on short / portrait viewports.
 	var max_btn_w: int = 460 if _is_mobile_ui else 360
 	var btn_w: int = int(min(max_btn_w, viewport_w - 32))
 	var btn_box_h: int = 380 if _is_mobile_ui else 330
+	var btn_y_bias: float = _compute_btn_bias(viewport_h, title_height, btn_box_h)
 
 	var btn_box := VBoxContainer.new()
 	btn_box.alignment = BoxContainer.ALIGNMENT_CENTER
@@ -563,9 +608,8 @@ func _build_ui() -> void:
 	btn_box.set_anchors_preset(Control.PRESET_CENTER)
 	btn_box.offset_left = -float(btn_w) * 0.5
 	btn_box.offset_right = float(btn_w) * 0.5
-	# Slight downward bias so the title above breathes.
-	btn_box.offset_top = -float(btn_box_h) * 0.5 + 40.0
-	btn_box.offset_bottom = float(btn_box_h) * 0.5 + 40.0
+	btn_box.offset_top = -float(btn_box_h) * 0.5 + btn_y_bias
+	btn_box.offset_bottom = float(btn_box_h) * 0.5 + btn_y_bias
 	btn_box.mouse_filter = Control.MOUSE_FILTER_STOP
 	overlay_anchor.add_child(btn_box)
 	_parallax_buttons = btn_box
@@ -605,11 +649,19 @@ func _relayout_buttons(btn_box: VBoxContainer, max_btn_w: int, btn_box_h: int) -
 	if not is_instance_valid(btn_box):
 		return
 	var vw: float = get_viewport().get_visible_rect().size.x
+	var vh: float = get_viewport().get_visible_rect().size.y
 	var new_w: int = int(min(float(max_btn_w), vw - 32.0))
+	# Title height stays at its initial value (the holder isn't resized here),
+	# so read it back off the cached holder to keep button clearance correct
+	# after rotation / resize.
+	var th: int = 240
+	if is_instance_valid(_parallax_title):
+		th = int(_parallax_title.offset_bottom - _parallax_title.offset_top)
+	var bias: float = _compute_btn_bias(vh, th, btn_box_h)
 	btn_box.offset_left = -float(new_w) * 0.5
 	btn_box.offset_right = float(new_w) * 0.5
-	btn_box.offset_top = -float(btn_box_h) * 0.5 + 40.0
-	btn_box.offset_bottom = float(btn_box_h) * 0.5 + 40.0
+	btn_box.offset_top = -float(btn_box_h) * 0.5 + bias
+	btn_box.offset_bottom = float(btn_box_h) * 0.5 + bias
 	# Re-cache the parallax baseline so the tilt math keeps centring on the
 	# newly-laid-out position instead of drifting after rotation.
 	_parallax_buttons_offsets = Vector4(
@@ -620,6 +672,23 @@ func _relayout_buttons(btn_box: VBoxContainer, max_btn_w: int, btn_box_h: int) -
 		if child is Button:
 			var h: float = child.custom_minimum_size.y
 			child.custom_minimum_size = Vector2(new_w, h)
+
+
+# Logo PNG aspect (cropped to visible art, no transparent padding). The
+# title holder below is sized to this aspect exactly so the visible art
+# fills it with no centering slack — letting us treat the holder bottom
+# as the visible art bottom for layout purposes.
+const _LOGO_ASPECT: float = 1042.0 / 582.0   # ~1.79
+const _LOGO_TO_BTN_GAP: float = 24.0
+
+func _compute_btn_bias(viewport_h: float, title_height: int, btn_box_h: int) -> float:
+	if not _is_mobile_ui:
+		return 40.0
+	# Holder is aspect-matched to the logo so its bottom edge IS the visible
+	# art's bottom edge — no padding to compensate for.
+	var visible_logo_bottom: float = 24.0 + float(title_height)
+	var min_bias: float = visible_logo_bottom + _LOGO_TO_BTN_GAP - viewport_h * 0.5 + float(btn_box_h) * 0.5
+	return max(40.0, min_bias)
 
 
 func _make_menu_btn(text: String, color: Color, width: int = -1) -> Button:

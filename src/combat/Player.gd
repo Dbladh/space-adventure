@@ -24,12 +24,11 @@ var true_altitude: float = 300000.0
 var mouse_locked: bool = true
 
 # MOBILE SIMPLIFIED INPUT
-var mobile_throttle: float = 0.5 # ACE: 0.5 is Neutral (Stopped)
+# Hold-to-move model: ship coasts at neutral until BOOST or BRAKE is held.
 var mobile_fire: bool = false
-var mobile_boost: bool = false   # ACE: Mobile warp/pulse-drive button
-var mobile_brake: bool = false   # ACE: Mobile brake — hard deceleration + throttle → neutral
+var mobile_boost: bool = false   # ACE: Mobile warp/pulse-drive button — hold for full-forward thrust
+var mobile_brake: bool = false   # ACE: Mobile brake — hard deceleration / reverse while held
 var mobile_interact: bool = false
-var mobile_throttle_dragging: bool = false
 var _mobile_roll_l: bool = false # ◀ ROLL held (continuous +1 roll while down)
 var _mobile_roll_r: bool = false # ROLL ▶ held (continuous -1 roll while down)
 var mobile_gyro_paused: bool = false # ACE: UI toggle — pauses gyro steering. Default ON — gyro is the primary mobile steering input. The camera is horizon-stabilised separately so tilt no longer spins the view.
@@ -440,8 +439,6 @@ func _setup_combat_hud() -> void:
 			mc.mouse_filter = Control.MOUSE_FILTER_STOP
 			hud.add_child(mc)
 			mobile_ui_ref = mc
-			mc.throttle_changed.connect(func(val): mobile_throttle = val)
-			mc.throttle_dragging_changed.connect(func(active): mobile_throttle_dragging = active)
 			mc.fire_pressed.connect(func(p):
 				mobile_fire = p
 				if not p:
@@ -467,13 +464,9 @@ func _setup_combat_hud() -> void:
 			mc.menu_pressed.connect(func(): if Main.instance: Main.instance.toggle_pause())
 
 func _on_mobile_brake(pressed: bool) -> void:
-	# BRAKE hold: zero out forward intent and request a rapid slow-down.
-	# Also snap the mobile throttle UI back to neutral so release feels clean.
+	# BRAKE hold: rapid slow-down + reverse assist.  See thrust mapping
+	# (`if mobile_brake:` branch) — releases cleanly with no latched state.
 	mobile_brake = pressed
-	if pressed:
-		mobile_throttle = 0.5
-		if mobile_ui_ref and mobile_ui_ref.has_method("force_throttle"):
-			mobile_ui_ref.force_throttle(0.5)
 
 func _on_mobile_roll_held(direction: float, pressed: bool) -> void:
 	# Tracks each rotate button independently so simultaneous holds cancel cleanly.
@@ -707,7 +700,7 @@ func _setup_player_hud() -> void:
 	health_bar_bg.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
 	health_bar_bg.position.y = 24.0
 	health_bar_bg.position.x -= bar_w / 2.0
-	health_bar_bg.modulate.a = 0.85
+	health_bar_bg.modulate.a = 1.0
 	hud.add_child(health_bar_bg)
 
 	health_bar_fill = ColorRect.new()
@@ -1085,15 +1078,6 @@ func _process_ace_flight(delta: float) -> void:
 	
 	var thrust_mapped = max(raw_thrust, 1.0 if Input.is_key_pressed(KEY_SPACE) else 0.0)
 	var reverse_mapped = max(raw_reverse, 1.0 if Input.is_key_pressed(KEY_Q) else 0.0)
-
-	# ACE: BI-DIRECTIONAL MOBILE THROTTLE (LATCHING)
-	# 0.5 is Neutral. >0.5 is Forward. <0.5 is Reverse.
-	# The throttle no longer auto-resets, so the pilot can cruise hands-free and
-	# trim via gyro. BRAKE button forces the slider back to neutral on release.
-	if mobile_throttle > 0.52:
-		thrust_mapped = (mobile_throttle - 0.5) * 2.0
-	elif mobile_throttle < 0.48:
-		reverse_mapped = (0.5 - mobile_throttle) * 2.0
 
 	# ACE MOBILE BRAKE: hold to override throttle with hard reverse assist.
 	# This gives pilots a panic-stop that also disengages warp.
@@ -1652,19 +1636,17 @@ func _input(event: InputEvent) -> void:
 			_fire_alternating_cannon()
 	
 	# ORBIT CAMERA: Mouse Look (Desktop only to avoid Gyro-Mouse emulation conflicts)
-	if not _mobile_perf and event is InputEventMouseMotion and mouse_locked and in_ship and not mobile_throttle_dragging:
+	if not _mobile_perf and event is InputEventMouseMotion and mouse_locked and in_ship:
 		cam_orbit.x -= event.relative.x * 0.002
 		cam_orbit.y -= event.relative.y * 0.002
 		cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
-	
+
 	# ORBIT CAMERA: Touch Look (Mobile only)
 	# This explicitly separates touch-dragging from gyro tilt emulation.
-	if _mobile_perf and event is InputEventScreenDrag and not mobile_throttle_dragging:
-		# Use position.x > viewport.size.x * 0.3 to avoid throttle interference
-		if event.position.x > get_viewport().size.x * 0.3:
-			cam_orbit.x -= event.relative.x * 0.005 # Faster for touch
-			cam_orbit.y -= event.relative.y * 0.005
-			cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
+	if _mobile_perf and event is InputEventScreenDrag:
+		cam_orbit.x -= event.relative.x * 0.005 # Faster for touch
+		cam_orbit.y -= event.relative.y * 0.005
+		cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)
 	
 	# CONTROLLER FIRE — uses InputMap action so it follows rebinds.
 	if event.is_action_pressed("fire"):
@@ -1700,7 +1682,7 @@ func _input(event: InputEvent) -> void:
 		elif not in_ship and parked_ship and global_position.distance_to(parked_ship.global_position) < 80.0: _embark()
 		
 	# MOUSE LOOK (On-Foot)
-	if not _mobile_perf and event is InputEventMouseMotion and mouse_locked and not mobile_throttle_dragging and not in_ship:
+	if not _mobile_perf and event is InputEventMouseMotion and mouse_locked and not in_ship:
 		walk_yaw -= event.relative.x * 0.005
 		cam_orbit.y -= event.relative.y * 0.005
 		cam_orbit.y = clamp(cam_orbit.y, -1.2, 1.2)

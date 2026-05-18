@@ -3,7 +3,9 @@ extends Control
 # MobileControlsUI.gd (Retro-Space Edition)
 # Managed by THE ARCHITECT.
 # Two-state layout:
-#   PLAYING : RECENTER top-left | combat cluster bottom-right | roll buttons bottom-left
+#   PLAYING : RECENTER top-left | PAUSE top-right
+#             Bottom-left: ROLL L + ROLL R stacked above a wide FIRE button.
+#             Bottom-right: BRAKE stacked above BOOST.
 #   PAUSED  : RECENTER top-left | pause menu bottom-right (RESUME + GYRO + SENS)
 #             Combat buttons are hidden so the player can't accidentally fire while
 #             browsing settings.  Roll buttons are also hidden.
@@ -18,8 +20,6 @@ extends Control
 
 const HUDStyle := preload("res://src/ui/HUDStyle.gd")
 
-signal throttle_changed(value: float)
-signal throttle_dragging_changed(active: bool)
 signal fire_pressed(pressed: bool)
 signal boost_pressed(pressed: bool)
 signal brake_pressed(pressed: bool)
@@ -79,16 +79,6 @@ func set_cinematic_mode(on: bool) -> void:
 	cinematic_mode = on
 	queue_redraw()
 
-# ---- THROTTLE ----
-var _throttle_bar_x: float = 144.0
-const _THROTTLE_BAR_H_RATIO         := 0.40
-const _THROTTLE_BAR_Y_CENTER_RATIO  := 0.55
-const _THROTTLE_HIT_WIDTH           := 120.0
-const _THROTTLE_HIT_HEIGHT_PAD      := 30.0
-var throttle: float = 0.5
-var l_touch_idx: int = -1
-var l_dragging: bool = false
-
 # ---- BUTTON TOUCH STATE ----
 var fire_touch: int  = -1
 var boost_touch: int = -1
@@ -145,8 +135,6 @@ var _rect_boost:        Rect2
 var _rect_brake:        Rect2
 var _rect_rolll:        Rect2
 var _rect_rollr:        Rect2
-var _rect_throttle_bar: Rect2
-var _rect_throttle_hit: Rect2
 # Pause-menu rects (built in _update_layout too)
 var _rect_resume:       Rect2
 var _rect_pgyro:        Rect2
@@ -164,9 +152,10 @@ func _ready() -> void:
 	add_to_group("mobile_controls_ui")        # so menus can call set_modal_ui_open
 	self.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
-	# Slight global transparency so the chrome doesn't fully block the game
-	# behind it.  Applied via Control.modulate so every draw call inherits it.
-	modulate.a = 0.85
+	# Translucent chrome so the game world stays visible through the touch
+	# controls without the buttons fading out completely.  Resource chips /
+	# health bar / credits live outside this Control and stay fully opaque.
+	modulate.a = 0.50
 	_calculate_safe_area()
 	set_process(true)
 	queue_redraw()
@@ -178,7 +167,6 @@ func _calculate_safe_area() -> void:
 	_safe_top    = max(0.0, float(safe_rect.position.y))
 	_safe_right  = max(0.0, screen_sz.x - float(safe_rect.position.x + safe_rect.size.x))
 	_safe_bottom = max(0.0, screen_sz.y - float(safe_rect.position.y + safe_rect.size.y))
-	_throttle_bar_x = 144.0 + _safe_left
 
 func _update_layout() -> void:
 	var v_size = get_viewport_rect().size
@@ -186,16 +174,6 @@ func _update_layout() -> void:
 	_last_viewport_size = v_size
 	var sx = v_size.x
 	var sy = v_size.y
-
-	# Throttle
-	var bar_x     = _throttle_bar_x
-	var bar_h     = sy * _THROTTLE_BAR_H_RATIO
-	var bar_y_cen = sy * _THROTTLE_BAR_Y_CENTER_RATIO
-	var bar_top   = bar_y_cen - bar_h * 0.5
-	_rect_throttle_bar = Rect2(bar_x - 26, bar_top - 12, 52, bar_h + 24)
-	_rect_throttle_hit = Rect2(bar_x - _THROTTLE_HIT_WIDTH * 0.5,
-		bar_top - _THROTTLE_HIT_HEIGHT_PAD,
-		_THROTTLE_HIT_WIDTH, bar_h + _THROTTLE_HIT_HEIGHT_PAD * 2.0)
 
 	# Top buttons (RECENTER only in play mode; pause menu has gyro/sens)
 	# 50px height was below Apple's 44pt minimum once safe-area scaling kicks
@@ -211,8 +189,10 @@ func _update_layout() -> void:
 	_rect_recenter = Rect2(top_inset + _safe_left, tp, top_btn_w, top_btn_h)
 	_rect_menu     = Rect2(sx - top_btn_w - top_inset - _safe_right, tp, top_btn_w, top_btn_h)
 
-	# Combat cluster (bottom-right). BRAKE bumped 60 → 76 px so it clears
-	# 44pt; FIRE/BOOST already comfortably above the floor.
+	# Bottom cluster. FIRE moved from bottom-right to bottom-LEFT (player's
+	# steering thumb is on the right with gyro + camera drag, so FIRE belongs
+	# under the rolls).  ROLL L/R sit above FIRE; BOOST takes FIRE's old
+	# bottom-right slot with BRAKE stacked above it.
 	var pad    = 36.0 + _safe_bottom
 	var col_x  = sx - pad - _safe_right
 	var base_y = sy - pad
@@ -220,17 +200,18 @@ func _update_layout() -> void:
 	var btn_h  := 104.0
 	var gap    := 10.0
 	var brk_h  := 76.0
-	_rect_fire  = Rect2(col_x - btn_w, base_y - btn_h, btn_w, btn_h)
-	_rect_boost = Rect2(col_x - btn_w, base_y - btn_h - gap - btn_h, btn_w, btn_h)
-	_rect_brake = Rect2(col_x - btn_w, base_y - btn_h - gap - btn_h - gap - brk_h, btn_w, brk_h)
-
-	# Roll buttons (bottom-left). Wider gap (12 → 18 px) for thumb separation,
-	# and bumped to 88 px tall. roll_w stays at 138 since both are paired.
-	var roll_h   := 88.0
-	var roll_w   := 138.0
-	var roll_pad  = 36.0 + _safe_left
-	_rect_rolll  = Rect2(roll_pad,               base_y - roll_h - _safe_bottom, roll_w, roll_h)
-	_rect_rollr  = Rect2(roll_pad + roll_w + 18, base_y - roll_h - _safe_bottom, roll_w, roll_h)
+	var fire_h := btn_h
+	var roll_h := 88.0
+	var roll_w := 138.0
+	var roll_pad = 36.0 + _safe_left
+	var fire_w   = roll_w * 2.0 + 18.0
+	var fire_y   = base_y - fire_h - _safe_bottom
+	var roll_y   = fire_y - gap - roll_h
+	_rect_fire  = Rect2(roll_pad, fire_y, fire_w, fire_h)
+	_rect_rolll = Rect2(roll_pad,               roll_y, roll_w, roll_h)
+	_rect_rollr = Rect2(roll_pad + roll_w + 18, roll_y, roll_w, roll_h)
+	_rect_boost = Rect2(col_x - btn_w, base_y - btn_h, btn_w, btn_h)
+	_rect_brake = Rect2(col_x - btn_w, base_y - btn_h - gap - brk_h, btn_w, brk_h)
 
 	# Pause menu buttons (bottom-right, same position as combat cluster)
 	# Stacked bottom-up: RESUME (large) → GYRO → SENS → DEAD (small).
@@ -283,7 +264,6 @@ func _draw() -> void:
 	var v_size = get_viewport_rect().size
 	var font   = HUDStyle.PIXEL_FONT
 	var sx     = v_size.x
-	var sy     = v_size.y
 	var paused = get_tree().paused
 
 	# Cinematic mode: skip every control except the corner PAUSE button.
@@ -293,40 +273,6 @@ func _draw() -> void:
 		var pause_col_c: Color = C_TEAL.darkened(0.45)
 		_draw_space_button(_rect_menu, pause_label_c, pause_col_c, C_TEAL, false, 13)
 		return
-
-	# ----- THROTTLE BAR (hidden during pause — controls are deactivated) -----
-	if not paused:
-		var bar_x     = _throttle_bar_x
-		var bar_h     = sy * _THROTTLE_BAR_H_RATIO
-		var bar_y_cen = sy * _THROTTLE_BAR_Y_CENTER_RATIO
-		var bar_top   = bar_y_cen - bar_h * 0.5
-		var bar_bot   = bar_y_cen + bar_h * 0.5
-
-		var track_r = Rect2(bar_x - 14, bar_top, 28, bar_h)
-		_draw_rounded_rect(track_r, C_BG, 10.0)
-		_draw_rounded_rect(track_r, C_PANEL_BDR, 10.0, false, 1.5)
-
-		var neutral_y = lerp(bar_bot, bar_top, 0.5)
-		var handle_y  = lerp(bar_bot, bar_top, throttle)
-		if throttle > 0.52:
-			_draw_rounded_rect(Rect2(bar_x - 10, handle_y, 20, neutral_y - handle_y), C_TEAL.darkened(0.2), 4.0)
-		elif throttle < 0.48:
-			_draw_rounded_rect(Rect2(bar_x - 10, neutral_y, 20, handle_y - neutral_y), C_ORANGE.darkened(0.2), 4.0)
-
-		draw_rect(Rect2(bar_x - 14, neutral_y - 3, 28, 6), C_ORANGE)
-		draw_rect(Rect2(bar_x - 16, neutral_y - 5, 32, 10), C_ORANGE_DIM, false, 1.5)
-
-		var h_col = C_GREEN
-		if throttle < 0.48:   h_col = C_ORANGE
-		elif throttle > 0.95: h_col = C_TEAL
-		var hs = 72.0
-		_draw_space_button(Rect2(bar_x - hs * 0.5, handle_y - hs * 0.5, hs, hs), "", h_col, Color.TRANSPARENT, false, 0)
-
-		var tlbl = "NEUTRAL"
-		if   throttle > 0.52: tlbl = "FWD %d%%" % int((throttle - 0.5) * 200.0)
-		elif throttle < 0.48: tlbl = "REV %d%%" % int((0.5 - throttle) * 200.0)
-		draw_string(font, Vector2(bar_x + 48, handle_y + 6), tlbl, HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_CREAM)
-		draw_string(font, Vector2(bar_x - 40, bar_top - 14), "THROTTLE", HORIZONTAL_ALIGNMENT_LEFT, -1, HUDStyle.HUD_FONT_TINY, C_TEAL)
 
 	# ----- TOP-LEFT: RECENTER only (always visible) -----
 	_draw_space_button(_rect_recenter, "RECENTER", C_TEAL.darkened(0.45), C_TEAL, false, 11)
@@ -350,8 +296,8 @@ func _draw() -> void:
 	# ----- TELEMETRY HUD -----
 	# Hidden on mobile for now: the SPD/ALT chip was crowding the centred
 	# health bar above it and covering the chip from above.  Speed and warp
-	# state are already implied by the throttle slider and BOOST button; the
-	# alt readout can come back later as a smaller chip if needed.
+	# state are implied by the BOOST/BRAKE buttons; the alt readout can come
+	# back later as a smaller chip if needed.
 
 	if paused:
 		# Pause-mode now owned entirely by PauseMenuUI (centered modal).
@@ -482,19 +428,12 @@ func _input(event: InputEvent) -> void:
 		if pressed: _on_press(pos, index)
 		else:       _on_release(index)
 	elif event is InputEventScreenDrag:
-		if event.index == l_touch_idx:
-			_update_throttle_from_pos(event.position.y)
-			get_viewport().set_input_as_handled()
-		elif event.index == fire_touch or event.index == boost_touch \
+		if event.index == fire_touch or event.index == boost_touch \
 				or event.index == brake_touch or event.index == rolll_touch \
 				or event.index == rollr_touch:
 			get_viewport().set_input_as_handled()
 		else:
 			_on_press(event.position, event.index)
-	elif event is InputEventMouseMotion:
-		if l_dragging:
-			_update_throttle_from_pos(event.position.y)
-			get_viewport().set_input_as_handled()
 
 func _on_press(pos: Vector2, index: int) -> void:
 	var paused = get_tree().paused
@@ -551,17 +490,7 @@ func _on_press(pos: Vector2, index: int) -> void:
 		roll_held.emit(-1.0, true)
 		queue_redraw(); get_viewport().set_input_as_handled(); return
 
-	# Throttle (last priority, own hit area)
-	if _rect_throttle_hit.has_point(pos):
-		l_touch_idx = index; _set_throttle_dragging(true)
-		_update_throttle_from_pos(pos.y)
-		get_viewport().set_input_as_handled()
-
 func _on_release(index: int) -> void:
-	if index == l_touch_idx:
-		l_touch_idx = -1; _set_throttle_dragging(false)
-		get_viewport().set_input_as_handled(); return
-
 	# Pause-mode releases are no longer handled here — PauseMenuUI owns the
 	# modal and its buttons.  The corner PAUSE/RESUME toggle is still handled
 	# by _rect_menu in _on_press (synchronous toggle, no release tracking).
@@ -581,25 +510,3 @@ func _on_release(index: int) -> void:
 	if index == rollr_touch:
 		rollr_touch = -1; roll_held.emit(-1.0, false)
 		queue_redraw(); get_viewport().set_input_as_handled()
-
-func _set_throttle_dragging(active: bool) -> void:
-	if l_dragging == active: return
-	l_dragging = active
-	throttle_dragging_changed.emit(active)
-
-func _update_throttle_from_pos(y: float) -> void:
-	var v_size    = get_viewport_rect().size
-	var bar_h     = v_size.y * _THROTTLE_BAR_H_RATIO
-	var bar_y_cen = v_size.y * _THROTTLE_BAR_Y_CENTER_RATIO
-	var bar_top   = bar_y_cen - bar_h * 0.5
-	var bar_bot   = bar_y_cen + bar_h * 0.5
-	var raw_p     = clamp((bar_bot - y) / bar_h, 0.0, 1.0)
-	if abs(raw_p - 0.5) < 0.035: raw_p = 0.5
-	throttle = raw_p
-	throttle_changed.emit(throttle)
-	queue_redraw()
-
-func force_throttle(val: float) -> void:
-	throttle = clamp(val, 0.0, 1.0)
-	throttle_changed.emit(throttle)
-	queue_redraw()

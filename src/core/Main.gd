@@ -468,7 +468,7 @@ func _setup_hardened_diag_hud() -> void:
 	creds_chip.name = "CreditChip"
 	creds_chip.add_theme_stylebox_override("panel", HUDStyle.bevel_panel(HUDStyle.TIER_COLOR_4.darkened(0.15)))
 	creds_chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	creds_chip.modulate.a = 0.85
+	creds_chip.modulate.a = 1.0
 	hud_layer.add_child(creds_chip)
 	creds_chip.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_MINSIZE, 0)
 	creds_chip.position = Vector2(HUDStyle.CREDITS_OFFSET.x, HUDStyle.CREDITS_OFFSET.y)
@@ -504,7 +504,7 @@ func _setup_hardened_diag_hud() -> void:
 	inv_box.add_theme_constant_override("h_separation", HUDStyle.CHIP_GAP)
 	inv_box.add_theme_constant_override("v_separation", HUDStyle.CHIP_GAP)
 	inv_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	inv_box.modulate.a = 0.85
+	inv_box.modulate.a = 1.0
 	hud_layer.add_child(inv_box)
 	if MobilePerf.is_mobile():
 		# Mobile layout: centre the chip strip below the health bar (which is
